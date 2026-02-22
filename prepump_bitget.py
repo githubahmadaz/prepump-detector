@@ -54,18 +54,17 @@ TARGET_SYMBOLS = [
     "ZRXUSDT"
 ]
 
-# Pilih exchange: Bitget (dengan parameter yang benar untuk futures)
-EXCHANGE = ccxt.bitget({
+# Pilih exchange: Bybit (terbukti berhasil)
+EXCHANGE = ccxt.bybit({
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',        # untuk perpetual futures
-        'defaultSubType': 'linear',   # untuk USDT-M
+        'defaultType': 'linear',  # untuk USDT perpetual
     },
 })
 
 # ==================================================
 
-class PrePumpDetectorBitget:
+class PrePumpDetectorBybit:
     def __init__(self, target_symbols):
         self.exchange = EXCHANGE
         self.target_symbols = target_symbols
@@ -75,33 +74,28 @@ class PrePumpDetectorBitget:
         self.first_detected = {}
         self.alerted = set()
         
-        # Baca token dari environment variable (diisi di GitHub Secrets)
         self.telegram_token = os.environ.get("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         if not self.telegram_token or not self.telegram_chat_id:
             raise ValueError("TELEGRAM_TOKEN dan TELEGRAM_CHAT_ID harus diisi di environment variable")
 
     def init(self):
-        print("Memuat markets Bitget (futures USDT)...")
+        print("Memuat markets Bybit (USDT perpetual)...")
         self.exchange.load_markets()
         
-        # Filter hanya simbol yang ada di target dan tersedia di exchange
         for symbol in self.target_symbols:
-            # Cek apakah simbol ada di markets exchange
             if symbol in self.exchange.markets:
                 market = self.exchange.markets[symbol]
-                # Pastikan ini adalah USDT swap (futures)
-                if market['quote'] == 'USDT' and market['swap'] and market['linear']:
+                if market['quote'] == 'USDT' and market['linear'] and market['swap']:
                     self.symbols.append(symbol)
                     print(f"✓ {symbol} ditambahkan")
                 else:
-                    print(f"✗ {symbol} bukan USDT swap (futures), dilewati")
+                    print(f"✗ {symbol} bukan USDT perpetual, dilewati")
             else:
-                print(f"✗ {symbol} tidak ditemukan di Bitget, periksa penulisan simbol")
+                print(f"✗ {symbol} tidak ditemukan di Bybit, periksa penulisan simbol")
         
         print(f"\nTotal {len(self.symbols)} pair yang akan dipantau: {self.symbols}")
         
-        # Inisialisasi history untuk setiap simbol
         for symbol in self.symbols:
             self.history[symbol] = {
                 'timestamp': [], 'close': [], 'high': [], 'low': [], 'volume': [],
@@ -136,7 +130,6 @@ class PrePumpDetectorBitget:
             return None
 
     def update_all_data(self):
-        # Update BTC dulu (untuk filter BTC)
         btc_data = self.fetch_ohlcv('BTCUSDT', limit=100)
         if btc_data:
             for candle in btc_data:
@@ -149,7 +142,6 @@ class PrePumpDetectorBitget:
             for key in self.btc_history:
                 self.btc_history[key] = self.btc_history[key][-100:]
 
-        # Update semua simbol target
         for symbol in self.symbols:
             self.update_symbol_data(symbol)
 
@@ -295,12 +287,10 @@ class PrePumpDetectorBitget:
             print(f"Error kirim Telegram: {e}")
 
     def run_once(self):
-        """Jalankan satu siklus deteksi (untuk cron job)"""
         try:
             print(f"\n{datetime.now().isoformat()} - Memperbarui data...")
             self.update_all_data()
 
-            # Filter BTC trending
             if len(self.btc_history['close']) >= 20:
                 btc_ema = pd.Series(self.btc_history['close']).ewm(span=20).mean().values
                 ema_slope = (btc_ema[-1] - btc_ema[-20]) / btc_ema[-20]
@@ -380,6 +370,6 @@ class PrePumpDetectorBitget:
 
 
 if __name__ == "__main__":
-    detector = PrePumpDetectorBitget(TARGET_SYMBOLS)
+    detector = PrePumpDetectorBybit(TARGET_SYMBOLS)
     detector.init()
     detector.run_once()
