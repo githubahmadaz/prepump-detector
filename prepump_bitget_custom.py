@@ -150,9 +150,9 @@ class PrePumpDetectorBitgetCustom:
         return None
 
     def fetch_funding(self, symbol):
-        """Ambil funding rate via endpoint yang benar"""
+        """Ambil funding rate terkini via endpoint yang benar"""
         params = {"symbol": symbol, "productType": "USDT-FUTURES"}
-        data = self._request("/api/v2/mix/market/funding-rate", params)
+        data = self._request("/api/v2/mix/market/current-fund-rate", params)  # ← endpoint yang benar
         if data and isinstance(data, list) and len(data) > 0:
             try:
                 return float(data[0].get('fundingRate', 0))
@@ -205,7 +205,7 @@ class PrePumpDetectorBitgetCustom:
             self.history[symbol]['funding'].append(funding)
             self.history[symbol]['funding'] = self.history[symbol]['funding'][-100:]
 
-    # ========== Kriteria deteksi (sama seperti sebelumnya) ==========
+    # ========== Kriteria deteksi ==========
     def calculate_atr(self, highs, lows, closes, period=10):
         if len(highs) < period+1:
             return None
