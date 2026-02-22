@@ -7,238 +7,60 @@ import os
 import requests
 
 # ================== KONFIGURASI ==================
-# DAFTAR COIN YANG INGIN DIPANTAU (sudah dilengkapi USDT)
+# DAFTAR COIN (TULIS SEPERTI INI: "BTCUSDT", "ETHUSDT", DLL)
 TARGET_SYMBOLS = [
-    "0GUSDT",
-    "1000BONKUSDT",
-    "1000RATSUSDT",
-    "1000SATSUSDT",
-    "1MBABYDOGEUSDT",
-    "AAVEUSDT",
-    "ACHUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
     "ADAUSDT",
-    "AEROUSDT",
-    "AKTUSDT",
-    "ALCHUSDT",
-    "ALGOUSDT",
-    "ANKRUSDT",
-    "APEUSDT",
+    "DOGEUSDT",
+    "DOTUSDT",
+    "LINKUSDT",
+    "MATICUSDT",
+    "AVAXUSDT",
+    "UNIUSDT",
+    "ATOMUSDT",
+    "ETCUSDT",
+    "FILUSDT",
+    "ICPUSDT",
+    "NEARUSDT",
     "APTUSDT",
     "ARBUSDT",
-    "ARCUSDT",
-    "ASTERUSDT",
-    "ASTRUSDT",
-    "ATUSDT",
-    "ATHUSDT",
-    "ATOMUSDT",
-    "AVAXUSDT",
-    "AVNTUSDT",
-    "AWEUSDT",
-    "AXLUSDT",
-    "AXSUSDT",
-    "AZTECUSDT",
-    "BUSDT",
-    "B2USDT",
-    "BANUSDT",
-    "BANANAS31USDT",
-    "BARDUSDT",
-    "BATUSDT",
-    "BEATUSDT",
-    "BERAUSDT",
-    "BGBUSDT",
-    "BIOUSDT",
-    "BIRBUSDT",
-    "BLURUSDT",
-    "BRETTUSDT",
-    "BSVUSDT",
-    "CAKEUSDT",
-    "CELOUSDT",
-    "CFXUSDT",
-    "CHZUSDT",
-    "COAIUSDT",
-    "COINUSDT",
-    "COMPUSDT",
-    "COWUSDT",
-    "CROUSDT",
-    "CRVUSDT",
-    "CVXUSDT",
-    "CYSUSDT",
-    "DASHUSDT",
-    "DEEPUSDT",
-    "DEXEUSDT",
-    "DOTUSDT",
-    "DRIFTUSDT",
-    "DYDXUSDT",
-    "EGLDUSDT",
-    "EIGENUSDT",
-    "ENAUSDT",
-    "ENSUSDT",
-    "ENSOUSDT",
-    "ETCUSDT",
-    "ETHFIUSDT",
-    "FARTCOINUSDT",
-    "FETUSDT",
-    "FFUSDT",
-    "FILUSDT",
-    "FLOKIUSDT",
-    "FLUIDUSDT",
-    "FOGOUSDT",
-    "FORMUSDT",
-    "GALAUSDT",
-    "GASUSDT",
-    "GLMUSDT",
-    "GPSUSDT",
-    "GRASSUSDT",
-    "GRTUSDT",
-    "GUNUSDT",
-    "GWEIUSDT",
-    "HUSDT",
-    "HBARUSDT",
-    "HNTUSDT",
-    "HOMEUSDT",
-    "HYPEUSDT",
-    "ICNTUSDT",
-    "ICPUSDT",
-    "IDUSDT",
-    "IMXUSDT",
-    "INJUSDT",
-    "IOTAUSDT",
-    "IPUSDT",
-    "IRYSUSDT",
-    "JASMYUSDT",
-    "JSTUSDT",
-    "JTOUSDT",
-    "JUPUSDT",
-    "KAIAUSDT",
-    "KAITOUSDT",
-    "KASUSDT",
-    "KITEUSDT",
-    "KMNOUSDT",
-    "KSMUSDT",
-    "LDOUSDT",
-    "LINEAUSDT",
-    "LINKUSDT",
-    "LITUSDT",
-    "LPTUSDT",
-    "LRCUSDT",
-    "LTCUSDT",
-    "LUNAUSDT",
-    "LUNCUSDT",
-    "LYNUSDT",
-    "MUSDT",
-    "MANAUSDT",
-    "MASKUSDT",
-    "MEUSDT",
-    "MEMEUSDT",
-    "MERLUSDT",
-    "MINAUSDT",
-    "MOCAUSDT",
-    "MONUSDT",
-    "MOODENGUSDT",
-    "MORPHOUSDT",
-    "MOVEUSDT",
-    "MYXUSDT",
-    "NEARUSDT",
-    "NEOUSDT",
-    "NIGHTUSDT",
-    "NMRUSDT",
-    "NXPCUSDT",
-    "ONDOUSDT",
     "OPUSDT",
-    "ORCAUSDT",
-    "ORDIUSDT",
-    "PARTIUSDT",
-    "PAXGUSDT",
-    "PENDLEUSDT",
-    "PENGUUSDT",
     "PEPEUSDT",
-    "PIEVERSEUSDT",
-    "PIPPINUSDT",
-    "PLUMEUSDT",
-    "PNUTUSDT",
-    "POLUSDT",
-    "POLYXUSDT",
-    "POPCATUSDT",
-    "POWERUSDT",
-    "PUMPUSDT",
-    "PYTHUSDT",
-    "QUSDT",
-    "QNTUSDT",
-    "RAVEUSDT",
-    "RAYUSDT",
-    "RENDERUSDT",
-    "RIVERUSDT",
-    "ROSEUSDT",
-    "RPLUSDT",
-    "RSRUSDT",
-    "RUNEUSDT",
-    "SUSDT",
-    "SAHARAUSDT",
-    "SANDUSDT",
-    "SEIUSDT",
-    "SENTUSDT",
-    "SHIBUSDT",
-    "SIGNUSDT",
-    "SIRENUSDT",
-    "SKRUSDT",
-    "SKYUSDT",
-    "SNXUSDT",
-    "SOMIUSDT",
-    "SOONUSDT",
-    "SPKUSDT",
-    "SPXUSDT",
-    "SSVUSDT",
-    "STABLEUSDT",
-    "STGUSDT",
-    "STRKUSDT",
-    "STXUSDT",
-    "SUIUSDT",
-    "SUPERUSDT",
-    "TUSDT",
-    "TAGUSDT",
-    "TAOUSDT",
-    "THETAUSDT",
-    "TIAUSDT",
-    "TONUSDT",
-    "TOSHIUSDT",
-    "TRBUSDT",
-    "TRUMPUSDT",
-    "TURBOUSDT",
-    "UAIUSDT",
-    "UBUSDT",
-    "UMAUSDT",
-    "UNIUSDT",
-    "VANAUSDT",
-    "VETUSDT",
-    "VIRTUALUSDT",
-    "VTHOUSDT",
-    "VVVUSDT",
-    "WUSDT",
-    "WALUSDT",
     "WIFUSDT",
+    "BONKUSDT",
+    "JTOUSDT",
+    "ENAUSDT",
+    "FETUSDT",
+    "RNDRUSDT",
+    "TAOUSDT",
+    "INJUSDT",
+    "SEIUSDT",
+    "SUIUSDT",
+    "TIAUSDT",
     "WLDUSDT",
-    "WLFIUSDT",
-    "XAUTUSDT",
-    "XDCUSDT",
-    "XLMUSDT",
-    "XMRUSDT",
-    "XPLUSDT",
-    "XTZUSDT",
-    "XVGUSDT",
-    "ZAMAUSDT",
+    "ONDOUSDT",
+    "STRKUSDT",
+    "ZROUSDT",
+    "JUPUSDT",
+    "PYTHUSDT",
+    "LITUSDT",
     "ZECUSDT",
     "ZENUSDT",
-    "ZETAUSDT",
     "ZILUSDT",
-    "ZORAUSDT",
-    "ZROUSDT",
     "ZRXUSDT"
 ]
 
-# Pilih exchange: Bitget
+# Pilih exchange: Bitget (dengan parameter yang benar untuk futures)
 EXCHANGE = ccxt.bitget({
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap'},  # swap untuk futures
+    'options': {
+        'defaultType': 'swap',        # untuk perpetual futures
+        'defaultSubType': 'linear',   # untuk USDT-M
+    },
 })
 
 # ==================================================
@@ -247,20 +69,20 @@ class PrePumpDetectorBitget:
     def __init__(self, target_symbols):
         self.exchange = EXCHANGE
         self.target_symbols = target_symbols
-        self.symbols = []  # akan diisi dengan simbol yang valid
+        self.symbols = []
         self.history = {}
         self.btc_history = {'timestamp': [], 'close': [], 'high': [], 'low': [], 'volume': []}
         self.first_detected = {}
         self.alerted = set()
         
-        # Baca token dari environment variable
+        # Baca token dari environment variable (diisi di GitHub Secrets)
         self.telegram_token = os.environ.get("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         if not self.telegram_token or not self.telegram_chat_id:
             raise ValueError("TELEGRAM_TOKEN dan TELEGRAM_CHAT_ID harus diisi di environment variable")
 
     def init(self):
-        print("Memuat markets Bitget...")
+        print("Memuat markets Bitget (futures USDT)...")
         self.exchange.load_markets()
         
         # Filter hanya simbol yang ada di target dan tersedia di exchange
@@ -269,11 +91,11 @@ class PrePumpDetectorBitget:
             if symbol in self.exchange.markets:
                 market = self.exchange.markets[symbol]
                 # Pastikan ini adalah USDT swap (futures)
-                if market['quote'] == 'USDT' and market['swap']:
+                if market['quote'] == 'USDT' and market['swap'] and market['linear']:
                     self.symbols.append(symbol)
                     print(f"✓ {symbol} ditambahkan")
                 else:
-                    print(f"✗ {symbol} bukan USDT swap, dilewati")
+                    print(f"✗ {symbol} bukan USDT swap (futures), dilewati")
             else:
                 print(f"✗ {symbol} tidak ditemukan di Bitget, periksa penulisan simbol")
         
@@ -473,6 +295,7 @@ class PrePumpDetectorBitget:
             print(f"Error kirim Telegram: {e}")
 
     def run_once(self):
+        """Jalankan satu siklus deteksi (untuk cron job)"""
         try:
             print(f"\n{datetime.now().isoformat()} - Memperbarui data...")
             self.update_all_data()
