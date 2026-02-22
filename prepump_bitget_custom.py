@@ -8,237 +8,50 @@ import json
 
 # ================== KONFIGURASI ==================
 TARGET_SYMBOLS = [
-        "0GUSDT",
-    "1000BONKUSDT",
-    "1000RATSUSDT",
-    "1000SATSUSDT",
-    "1MBABYDOGEUSDT",
-    "AAVEUSDT",
-    "ACHUSDT",
-    "ADAUSDT",
-    "AEROUSDT",
-    "AKTUSDT",
-    "ALCHUSDT",
-    "ALGOUSDT",
-    "ANKRUSDT",
-    "APEUSDT",
-    "APTUSDT",
-    "ARBUSDT",
-    "ARCUSDT",
-    "ASTERUSDT",
-    "ASTRUSDT",
-    "ATUSDT",
-    "ATHUSDT",
-    "ATOMUSDT",
-    "AVAXUSDT",
-    "AVNTUSDT",
-    "AWEUSDT",
-    "AXLUSDT",
-    "AXSUSDT",
-    "AZTECUSDT",
-    "BUSDT",
-    "B2USDT",
-    "BANUSDT",
-    "BANANAS31USDT",
-    "BARDUSDT",
-    "BATUSDT",
-    "BEATUSDT",
-    "BERAUSDT",
-    "BGBUSDT",
-    "BIOUSDT",
-    "BIRBUSDT",
-    "BLURUSDT",
-    "BRETTUSDT",
-    "BSVUSDT",
-    "CAKEUSDT",
-    "CELOUSDT",
-    "CFXUSDT",
-    "CHZUSDT",
-    "COAIUSDT",
-    "COINUSDT",
-    "COMPUSDT",
-    "COWUSDT",
-    "CROUSDT",
-    "CRVUSDT",
-    "CVXUSDT",
-    "CYSUSDT",
-    "DASHUSDT",
-    "DEEPUSDT",
-    "DEXEUSDT",
-    "DOTUSDT",
-    "DRIFTUSDT",
-    "DYDXUSDT",
-    "EGLDUSDT",
-    "EIGENUSDT",
-    "ENAUSDT",
-    "ENSUSDT",
-    "ENSOUSDT",
-    "ETCUSDT",
-    "ETHFIUSDT",
-    "FARTCOINUSDT",
-    "FETUSDT",
-    "FFUSDT",
-    "FILUSDT",
-    "FLOKIUSDT",
-    "FLUIDUSDT",
-    "FOGOUSDT",
-    "FORMUSDT",
-    "GALAUSDT",
-    "GASUSDT",
-    "GLMUSDT",
-    "GPSUSDT",
-    "GRASSUSDT",
-    "GRTUSDT",
-    "GUNUSDT",
-    "GWEIUSDT",
-    "HUSDT",
-    "HBARUSDT",
-    "HNTUSDT",
-    "HOMEUSDT",
-    "HYPEUSDT",
-    "ICNTUSDT",
-    "ICPUSDT",
-    "IDUSDT",
-    "IMXUSDT",
-    "INJUSDT",
-    "IOTAUSDT",
-    "IPUSDT",
-    "IRYSUSDT",
-    "JASMYUSDT",
-    "JSTUSDT",
-    "JTOUSDT",
-    "JUPUSDT",
-    "KAIAUSDT",
-    "KAITOUSDT",
-    "KASUSDT",
-    "KITEUSDT",
-    "KMNOUSDT",
-    "KSMUSDT",
-    "LDOUSDT",
-    "LINEAUSDT",
-    "LINKUSDT",
-    "LITUSDT",
-    "LPTUSDT",
-    "LRCUSDT",
-    "LTCUSDT",
-    "LUNAUSDT",
-    "LUNCUSDT",
-    "LYNUSDT",
-    "MUSDT",
-    "MANAUSDT",
-    "MASKUSDT",
-    "MEUSDT",
-    "MEMEUSDT",
-    "MERLUSDT",
-    "MINAUSDT",
-    "MOCAUSDT",
-    "MONUSDT",
-    "MOODENGUSDT",
-    "MORPHOUSDT",
-    "MOVEUSDT",
-    "MYXUSDT",
-    "NEARUSDT",
-    "NEOUSDT",
-    "NIGHTUSDT",
-    "NMRUSDT",
-    "NXPCUSDT",
-    "ONDOUSDT",
-    "OPUSDT",
-    "ORCAUSDT",
-    "ORDIUSDT",
-    "PARTIUSDT",
-    "PAXGUSDT",
-    "PENDLEUSDT",
-    "PENGUUSDT",
-    "PEPEUSDT",
-    "PIEVERSEUSDT",
-    "PIPPINUSDT",
-    "PLUMEUSDT",
-    "PNUTUSDT",
-    "POLUSDT",
-    "POLYXUSDT",
-    "POPCATUSDT",
-    "POWERUSDT",
-    "PUMPUSDT",
-    "PYTHUSDT",
-    "QUSDT",
-    "QNTUSDT",
-    "RAVEUSDT",
-    "RAYUSDT",
-    "RENDERUSDT",
-    "RIVERUSDT",
-    "ROSEUSDT",
-    "RPLUSDT",
-    "RSRUSDT",
-    "RUNEUSDT",
-    "SUSDT",
-    "SAHARAUSDT",
-    "SANDUSDT",
-    "SEIUSDT",
-    "SENTUSDT",
-    "SHIBUSDT",
-    "SIGNUSDT",
-    "SIRENUSDT",
-    "SKRUSDT",
-    "SKYUSDT",
-    "SNXUSDT",
-    "SOMIUSDT",
-    "SOONUSDT",
-    "SPKUSDT",
-    "SPXUSDT",
-    "SSVUSDT",
-    "STABLEUSDT",
-    "STGUSDT",
-    "STRKUSDT",
-    "STXUSDT",
-    "SUIUSDT",
-    "SUPERUSDT",
-    "TUSDT",
-    "TAGUSDT",
-    "TAOUSDT",
-    "THETAUSDT",
-    "TIAUSDT",
-    "TONUSDT",
-    "TOSHIUSDT",
-    "TRBUSDT",
-    "TRUMPUSDT",
-    "TURBOUSDT",
-    "UAIUSDT",
-    "UBUSDT",
-    "UMAUSDT",
-    "UNIUSDT",
-    "VANAUSDT",
-    "VETUSDT",
-    "VIRTUALUSDT",
-    "VTHOUSDT",
-    "VVVUSDT",
-    "WUSDT",
-    "WALUSDT",
-    "WIFUSDT",
-    "WLDUSDT",
-    "WLFIUSDT",
-    "XAUTUSDT",
-    "XDCUSDT",
-    "XLMUSDT",
-    "XMRUSDT",
-    "XPLUSDT",
-    "XTZUSDT",
-    "XVGUSDT",
-    "ZAMAUSDT",
-    "ZECUSDT",
-    "ZENUSDT",
-    "ZETAUSDT",
-    "ZILUSDT",
-    "ZORAUSDT",
-    "ZROUSDT",
-    "ZRXUSDT"
-
+    "0GUSDT", "1000BONKUSDT", "1000RATSUSDT", "1000SATSUSDT", "1MBABYDOGEUSDT",
+    "AAVEUSDT", "ACHUSDT", "ADAUSDT", "AEROUSDT", "AKTUSDT", "ALCHUSDT",
+    "ALGOUSDT", "ANKRUSDT", "APEUSDT", "APTUSDT", "ARBUSDT", "ARCUSDT",
+    "ASTERUSDT", "ASTRUSDT", "ATUSDT", "ATHUSDT", "ATOMUSDT", "AVAXUSDT",
+    "AVNTUSDT", "AWEUSDT", "AXLUSDT", "AXSUSDT", "AZTECUSDT", "BUSDT",
+    "B2USDT", "BANUSDT", "BANANAS31USDT", "BARDUSDT", "BATUSDT", "BEATUSDT",
+    "BERAUSDT", "BGBUSDT", "BIOUSDT", "BIRBUSDT", "BLURUSDT", "BRETTUSDT",
+    "BSVUSDT", "CAKEUSDT", "CELOUSDT", "CFXUSDT", "CHZUSDT", "COAIUSDT",
+    "COINUSDT", "COMPUSDT", "COWUSDT", "CROUSDT", "CRVUSDT", "CVXUSDT",
+    "CYSUSDT", "DASHUSDT", "DEEPUSDT", "DEXEUSDT", "DOTUSDT", "DRIFTUSDT",
+    "DYDXUSDT", "EGLDUSDT", "EIGENUSDT", "ENAUSDT", "ENSUSDT", "ENSOUSDT",
+    "ETCUSDT", "ETHFIUSDT", "FARTCOINUSDT", "FETUSDT", "FFUSDT", "FILUSDT",
+    "FLOKIUSDT", "FLUIDUSDT", "FOGOUSDT", "FORMUSDT", "GALAUSDT", "GASUSDT",
+    "GLMUSDT", "GPSUSDT", "GRASSUSDT", "GRTUSDT", "GUNUSDT", "GWEIUSDT",
+    "HUSDT", "HBARUSDT", "HNTUSDT", "HOMEUSDT", "HYPEUSDT", "ICNTUSDT",
+    "ICPUSDT", "IDUSDT", "IMXUSDT", "INJUSDT", "IOTAUSDT", "IPUSDT",
+    "IRYSUSDT", "JASMYUSDT", "JSTUSDT", "JTOUSDT", "JUPUSDT", "KAIAUSDT",
+    "KAITOUSDT", "KASUSDT", "KITEUSDT", "KMNOUSDT", "KSMUSDT", "LDOUSDT",
+    "LINEAUSDT", "LINKUSDT", "LITUSDT", "LPTUSDT", "LRCUSDT", "LTCUSDT",
+    "LUNAUSDT", "LUNCUSDT", "LYNUSDT", "MUSDT", "MANAUSDT", "MASKUSDT",
+    "MEUSDT", "MEMEUSDT", "MERLUSDT", "MINAUSDT", "MOCAUSDT", "MONUSDT",
+    "MOODENGUSDT", "MORPHOUSDT", "MOVEUSDT", "MYXUSDT", "NEARUSDT", "NEOUSDT",
+    "NIGHTUSDT", "NMRUSDT", "NXPCUSDT", "ONDOUSDT", "OPUSDT", "ORCAUSDT",
+    "ORDIUSDT", "PARTIUSDT", "PAXGUSDT", "PENDLEUSDT", "PENGUUSDT", "PEPEUSDT",
+    "PIEVERSEUSDT", "PIPPINUSDT", "PLUMEUSDT", "PNUTUSDT", "POLUSDT", "POLYXUSDT",
+    "POPCATUSDT", "POWERUSDT", "PUMPUSDT", "PYTHUSDT", "QUSDT", "QNTUSDT",
+    "RAVEUSDT", "RAYUSDT", "RENDERUSDT", "RIVERUSDT", "ROSEUSDT", "RPLUSDT",
+    "RSRUSDT", "RUNEUSDT", "SUSDT", "SAHARAUSDT", "SANDUSDT", "SEIUSDT",
+    "SENTUSDT", "SHIBUSDT", "SIGNUSDT", "SIRENUSDT", "SKRUSDT", "SKYUSDT",
+    "SNXUSDT", "SOMIUSDT", "SOONUSDT", "SPKUSDT", "SPXUSDT", "SSVUSDT",
+    "STABLEUSDT", "STGUSDT", "STRKUSDT", "STXUSDT", "SUIUSDT", "SUPERUSDT",
+    "TUSDT", "TAGUSDT", "TAOUSDT", "THETAUSDT", "TIAUSDT", "TONUSDT",
+    "TOSHIUSDT", "TRBUSDT", "TRUMPUSDT", "TURBOUSDT", "UAIUSDT", "UBUSDT",
+    "UMAUSDT", "UNIUSDT", "VANAUSDT", "VETUSDT", "VIRTUALUSDT", "VTHOUSDT",
+    "VVVUSDT", "WUSDT", "WALUSDT", "WIFUSDT", "WLDUSDT", "WLFIUSDT",
+    "XAUTUSDT", "XDCUSDT", "XLMUSDT", "XMRUSDT", "XPLUSDT", "XTZUSDT",
+    "XVGUSDT", "ZAMAUSDT", "ZECUSDT", "ZENUSDT", "ZETAUSDT", "ZILUSDT",
+    "ZORAUSDT", "ZROUSDT", "ZRXUSDT"
 ]
 
-# Base URL untuk API Bitget futures
+# Base URL
 BASE_URL = "https://api.bitget.com"
 
-# Header untuk request (bisa ditambah jika perlu)
+# Header umum
 HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0"
@@ -249,20 +62,19 @@ HEADERS = {
 class PrePumpDetectorBitgetCustom:
     def __init__(self, target_symbols):
         self.target_symbols = target_symbols
-        self.symbols = []  # akan diisi dengan simbol yang valid
+        self.symbols = []
         self.history = {}
         self.btc_history = {'timestamp': [], 'close': [], 'high': [], 'low': [], 'volume': []}
         self.first_detected = {}
         self.alerted = set()
         
-        # Baca token dari environment variable
         self.telegram_token = os.environ.get("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         if not self.telegram_token or not self.telegram_chat_id:
             raise ValueError("TELEGRAM_TOKEN dan TELEGRAM_CHAT_ID harus diisi di environment variable")
 
-    def _request(self, endpoint, params=None):
-        """Helper untuk melakukan GET request ke API Bitget"""
+    def _request_v2(self, endpoint, params=None):
+        """Request ke API v2 (untuk daftar kontrak)"""
         url = BASE_URL + endpoint
         try:
             resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
@@ -271,39 +83,58 @@ class PrePumpDetectorBitgetCustom:
                 if data.get('code') == '00000':
                     return data['data']
                 else:
-                    print(f"API error: {data}")
+                    print(f"API v2 error: {data}")
                     return None
             else:
                 print(f"HTTP {resp.status_code}: {resp.text}")
                 return None
         except Exception as e:
-            print(f"Request error: {e}")
+            print(f"Request v2 error: {e}")
+            return None
+
+    def _request_v1(self, endpoint, params=None):
+        """Request ke API v1 (untuk data market)"""
+        url = BASE_URL + endpoint
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                # V1 biasanya mengembalikan langsung data tanpa kode, atau dengan kode di dalam
+                # Coba handle berbagai format
+                if isinstance(data, dict) and data.get('code') == '00000':
+                    return data['data']
+                elif isinstance(data, dict) and data.get('data') is not None:
+                    return data['data']
+                else:
+                    # Mungkin langsung data list
+                    return data
+            else:
+                print(f"HTTP {resp.status_code} untuk {endpoint}: {resp.text}")
+                return None
+        except Exception as e:
+            print(f"Request v1 error: {e}")
             return None
 
     def init(self):
-        """Memuat daftar kontrak futures dari Bitget untuk memverifikasi simbol"""
-        print("Memuat daftar kontrak futures Bitget...")
-        # Ambil daftar semua kontrak USDT-M
-        contracts = self._request("/api/v2/mix/market/contracts", params={"productType": "USDT-FUTURES"})
+        """Memuat daftar kontrak futures via v2"""
+        print("Memuat daftar kontrak futures Bitget (v2)...")
+        contracts = self._request_v2("/api/v2/mix/market/contracts", params={"productType": "USDT-FUTURES"})
         if contracts is None:
             print("Gagal memuat kontrak. Periksa koneksi.")
             return
         
-        # Buat set simbol yang tersedia
         available = {c['symbol'] for c in contracts}
         print(f"Total kontrak USDT-M tersedia: {len(available)}")
         
-        # Filter simbol target
         for symbol in self.target_symbols:
             if symbol in available:
                 self.symbols.append(symbol)
                 print(f"✓ {symbol} tersedia")
             else:
-                print(f"✗ {symbol} tidak tersedia di Bitget futures")
+                print(f"✗ {symbol} tidak tersedia")
         
         print(f"\nTotal {len(self.symbols)} pair yang akan dipantau: {self.symbols}")
         
-        # Inisialisasi history untuk setiap simbol
         for symbol in self.symbols:
             self.history[symbol] = {
                 'timestamp': [], 'close': [], 'high': [], 'low': [], 'volume': [],
@@ -311,20 +142,20 @@ class PrePumpDetectorBitgetCustom:
             }
 
     def fetch_ohlcv(self, symbol, limit=100):
-        """Ambil data candlestick 5m"""
+        """Ambil candlestick via v1"""
         params = {
             "symbol": symbol,
             "granularity": "5m",
             "limit": limit
         }
-        data = self._request("/api/v2/mix/market/candles", params)
-        if not data:
+        data = self._request_v1("/api/mix/v1/market/candles", params)
+        if not data or not isinstance(data, list):
             return None
         
-        # Data dari API: [timestamp, open, high, low, close, volume, turnOver]
         ohlcv = []
         for candle in data:
             try:
+                # Format v1: [timestamp, open, high, low, close, volume, turnOver]
                 ts = int(candle[0])
                 o = float(candle[1])
                 h = float(candle[2])
@@ -337,35 +168,34 @@ class PrePumpDetectorBitgetCustom:
         return ohlcv
 
     def fetch_oi(self, symbol):
-        """Ambil open interest terkini"""
-        data = self._request("/api/v2/mix/market/open-interest", params={"symbol": symbol})
-        if data and len(data) > 0:
+        """Ambil open interest via v1"""
+        data = self._request_v1("/api/mix/v1/market/open-interest", params={"symbol": symbol})
+        if data and isinstance(data, dict):
             try:
-                return float(data[0]['openInterest'])
+                return float(data.get('openInterest', 0))
             except:
                 return None
         return None
 
     def fetch_funding(self, symbol):
-        """Ambil funding rate terkini"""
-        data = self._request("/api/v2/mix/market/current-funding-rate", params={"symbol": symbol})
-        if data and len(data) > 0:
+        """Ambil funding rate via v1"""
+        data = self._request_v1("/api/mix/v1/market/current-funding-rate", params={"symbol": symbol})
+        if data and isinstance(data, dict):
             try:
-                return float(data[0]['fundingRate'])
+                return float(data.get('fundingRate', 0))
             except:
                 return None
         return None
 
     def fetch_orderbook(self, symbol, limit=100):
-        """Ambil order book"""
-        data = self._request("/api/v2/mix/market/depth", params={"symbol": symbol, "limit": limit})
-        if data:
-            # Format: bids dan asks masing-masing list of [price, quantity]
-            return data
+        """Ambil order book via v1"""
+        params = {"symbol": symbol, "limit": limit}
+        data = self._request_v1("/api/mix/v1/market/depth", params)
+        if data and isinstance(data, dict):
+            return data  # berisi bids dan asks
         return None
 
     def update_all_data(self):
-        # Update BTC dulu
         btc_data = self.fetch_ohlcv('BTCUSDT', limit=100)
         if btc_data:
             for candle in btc_data:
@@ -378,12 +208,10 @@ class PrePumpDetectorBitgetCustom:
             for key in self.btc_history:
                 self.btc_history[key] = self.btc_history[key][-100:]
 
-        # Update setiap simbol
         for symbol in self.symbols:
             self.update_symbol_data(symbol)
 
     def update_symbol_data(self, symbol):
-        # OHLCV
         ohlcv = self.fetch_ohlcv(symbol, limit=100)
         if ohlcv:
             ts, o, h, l, c, v = ohlcv[-1]
@@ -392,22 +220,20 @@ class PrePumpDetectorBitgetCustom:
             self.history[symbol]['high'].append(h)
             self.history[symbol]['low'].append(l)
             self.history[symbol]['volume'].append(v)
-            # Batasi history
             for key in ['timestamp', 'close', 'high', 'low', 'volume']:
                 self.history[symbol][key] = self.history[symbol][key][-100:]
 
-        # OI
         oi = self.fetch_oi(symbol)
         if oi is not None:
             self.history[symbol]['oi'].append(oi)
             self.history[symbol]['oi'] = self.history[symbol]['oi'][-100:]
 
-        # Funding
         funding = self.fetch_funding(symbol)
         if funding is not None:
             self.history[symbol]['funding'].append(funding)
             self.history[symbol]['funding'] = self.history[symbol]['funding'][-100:]
 
+    # ========== Kriteria deteksi (sama seperti sebelumnya) ==========
     def calculate_atr(self, highs, lows, closes, period=10):
         if len(highs) < period+1:
             return None
@@ -532,7 +358,6 @@ class PrePumpDetectorBitgetCustom:
             print(f"\n{datetime.now().isoformat()} - Memperbarui data...")
             self.update_all_data()
 
-            # Filter BTC trending
             if len(self.btc_history['close']) >= 20:
                 btc_ema = pd.Series(self.btc_history['close']).ewm(span=20).mean().values
                 ema_slope = (btc_ema[-1] - btc_ema[-20]) / btc_ema[-20]
