@@ -4,8 +4,8 @@ import time
 # ==============================
 # ⚙️ TELEGRAM CONFIG
 # ==============================
-BOT_TOKEN = "ISI_BOT_TOKEN"
-CHAT_ID = "ISI_CHAT_ID"
+BOT_TOKEN = "8313562725:AAHBczdbML0-htf6fYb0upk9ZMIHEz8vw4I"
+CHAT_ID = "5351495323"
 
 # ==============================
 # ⚙️ TELEGRAM SENDER
