@@ -7,64 +7,25 @@ import os
 import requests
 
 # ================== KONFIGURASI ==================
-# DAFTAR COIN (TULIS SEPERTI INI: "BTCUSDT", "ETHUSDT", DLL)
 TARGET_SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "BNBUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "ADAUSDT",
-    "DOGEUSDT",
-    "DOTUSDT",
-    "LINKUSDT",
-    "MATICUSDT",
-    "AVAXUSDT",
-    "UNIUSDT",
-    "ATOMUSDT",
-    "ETCUSDT",
-    "FILUSDT",
-    "ICPUSDT",
-    "NEARUSDT",
-    "APTUSDT",
-    "ARBUSDT",
-    "OPUSDT",
-    "PEPEUSDT",
-    "WIFUSDT",
-    "BONKUSDT",
-    "JTOUSDT",
-    "ENAUSDT",
-    "FETUSDT",
-    "RNDRUSDT",
-    "TAOUSDT",
-    "INJUSDT",
-    "SEIUSDT",
-    "SUIUSDT",
-    "TIAUSDT",
-    "WLDUSDT",
-    "ONDOUSDT",
-    "STRKUSDT",
-    "ZROUSDT",
-    "JUPUSDT",
-    "PYTHUSDT",
-    "LITUSDT",
-    "ZECUSDT",
-    "ZENUSDT",
-    "ZILUSDT",
-    "ZRXUSDT"
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT",
+    "AVAXUSDT", "UNIUSDT", "ATOMUSDT", "ETCUSDT", "FILUSDT",
+    "ICPUSDT", "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT",
+    "PEPEUSDT", "WIFUSDT", "BONKUSDT", "JTOUSDT", "ENAUSDT",
+    "FETUSDT", "RNDRUSDT", "TAOUSDT", "INJUSDT", "SEIUSDT",
+    "SUIUSDT", "TIAUSDT", "WLDUSDT", "ONDOUSDT", "STRKUSDT",
+    "ZROUSDT", "JUPUSDT", "PYTHUSDT", "LITUSDT", "ZECUSDT",
+    "ZENUSDT", "ZILUSDT", "ZRXUSDT"
 ]
 
-# Pilih exchange: Bybit (terbukti berhasil)
-EXCHANGE = ccxt.bybit({
+EXCHANGE = ccxt.okx({
     'enableRateLimit': True,
-    'options': {
-        'defaultType': 'linear',  # untuk USDT perpetual
-    },
+    'options': {'defaultType': 'swap'},  # swap untuk futures di OKX
 })
-
 # ==================================================
 
-class PrePumpDetectorBybit:
+class PrePumpDetectorOKX:
     def __init__(self, target_symbols):
         self.exchange = EXCHANGE
         self.target_symbols = target_symbols
@@ -73,30 +34,25 @@ class PrePumpDetectorBybit:
         self.btc_history = {'timestamp': [], 'close': [], 'high': [], 'low': [], 'volume': []}
         self.first_detected = {}
         self.alerted = set()
-        
-        # Baca token dari environment variable
         self.telegram_token = os.environ.get("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         if not self.telegram_token or not self.telegram_chat_id:
-            raise ValueError("TELEGRAM_TOKEN dan TELEGRAM_CHAT_ID harus diisi di environment variable")
+            raise ValueError("TELEGRAM_TOKEN dan TELEGRAM_CHAT_ID harus diisi")
 
     def init(self):
-        print("Memuat markets Bybit (USDT perpetual)...")
+        print("Memuat markets OKX (USDT swap)...")
         self.exchange.load_markets()
-        
         for symbol in self.target_symbols:
             if symbol in self.exchange.markets:
                 market = self.exchange.markets[symbol]
-                if market['quote'] == 'USDT' and market['linear'] and market['swap']:
+                if market['quote'] == 'USDT' and market['swap']:
                     self.symbols.append(symbol)
                     print(f"✓ {symbol} ditambahkan")
                 else:
-                    print(f"✗ {symbol} bukan USDT perpetual, dilewati")
+                    print(f"✗ {symbol} bukan USDT swap")
             else:
-                print(f"✗ {symbol} tidak ditemukan di Bybit, periksa penulisan simbol")
-        
+                print(f"✗ {symbol} tidak ditemukan di OKX")
         print(f"\nTotal {len(self.symbols)} pair yang akan dipantau: {self.symbols}")
-        
         for symbol in self.symbols:
             self.history[symbol] = {
                 'timestamp': [], 'close': [], 'high': [], 'low': [], 'volume': [],
@@ -131,7 +87,6 @@ class PrePumpDetectorBybit:
             return None
 
     def update_all_data(self):
-        # Update BTC dulu
         btc_data = self.fetch_ohlcv('BTCUSDT', limit=100)
         if btc_data:
             for candle in btc_data:
@@ -144,7 +99,6 @@ class PrePumpDetectorBybit:
             for key in self.btc_history:
                 self.btc_history[key] = self.btc_history[key][-100:]
 
-        # Update semua simbol
         for symbol in self.symbols:
             self.update_symbol_data(symbol)
 
@@ -170,6 +124,7 @@ class PrePumpDetectorBybit:
             self.history[symbol]['funding'].append(funding)
             self.history[symbol]['funding'] = self.history[symbol]['funding'][-100:]
 
+    # (fungsi-fungsi lainnya sama persis, tidak perlu diubah)
     def calculate_atr(self, highs, lows, closes, period=10):
         if len(highs) < period+1:
             return None
@@ -294,7 +249,6 @@ class PrePumpDetectorBybit:
             print(f"\n{datetime.now().isoformat()} - Memperbarui data...")
             self.update_all_data()
 
-            # Filter BTC trending
             if len(self.btc_history['close']) >= 20:
                 btc_ema = pd.Series(self.btc_history['close']).ewm(span=20).mean().values
                 ema_slope = (btc_ema[-1] - btc_ema[-20]) / btc_ema[-20]
@@ -372,8 +326,7 @@ class PrePumpDetectorBybit:
             if symbol in self.alerted:
                 self.alerted.remove(symbol)
 
-
 if __name__ == "__main__":
-    detector = PrePumpDetectorBybit(TARGET_SYMBOLS)
+    detector = PrePumpDetectorOKX(TARGET_SYMBOLS)
     detector.init()
     detector.run_once()
