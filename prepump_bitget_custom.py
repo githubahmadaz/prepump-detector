@@ -1,329 +1,164 @@
 import requests
 import time
-import statistics
 
-TELEGRAM_TOKEN = "8313562725:AAHBczdbML0-htf6fYb0upk9ZMIHEz8vw4I"
-TELEGRAM_CHAT_ID = "5351495323"
+# ==============================
+# ⚙️ TELEGRAM CONFIG
+# ==============================
+BOT_TOKEN = "ISI_BOT_TOKEN"
+CHAT_ID = "ISI_CHAT_ID"
 
-SYMBOLS = [
-    "0GUSDT",
-    "1000BONKUSDT",
-    "1000RATSUSDT",
-    "1000SATSUSDT",
-    "1MBABYDOGEUSDT",
-    "AAVEUSDT",
-    "ACHUSDT",
-    "ADAUSDT",
-    "AEROUSDT",
-    "AKTUSDT",
-    "ALCHUSDT",
-    "ALGOUSDT",
-    "ANKRUSDT",
-    "APEUSDT",
-    "APTUSDT",
-    "ARBUSDT",
-    "ARCUSDT",
-    "ASTERUSDT",
-    "ASTRUSDT",
-    "ATUSDT",
-    "ATHUSDT",
-    "ATOMUSDT",
-    "AVAXUSDT",
-    "AVNTUSDT",
-    "AWEUSDT",
-    "AXLUSDT",
-    "AXSUSDT",
-    "AZTECUSDT",
-    "BUSDT",
-    "B2USDT",
-    "BANUSDT",
-    "BANANAS31USDT",
-    "BARDUSDT",
-    "BATUSDT",
-    "BEATUSDT",
-    "BERAUSDT",
-    "BGBUSDT",
-    "BIOUSDT",
-    "BIRBUSDT",
-    "BLURUSDT",
-    "BRETTUSDT",
-    "BSVUSDT",
-    "CAKEUSDT",
-    "CELOUSDT",
-    "CFXUSDT",
-    "CHZUSDT",
-    "COAIUSDT",
-    "COINUSDT",
-    "COMPUSDT",
-    "COWUSDT",
-    "CROUSDT",
-    "CRVUSDT",
-    "CVXUSDT",
-    "CYSUSDT",
-    "DASHUSDT",
-    "DEEPUSDT",
-    "DEXEUSDT",
-    "DOTUSDT",
-    "DRIFTUSDT",
-    "DYDXUSDT",
-    "EGLDUSDT",
-    "EIGENUSDT",
-    "ENAUSDT",
-    "ENSUSDT",
-    "ENSOUSDT",
-    "ETCUSDT",
-    "ETHFIUSDT",
-    "FARTCOINUSDT",
-    "FETUSDT",
-    "FFUSDT",
-    "FILUSDT",
-    "FLOKIUSDT",
-    "FLUIDUSDT",
-    "FOGOUSDT",
-    "FORMUSDT",
-    "GALAUSDT",
-    "GASUSDT",
-    "GLMUSDT",
-    "GPSUSDT",
-    "GRASSUSDT",
-    "GRTUSDT",
-    "GUNUSDT",
-    "GWEIUSDT",
-    "HUSDT",
-    "HBARUSDT",
-    "HNTUSDT",
-    "HOMEUSDT",
-    "HYPEUSDT",
-    "ICNTUSDT",
-    "ICPUSDT",
-    "IDUSDT",
-    "IMXUSDT",
-    "INJUSDT",
-    "IOTAUSDT",
-    "IPUSDT",
-    "IRYSUSDT",
-    "JASMYUSDT",
-    "JSTUSDT",
-    "JTOUSDT",
-    "JUPUSDT",
-    "KAIAUSDT",
-    "KAITOUSDT",
-    "KASUSDT",
-    "KITEUSDT",
-    "KMNOUSDT",
-    "KSMUSDT",
-    "LDOUSDT",
-    "LINEAUSDT",
-    "LINKUSDT",
-    "LITUSDT",
-    "LPTUSDT",
-    "LRCUSDT",
-    "LTCUSDT",
-    "LUNAUSDT",
-    "LUNCUSDT",
-    "LYNUSDT",
-    "MUSDT",
-    "MANAUSDT",
-    "MASKUSDT",
-    "MEUSDT",
-    "MEMEUSDT",
-    "MERLUSDT",
-    "MINAUSDT",
-    "MOCAUSDT",
-    "MONUSDT",
-    "MOODENGUSDT",
-    "MORPHOUSDT",
-    "MOVEUSDT",
-    "MYXUSDT",
-    "NEARUSDT",
-    "NEOUSDT",
-    "NIGHTUSDT",
-    "NMRUSDT",
-    "NXPCUSDT",
-    "ONDOUSDT",
-    "OPUSDT",
-    "ORCAUSDT",
-    "ORDIUSDT",
-    "PARTIUSDT",
-    "PAXGUSDT",
-    "PENDLEUSDT",
-    "PENGUUSDT",
-    "PEPEUSDT",
-    "PIEVERSEUSDT",
-    "PIPPINUSDT",
-    "PLUMEUSDT",
-    "PNUTUSDT",
-    "POLUSDT",
-    "POLYXUSDT",
-    "POPCATUSDT",
-    "POWERUSDT",
-    "PUMPUSDT",
-    "PYTHUSDT",
-    "QUSDT",
-    "QNTUSDT",
-    "RAVEUSDT",
-    "RAYUSDT",
-    "RENDERUSDT",
-    "RIVERUSDT",
-    "ROSEUSDT",
-    "RPLUSDT",
-    "RSRUSDT",
-    "RUNEUSDT",
-    "SUSDT",
-    "SAHARAUSDT",
-    "SANDUSDT",
-    "SEIUSDT",
-    "SENTUSDT",
-    "SHIBUSDT",
-    "SIGNUSDT",
-    "SIRENUSDT",
-    "SKRUSDT",
-    "SKYUSDT",
-    "SNXUSDT",
-    "SOMIUSDT",
-    "SOONUSDT",
-    "SPKUSDT",
-    "SPXUSDT",
-    "SSVUSDT",
-    "STABLEUSDT",
-    "STGUSDT",
-    "STRKUSDT",
-    "STXUSDT",
-    "SUIUSDT",
-    "SUPERUSDT",
-    "TUSDT",
-    "TAGUSDT",
-    "TAOUSDT",
-    "THETAUSDT",
-    "TIAUSDT",
-    "TONUSDT",
-    "TOSHIUSDT",
-    "TRBUSDT",
-    "TRUMPUSDT",
-    "TURBOUSDT",
-    "UAIUSDT",
-    "UBUSDT",
-    "UMAUSDT",
-    "UNIUSDT",
-    "VANAUSDT",
-    "VETUSDT",
-    "VIRTUALUSDT",
-    "VTHOUSDT",
-    "VVVUSDT",
-    "WUSDT",
-    "WALUSDT",
-    "WIFUSDT",
-    "WLDUSDT",
-    "WLFIUSDT",
-    "XAUTUSDT",
-    "XDCUSDT",
-    "XLMUSDT",
-    "XMRUSDT",
-    "XPLUSDT",
-    "XTZUSDT",
-    "XVGUSDT",
-    "ZAMAUSDT",
-    "ZECUSDT",
-    "ZENUSDT",
-    "ZETAUSDT",
-    "ZILUSDT",
-    "ZORAUSDT",
-    "ZROUSDT",
-    "ZRXUSDT"
-
-]
-
+# ==============================
+# ⚙️ TELEGRAM SENDER
+# ==============================
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-
-def get_price(symbol):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": msg}
     try:
-        url = f"https://api.bitget.com/api/mix/v1/market/ticker?symbol={symbol}&productType=umcbl"
-        data = requests.get(url).json()
-        return float(data['data']['last'])
+        requests.post(url, data=data)
     except:
-        return None
+        pass
 
-def get_volume(symbol):
-    try:
-        url = f"https://api.bitget.com/api/mix/v1/market/ticker?symbol={symbol}&productType=umcbl"
-        data = requests.get(url).json()
-        return float(data['data']['quoteVolume'])
-    except:
-        return None
+# ==============================
+# ⚙️ GET FUTURES DATA
+# ==============================
+def get_futures_tickers():
+    url = "https://api.bitget.com/api/mix/v1/market/tickers?productType=UMCBL"
+    return requests.get(url).json()['data']
 
-def get_oi(symbol):
-    try:
-        url = f"https://api.bitget.com/api/mix/v1/market/open-interest?symbol={symbol}&productType=umcbl"
-        data = requests.get(url).json()
-        return float(data['data']['openInterest'])
-    except:
-        return None
-
-def get_candles(symbol):
-    try:
-        url = f"https://api.bitget.com/api/mix/v1/market/candles?symbol={symbol}&granularity=300&limit=20"
-        data = requests.get(url).json()
-        highs = [float(c[2]) for c in data]
-        lows = [float(c[3]) for c in data]
-        closes = [float(c[4]) for c in data]
-        return highs, lows, closes
-    except:
-        return None, None, None
-
-def get_btc_trend():
-    try:
-        url = "https://api.bitget.com/api/mix/v1/market/ticker?symbol=BTCUSDT&productType=umcbl"
-        data = requests.get(url).json()
-        change = float(data['data']['chg'])
-        return change
-    except:
-        return 0
-
-def calculate_score(symbol):
-
-    price = get_price(symbol)
-    volume = get_volume(symbol)
-    oi = get_oi(symbol)
-    highs, lows, closes = get_candles(symbol)
-
-    if None in [price, volume, oi] or highs is None:
-        return None
+# ==============================
+# 🧠 SCORING ENGINE
+# ==============================
+def calculate_score(price, volume, oi, funding):
 
     score = 0
+    reasons = []
 
-    # SMART MONEY ENTRY
-    if oi > 0 and abs(highs[-1] - lows[-1]) / price < 0.01:
+    # --- Pre Pump Base ---
+    if abs(price) < 3:
+        score += 1
+        reasons.append("Stable Price")
+
+    if volume > 1.3:
+        score += 1
+        reasons.append("Volume Rising")
+
+    if oi > 1:
+        score += 1
+        reasons.append("OI Rising")
+
+    if funding < 0:
+        score += 1
+        reasons.append("Bearish Crowd")
+
+    # --- Whale Entry Mode ---
+    if oi > 1.5 and volume > 1.5 and abs(price) < 2:
         score += 2
+        reasons.append("Whale Entry")
 
-    # ABSORPTION
-    avg_range = statistics.mean([(h-l) for h,l in zip(highs,lows)])
-    if avg_range < price * 0.015:
+    # --- Fake Accumulation Filter ---
+    if volume > 1.5 and oi < 1:
+        score -= 1
+        reasons.append("Fake Accumulation")
+
+    # --- Liquidation Trap ---
+    if funding < 0 and oi > 1.2:
+        score += 1
+        reasons.append("Short Trap")
+
+    # --- Parabolic Top Killer ---
+    if price > 6:
+        score -= 2
+        reasons.append("Already Pumped")
+
+    return score, reasons
+
+# ==============================
+# 🎯 TIMING ENGINE
+# ==============================
+def detect_entry_timing(price, oi, volume, funding):
+    score = 0
+    reasons = []
+
+    if oi > 1:
+        score += 1
+        reasons.append("OI Rising")
+
+    if volume > 1.2:
+        score += 1
+        reasons.append("Volume Expansion")
+
+    if funding < 0:
+        score += 1
+        reasons.append("Bearish Crowd Trap")
+
+    if abs(price) < 1:
+        score += 1
+        reasons.append("Price Compression")
+
+    if oi > 1 and volume > 1.5 and abs(price) < 1:
         score += 2
+        reasons.append("Whale Silent Entry")
 
-    # VOLATILITY COMPRESSION
-    if statistics.stdev(closes) < price * 0.01:
-        score += 2
+    return score, reasons
 
-    # LIQUIDATION TRAP
-    if oi > 1000000 and abs(closes[-1] - closes[-5]) < price * 0.01:
-        score += 2
+# ==============================
+# 🎯 ENTRY CLASSIFIER
+# ==============================
+def classify_entry(score):
+    if score >= 4:
+        return "SNIPER ENTRY"
+    elif score >= 2:
+        return "EARLY BUILDUP"
+    else:
+        return "WAIT"
 
-    # MARKET ENVIRONMENT
-    btc_trend = get_btc_trend()
-    if btc_trend > -0.5:
-        score += 2
+# ==============================
+# 🚀 MAIN SCANNER
+# ==============================
+def scan_market():
 
-    return score
+    tickers = get_futures_tickers()
 
-while True:
-    for symbol in SYMBOLS:
-        score = calculate_score(symbol)
+    for coin in tickers:
 
-        if score is not None and score >= 6:
-            msg = f"PRE-PUMP STRUCTURE DETECTED\n{symbol}\nScore: {score}/10"
+        symbol = coin['symbol']
+        price_change = float(coin['change24h'])
+        volume_ratio = float(coin['baseVolume'])
+        oi_change = float(coin['openInterest'])
+        funding_rate = float(coin.get('fundingRate', 0))
+
+        # Normalize (simple)
+        volume_ratio = volume_ratio / 1000000
+        oi_change = oi_change / 100000
+
+        score, reasons = calculate_score(price_change, volume_ratio, oi_change, funding_rate)
+        timing_score, timing_reasons = detect_entry_timing(price_change, oi_change, volume_ratio, funding_rate)
+        entry_type = classify_entry(timing_score)
+
+        if score >= 5:
+
+            msg = f"""
+PRE-PUMP SIGNAL
+
+Symbol: {symbol}
+Score: {score}
+Timing Score: {timing_score}
+Entry Type: {entry_type}
+
+Signals:
+{', '.join(reasons)}
+
+Timing:
+{', '.join(timing_reasons)}
+"""
             send_telegram(msg)
-            print(msg)
 
-    time.sleep(900)
+# ==============================
+# 🔁 LOOP
+# ==============================
+while True:
+    try:
+        scan_market()
+        time.sleep(300)
+    except:
+        time.sleep(60)
