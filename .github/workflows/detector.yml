@@ -1,10 +1,9 @@
-name: Pre-Pump Detector Bitget
+name: Pre-Pump Detector Bybit
 
 on:
   schedule:
-    # Jalankan setiap 30 menit
     - cron: '*/30 * * * *'
-  workflow_dispatch:  # Bisa dijalankan manual
+  workflow_dispatch:
 
 jobs:
   detect-pre-pump:
@@ -27,4 +26,4 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python debug_bitget.py
+        run: python prepump_bybit.py
