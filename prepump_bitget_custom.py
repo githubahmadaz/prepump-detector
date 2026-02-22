@@ -1,142 +1,128 @@
-import requests
-import numpy as np
-import pandas as pd
-import time
-import os
+//@version=5
+indicator("🚀 GOD MODE v2 – EARLY PUMP DETECTOR", overlay=false)
 
-BASE_URL = "https://api.bitget.com"
+// ==========================
+// ⚙️ INPUT
+// ==========================
+oiChange = input.float(2.0, "OI Change")
+volumeChange = input.float(2.0, "Volume Change")
+fundingRate = input.float(0.01, "Funding Rate")
 
-TARGET_SYMBOLS = [
-"AAVEUSDT","ACHUSDT","ADAUSDT","ALGOUSDT","APEUSDT","APTUSDT","ARBUSDT",
-"ATOMUSDT","AVAXUSDT","AXSUSDT","BLURUSDT","CAKEUSDT","CFXUSDT",
-"CHZUSDT","COMPUSDT","CRVUSDT","DOTUSDT","DYDXUSDT","ENSUSDT",
-"ETCUSDT","FILUSDT","FLOKIUSDT","GALAUSDT","HBARUSDT","ICPUSDT",
-"IMXUSDT","INJUSDT","JASMYUSDT","JUPUSDT","KASUSDT","LINKUSDT",
-"LTCUSDT","MANAUSDT","MASKUSDT","MEMEUSDT","MINAUSDT","NEARUSDT",
-"OPUSDT","ORCAUSDT","PENDLEUSDT","PEPEUSDT","PYTHUSDT","QNTUSDT",
-"RAYUSDT","RENDERUSDT","ROSEUSDT","RSRUSDT","RUNEUSDT","SANDUSDT",
-"SEIUSDT","SHIBUSDT","SNXUSDT","STXUSDT","SUIUSDT","TIAUSDT",
-"TONUSDT","TRBUSDT","UMAUSDT","UNIUSDT","VETUSDT","WIFUSDT",
-"WLDUSDT","XLMUSDT","XTZUSDT","ZECUSDT","ZILUSDT","ZRXUSDT"
-]
+scoreTrigger = input.float(8.5, "Signal Score")
 
-def get_valid_futures():
-    url = BASE_URL + "/api/mix/v1/market/contracts?productType=umcbl"
-    r = requests.get(url).json()
-    valid = set()
-    if r["code"] == "00000":
-        for c in r["data"]:
-            valid.add(c["symbol"].replace("_UMCBL",""))
-    return valid
+// ==========================
+// 📊 CORE MARKET STRUCTURE
+// ==========================
 
-def fetch_ohlcv(symbol):
-    url = BASE_URL + "/api/mix/v1/market/candles"
-    params = {
-        "symbol": symbol+"_UMCBL",
-        "granularity": "5m",
-        "limit": 50
-    }
-    r = requests.get(url, params=params).json()
-    if r["code"] != "00000":
-        return None
-    return r["data"]
+// Momentum Compression (before pump)
+compression = ta.stdev(close, 20) < ta.sma(ta.stdev(close,20),50) ? 1 : 0
 
-def fetch_oi(symbol):
-    url = BASE_URL + "/api/mix/v1/market/open-interest"
-    params = {"symbol": symbol+"_UMCBL"}
-    r = requests.get(url, params=params).json()
-    if r["code"] != "00000":
-        return None
-    return float(r["data"]["openInterest"])
+// Volatility Expansion (start of move)
+volExpansion = ta.stdev(close,10) > ta.sma(ta.stdev(close,10),50) ? 1 : 0
 
-def fetch_funding(symbol):
-    url = BASE_URL + "/api/mix/v1/market/current-fundRate"
-    params = {"symbol": symbol+"_UMCBL"}
-    r = requests.get(url, params=params).json()
-    if r["code"] != "00000":
-        return None
-    return float(r["data"]["fundingRate"])
+// Smart Money Absorption
+absorption = volumeChange > 1.5 and math.abs(close - open) < ta.atr(14) ? 1 : 0
 
-def fetch_depth(symbol):
-    url = BASE_URL + "/api/mix/v1/market/depth"
-    params = {"symbol": symbol+"_UMCBL", "limit": 15}
-    r = requests.get(url, params=params).json()
-    if r["code"] != "00000":
-        return None
-    return r["data"]
+// ==========================
+// 🐋 WHALE MODE
+// ==========================
+whaleLong = oiChange > 3 and volumeChange > 2 ? 1 : 0
+whaleShort = oiChange < -3 and volumeChange > 2 ? 1 : 0
 
-def score_symbol(symbol):
+// ==========================
+// 💀 LIQUIDATION TRAP FILTER
+// ==========================
+liqTrapLong = oiChange > 2 and close < open ? 1 : 0
+liqTrapShort = oiChange < -2 and close > open ? 1 : 0
 
-    ohlcv = fetch_ohlcv(symbol)
-    if not ohlcv:
-        return None
+// ==========================
+// 🚫 FAKE BREAKOUT FILTER
+// ==========================
+fakeBreakLong = ta.highest(close,10) == close and volumeChange < 1.2 ? 1 : 0
+fakeBreakShort = ta.lowest(close,10) == close and volumeChange < 1.2 ? 1 : 0
 
-    closes = [float(c[4]) for c in ohlcv]
-    highs = [float(c[2]) for c in ohlcv]
-    lows = [float(c[3]) for c in ohlcv]
-    volumes = [float(c[5]) for c in ohlcv]
+// ==========================
+// 🔺 PARABOLIC FILTER
+// ==========================
+parabolicTop = ta.rsi(close,14) > 78 ? 1 : 0
+parabolicBottom = ta.rsi(close,14) < 22 ? 1 : 0
 
-    price = closes[-1]
+// ==========================
+// 📈 TREND BIAS
+// ==========================
+trendBull = close > ta.ema(close,50) ? 1 : 0
+trendBear = close < ta.ema(close,50) ? 1 : 0
 
-    # Volatility compression
-    range_pct = (max(highs[-5:]) - min(lows[-5:])) / price
-    score_vol = max(0, 1 - range_pct*20)
+// ==========================
+// 🧠 SCORING ENGINE
+// ==========================
 
-    # Volume stability
-    vol_now = volumes[-1]
-    vol_avg = np.mean(volumes[:-1])
-    score_vol_stable = 1 if vol_now < vol_avg*2 else 0
+longScore =
+    (compression * 2) +
+    (volExpansion * 2) +
+    (absorption * 2) +
+    (whaleLong * 3) +
+    (trendBull * 1.5) +
+    (fundingRate < 0 ? 1.5 : 0) -
+    (liqTrapLong * 2) -
+    (fakeBreakLong * 2) -
+    (parabolicTop * 3)
 
-    # OI stability
-    oi = fetch_oi(symbol)
-    score_oi = 0.5
-    if oi:
-        score_oi = 1
+shortScore =
+    (compression * 2) +
+    (volExpansion * 2) +
+    (absorption * 2) +
+    (whaleShort * 3) +
+    (trendBear * 1.5) +
+    (fundingRate > 0 ? 1.5 : 0) -
+    (liqTrapShort * 2) -
+    (fakeBreakShort * 2) -
+    (parabolicBottom * 3)
 
-    # Funding neutrality
-    funding = fetch_funding(symbol)
-    score_funding = 0
-    if funding:
-        if abs(funding) < 0.0003:
-            score_funding = 1
+// ==========================
+// 🎯 SIGNAL
+// ==========================
+longSignal = longScore >= scoreTrigger
+shortSignal = shortScore >= scoreTrigger
 
-    # Depth imbalance
-    depth = fetch_depth(symbol)
-    score_depth = 0
-    if depth:
-        bids = sum([float(b[1]) for b in depth["bids"]])
-        asks = sum([float(a[1]) for a in depth["asks"]])
-        if bids > asks:
-            score_depth = 1
+// ==========================
+// 📊 PROBABILITY SCORE
+// ==========================
+probLong = math.min(longScore * 10, 100)
+probShort = math.min(shortScore * 10, 100)
 
-    total = (
-        score_vol*2 +
-        score_vol_stable +
-        score_oi +
-        score_funding +
-        score_depth
-    )
+// ==========================
+// 🎯 DYNAMIC TP SL
+// ==========================
+atr = ta.atr(14)
 
-    return total
+tpLong = close + atr * 2
+slLong = close - atr * 1.5
 
-def run():
+tpShort = close - atr * 2
+slShort = close + atr * 1.5
 
-    valid = get_valid_futures()
-    symbols = [s for s in TARGET_SYMBOLS if s in valid]
+// ==========================
+// 📢 TELEGRAM MESSAGE
+// ==========================
+longJSON = '{"signal":"LONG","prob":' + str.tostring(probLong) +
+',"entry":' + str.tostring(close) +
+',"tp":' + str.tostring(tpLong) +
+',"sl":' + str.tostring(slLong) + '}'
 
-    results = []
+shortJSON = '{"signal":"SHORT","prob":' + str.tostring(probShort) +
+',"entry":' + str.tostring(close) +
+',"tp":' + str.tostring(tpShort) +
+',"sl":' + str.tostring(slShort) + '}'
 
-    for sym in symbols:
-        score = score_symbol(sym)
-        if score:
-            results.append((sym, score))
-        time.sleep(0.2)
+alertcondition(longSignal, title="LONG SIGNAL", message=longJSON)
+alertcondition(shortSignal, title="SHORT SIGNAL", message=shortJSON)
 
-    ranked = sorted(results, key=lambda x: x[1], reverse=True)
+// ==========================
+// 📉 VISUAL
+// ==========================
+plot(longScore, color=color.green, title="Long Score")
+plot(shortScore, color=color.red, title="Short Score")
 
-    print("\n🔥 TOP PRE-PUMP CANDIDATES\n")
-    for r in ranked[:5]:
-        print(r)
-
-if __name__ == "__main__":
-    run()
+plotshape(longSignal, location=location.bottom, color=color.green, style=shape.labelup, text="LONG")
+plotshape(shortSignal, location=location.top, color=color.red, style=shape.labeldown, text="SHORT")
