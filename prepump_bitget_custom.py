@@ -48,10 +48,8 @@ TARGET_SYMBOLS = [
     "ZORAUSDT", "ZROUSDT", "ZRXUSDT"
 ]
 
-# Base URL
 BASE_URL = "https://api.bitget.com"
 
-# Header umum
 HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0"
@@ -73,8 +71,8 @@ class PrePumpDetectorBitgetCustom:
         if not self.telegram_token or not self.telegram_chat_id:
             raise ValueError("TELEGRAM_TOKEN dan TELEGRAM_CHAT_ID harus diisi di environment variable")
 
-    def _request_v2(self, endpoint, params=None):
-        """Request ke API v2 (untuk daftar kontrak)"""
+    def _request(self, endpoint, params=None):
+        """Request ke API Bitget V2"""
         url = BASE_URL + endpoint
         try:
             resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
@@ -83,42 +81,18 @@ class PrePumpDetectorBitgetCustom:
                 if data.get('code') == '00000':
                     return data['data']
                 else:
-                    print(f"API v2 error: {data}")
+                    print(f"API error {endpoint}: {data}")
                     return None
-            else:
-                print(f"HTTP {resp.status_code}: {resp.text}")
-                return None
-        except Exception as e:
-            print(f"Request v2 error: {e}")
-            return None
-
-    def _request_v1(self, endpoint, params=None):
-        """Request ke API v1 (untuk data market)"""
-        url = BASE_URL + endpoint
-        try:
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                # V1 biasanya mengembalikan langsung data tanpa kode, atau dengan kode di dalam
-                # Coba handle berbagai format
-                if isinstance(data, dict) and data.get('code') == '00000':
-                    return data['data']
-                elif isinstance(data, dict) and data.get('data') is not None:
-                    return data['data']
-                else:
-                    # Mungkin langsung data list
-                    return data
             else:
                 print(f"HTTP {resp.status_code} untuk {endpoint}: {resp.text}")
                 return None
         except Exception as e:
-            print(f"Request v1 error: {e}")
+            print(f"Request error {endpoint}: {e}")
             return None
 
     def init(self):
-        """Memuat daftar kontrak futures via v2"""
         print("Memuat daftar kontrak futures Bitget (v2)...")
-        contracts = self._request_v2("/api/v2/mix/market/contracts", params={"productType": "USDT-FUTURES"})
+        contracts = self._request("/api/v2/mix/market/contracts", params={"productType": "USDT-FUTURES"})
         if contracts is None:
             print("Gagal memuat kontrak. Periksa koneksi.")
             return
@@ -142,20 +116,21 @@ class PrePumpDetectorBitgetCustom:
             }
 
     def fetch_ohlcv(self, symbol, limit=100):
-        """Ambil candlestick via v1"""
+        """Ambil candlestick via v2"""
         params = {
             "symbol": symbol,
             "granularity": "5m",
-            "limit": limit
+            "limit": limit,
+            "productType": "USDT-FUTURES"
         }
-        data = self._request_v1("/api/mix/v1/market/candles", params)
+        data = self._request("/api/v2/mix/market/candles", params)
         if not data or not isinstance(data, list):
             return None
         
         ohlcv = []
         for candle in data:
             try:
-                # Format v1: [timestamp, open, high, low, close, volume, turnOver]
+                # Format v2: [timestamp, open, high, low, close, volume, turnOver]
                 ts = int(candle[0])
                 o = float(candle[1])
                 h = float(candle[2])
@@ -168,29 +143,31 @@ class PrePumpDetectorBitgetCustom:
         return ohlcv
 
     def fetch_oi(self, symbol):
-        """Ambil open interest via v1"""
-        data = self._request_v1("/api/mix/v1/market/open-interest", params={"symbol": symbol})
-        if data and isinstance(data, dict):
+        """Ambil open interest via v2"""
+        params = {"symbol": symbol, "productType": "USDT-FUTURES"}
+        data = self._request("/api/v2/mix/market/open-interest", params)
+        if data and isinstance(data, list) and len(data) > 0:
             try:
-                return float(data.get('openInterest', 0))
+                return float(data[0].get('openInterest', 0))
             except:
                 return None
         return None
 
     def fetch_funding(self, symbol):
-        """Ambil funding rate via v1"""
-        data = self._request_v1("/api/mix/v1/market/current-funding-rate", params={"symbol": symbol})
-        if data and isinstance(data, dict):
+        """Ambil funding rate via v2"""
+        params = {"symbol": symbol, "productType": "USDT-FUTURES"}
+        data = self._request("/api/v2/mix/market/current-funding-rate", params)
+        if data and isinstance(data, list) and len(data) > 0:
             try:
-                return float(data.get('fundingRate', 0))
+                return float(data[0].get('fundingRate', 0))
             except:
                 return None
         return None
 
     def fetch_orderbook(self, symbol, limit=100):
-        """Ambil order book via v1"""
-        params = {"symbol": symbol, "limit": limit}
-        data = self._request_v1("/api/mix/v1/market/depth", params)
+        """Ambil order book via v2"""
+        params = {"symbol": symbol, "limit": limit, "productType": "USDT-FUTURES"}
+        data = self._request("/api/v2/mix/market/depth", params)
         if data and isinstance(data, dict):
             return data  # berisi bids dan asks
         return None
@@ -417,7 +394,7 @@ class PrePumpDetectorBitgetCustom:
                 readiness = self.estimate_readiness(total_true)
 
                 message = (
-                    f"🚀 <b>Pre-Pump Terdeteksi (Bitget)</b>\n"
+                    f"🚀 <b>Pre-Pump Terdeteksi (Bitget V2)</b>\n"
                     f"Coin: {symbol}\n"
                     f"Harga: {price:.8f}\n"
                     f"Durasi kompresi: {duration_str}\n"
