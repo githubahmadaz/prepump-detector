@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║         PRE-PUMP INTELLIGENCE SCANNER v2.3                      ║
+║         PRE-PUMP INTELLIGENCE SCANNER v2.4                      ║
 ║         BTC-Independent | Whale Detection | Smart Entry         ║
-║         Fix: Candle endpoint params + debug logging             ║
+║         Fix: Candle endpoint pakai format symbol USDT_UMCBL     ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -48,6 +48,7 @@ CONFIG = {
 }
 
 # ── Mapping granularity ke format Bitget v2 ────────────────────
+# Format valid: 1m,3m,5m,15m,30m,1H,4H,6H,12H,1D
 GRAN_MAP = {
     "1m":  "1m",
     "3m":  "3m",
@@ -184,7 +185,6 @@ COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 _cache          = {}
 _alert_cooldown = {}
-_candle_error_logged = False  # flag: hanya log error candle sekali saja
 
 
 # ══════════════════════════════════════════════════════════════
@@ -192,7 +192,7 @@ _candle_error_logged = False  # flag: hanya log error candle sekali saja
 # ══════════════════════════════════════════════════════════════
 
 def safe_get(url, params=None, timeout=12):
-    """HTTP GET dengan error handling + log body response saat error."""
+    """HTTP GET dengan error handling."""
     try:
         r = requests.get(url, params=params, timeout=timeout)
         r.raise_for_status()
@@ -200,7 +200,6 @@ def safe_get(url, params=None, timeout=12):
     except requests.exceptions.Timeout:
         log.warning(f"Timeout: {url}")
     except requests.exceptions.HTTPError as e:
-        # ── PERUBAHAN v2.3: tampilkan body response agar tahu pesan error Bitget ──
         try:
             body = e.response.text[:300]
         except:
@@ -268,13 +267,11 @@ def get_candles(symbol, granularity="15m", limit=96):
     """
     Ambil data candlestick OHLCV dari Bitget v2.
 
-    PERUBAHAN v2.3:
-    - Hapus productType dari params candles (endpoint ini tidak butuh/tolak param itu)
-    - Tambah debug log untuk lihat params yang dikirim
-    - Coba 2 format symbol: langsung dan dengan suffix _UMCBL
+    FIX v2.4:
+    - Endpoint candles butuh format symbol XXXXXUSDT_UMCBL
+    - Granularity valid: 1m,3m,5m,15m,30m,1H,4H,6H,12H,1D
+    - Tidak pakai productType
     """
-    global _candle_error_logged
-
     gran = GRAN_MAP.get(granularity, granularity)
 
     cache_key = f"candle_{symbol}_{gran}_{limit}"
@@ -283,49 +280,20 @@ def get_candles(symbol, granularity="15m", limit=96):
         if time.time() - ts < 90:
             return val
 
-   url = f"{BITGET_BASE}/api/v2/mix/market/candles"
+    # Konversi ke format UMCBL yang dibutuhkan endpoint candles
+    if "USDT" in symbol:
+        candle_symbol = symbol.replace("USDT", "USDT_UMCBL")
+    else:
+        candle_symbol = symbol + "_UMCBL"
 
-# Bitget v2 candles butuh format XXXXXUSDT_UMCBL
-candle_symbol = symbol.replace("USDT", "USDT_UMCBL") if "USDT" in symbol else symbol
-
-params = {
-    "symbol":      candle_symbol,
-    "granularity": gran,
-    "limit":       str(limit),
-}
-
-    # Debug log — hanya tampil untuk coin pertama agar tidak spam
-    if not _candle_error_logged:
-        log.info(f"[DEBUG] Candle params: {params}")
+    url    = f"{BITGET_BASE}/api/v2/mix/market/candles"
+    params = {
+        "symbol":      candle_symbol,
+        "granularity": gran,
+        "limit":       str(limit),
+    }
 
     data = safe_get(url, params=params)
-
-    # ── Jika gagal, coba tambah productType ──
-    if not data or data.get("code") != "00000":
-        params2 = {
-            "symbol":      symbol,
-            "granularity": gran,
-            "limit":       str(limit),
-            "productType": "USDT-FUTURES",
-        }
-        if not _candle_error_logged:
-            log.info(f"[DEBUG] Retry dengan productType: {params2}")
-        data = safe_get(url, params=params2)
-
-    # ── Jika masih gagal, coba format symbol _UMCBL ──
-    if not data or data.get("code") != "00000":
-        symbol_alt = symbol.replace("USDT", "USDT_UMCBL") if "USDT" in symbol else symbol + "_UMCBL"
-        params3 = {
-            "symbol":      symbol_alt,
-            "granularity": gran,
-            "limit":       str(limit),
-        }
-        if not _candle_error_logged:
-            log.info(f"[DEBUG] Retry dengan symbol alt: {params3}")
-        data = safe_get(url, params=params3)
-
-    _candle_error_logged = True  # setelah coin pertama, hentikan debug spam
-
     if not data or data.get("code") != "00000":
         return []
 
@@ -539,10 +507,7 @@ def detect_large_trade_dominance(trades):
 
 
 def detect_iceberg(trades, current_price, tol=0.15):
-    """
-    Deteksi iceberg order — banyak order kecil di level harga yang sama.
-    Tanda whale memecah order besar menjadi potongan kecil.
-    """
+    """Deteksi iceberg order — banyak order kecil di level harga yang sama."""
     if not trades:
         return False, 0, 0
     at_level = [
@@ -560,16 +525,13 @@ def detect_iceberg(trades, current_price, tol=0.15):
 
 
 def calc_whale_score(symbol, candles_15m, funding):
-    """
-    Skor 0-100 — seberapa kuat bukti whale sedang akumulasi.
-    """
+    """Skor 0-100 — seberapa kuat bukti whale sedang akumulasi."""
     ws       = 0
     evidence = []
     cur      = candles_15m[-1]["close"] if candles_15m else 0
 
     trades = get_recent_trades(symbol, limit=200)
     if trades:
-        # Taker Buy Ratio
         tr = get_taker_ratio(trades)
         if tr > 0.70:
             ws += 22
@@ -578,7 +540,6 @@ def calc_whale_score(symbol, candles_15m, funding):
             ws += 11
             evidence.append(f"🔶 Taker Buy {tr:.0%} — bias beli")
 
-        # Large Trade Dominance
         dom, lbuy = detect_large_trade_dominance(trades)
         if dom > 0.38:
             ws += 22
@@ -587,15 +548,13 @@ def calc_whale_score(symbol, candles_15m, funding):
             ws += 11
             evidence.append(f"🔶 Smart money {dom:.0%} volume")
 
-        # Iceberg Detection
         is_ice, tot, cnt = detect_iceberg(trades, cur)
         if is_ice:
             ws += 18
             evidence.append(f"✅ Iceberg order: ${tot:,.0f} ({cnt} tx kecil)")
 
-    # OI + harga flat = stealth positioning
     if candles_15m and len(candles_15m) >= 16:
-        p4h = candles_15m[-16]["close"]
+        p4h  = candles_15m[-16]["close"]
         pchg = abs((cur - p4h) / p4h * 100) if p4h else 99
         if pchg < 1.5:
             ws += 15
@@ -604,7 +563,6 @@ def calc_whale_score(symbol, candles_15m, funding):
             ws += 7
             evidence.append("🔶 Harga relatif flat 4h")
 
-    # Funding Rate Setup
     if funding < -0.05:
         ws += 18
         evidence.append(f"✅ Funding {funding:.4f}% — short squeeze setup kuat")
@@ -637,7 +595,6 @@ def layer_volatility(candles_15m, candles_1h):
     score = 0
     sigs  = []
 
-    # Bollinger Band Width percentile
     bb = calc_bollinger(candles_1h, period=20)
     if bb and len(bb) >= 20:
         cur_bbw  = bb[-1]["bbw"]
@@ -653,7 +610,6 @@ def layer_volatility(candles_15m, candles_1h):
             score += 5
             sigs.append("BBW Mulai Kompres")
 
-    # ATR Compression
     atr = calc_atr(candles_1h, period=14)
     if len(atr) >= 50:
         atr_s = sum(atr[-7:])  / 7
@@ -666,7 +622,6 @@ def layer_volatility(candles_15m, candles_1h):
             score += 8
             sigs.append(f"ATR Compressing ({ratio:.2f}x)")
 
-    # Coiling Duration — berapa lama harga sudah diam
     quiet = 0
     for c in reversed(candles_1h):
         body = abs(c["close"] - c["open"]) / c["open"] * 100
@@ -697,17 +652,14 @@ def layer_volume(candles_15m):
 
     vols = [c["volume_usd"] for c in candles_15m]
 
-    # Volume baseline vs terkini
     vol_base   = sum(vols[:20]) / 20 if len(vols) >= 20 else 1
     vol_recent = sum(vols[-8:])  / 8
     vol_ratio  = vol_recent / vol_base if vol_base > 0 else 1
 
-    # Perubahan harga selama window
     p_start = candles_15m[-24]["close"]
     p_now   = candles_15m[-1]["close"]
     p_chg   = abs((p_now - p_start) / p_start * 100) if p_start > 0 else 99
 
-    # Volume naik tapi harga flat = akumulasi tersembunyi
     if 1.5 <= vol_ratio <= 5.0 and p_chg < 2.5:
         score += 26
         sigs.append(f"Volume Creep {vol_ratio:.1f}x — harga masih flat (akumulasi tersembunyi)")
@@ -715,7 +667,6 @@ def layer_volume(candles_15m):
         score += 12
         sigs.append(f"Volume perlahan naik {vol_ratio:.1f}x")
 
-    # CVD Divergence approximasi dari candle data
     cvd = 0
     for c in candles_15m[-20:]:
         rng = c["high"] - c["low"]
@@ -753,7 +704,6 @@ def layer_oi_funding(symbol, candles_1h):
         score += 10
         sigs.append(f"Bias short ada ({funding:.4f}%) — squeeze potensial")
 
-    # Penalti jika funding terlalu tinggi (overheated)
     if funding > 0.10:
         score -= 18
         sigs.append(f"⚠️ Funding terlalu tinggi ({funding:.4f}%) — rawan dump")
@@ -899,7 +849,6 @@ def master_score(symbol, ticker_data, all_tickers_dict):
     total = 0
     sigs  = []
 
-    # Ambil data candle
     c15 = get_candles(symbol, "15m", CONFIG["candle_limit_15m"])
     c1h = get_candles(symbol, "1h",  CONFIG["candle_limit_1h"])
 
@@ -908,39 +857,32 @@ def master_score(symbol, ticker_data, all_tickers_dict):
 
     funding = get_funding_rate(symbol)
 
-    # Layer 1: Volatility (max 35)
     vs, vsigs, quiet_h = layer_volatility(c15, c1h)
     total += min(vs, 35)
     sigs  += vsigs
 
-    # Layer 2: Volume (max 30)
     vls, vlsigs = layer_volume(c15)
     total += min(vls, 30)
     sigs  += vlsigs
 
-    # Layer 3: OI & Funding (max 22)
     ois, oisigs, funding = layer_oi_funding(symbol, c1h)
     total += min(ois, 22)
     sigs  += oisigs
 
-    # Layer 4: Sector Rotation (max 28)
     srs, srsigs, sector = layer_sector_rotation(symbol, all_tickers_dict)
     total += min(srs, 28)
     sigs  += srsigs
 
-    # Layer 5: Relative Strength (max 22)
     rss, rssig = layer_relative_strength(symbol, sector, all_tickers_dict)
     total += min(rss, 22)
     if rssig:
         sigs.append(rssig)
 
-    # Layer 6: Social (max 22)
     soc, socsig = layer_social(symbol)
     total += min(soc, 22)
     if socsig:
         sigs.append(socsig)
 
-    # Layer 7: Whale Score (bonus)
     ws, wcls, wev = calc_whale_score(symbol, c15, funding)
     if ws >= 55:
         total += 16
@@ -948,13 +890,11 @@ def master_score(symbol, ticker_data, all_tickers_dict):
     elif ws >= 30:
         total += 7
 
-    # Time multiplier
     tmult, tsig = get_time_multiplier()
     total = int(total * tmult)
     if tsig:
         sigs.append(f"⏰ {tsig}")
 
-    # Entry zones
     entry = calc_entry_zones(c1h, funding)
 
     try:
@@ -1094,7 +1034,6 @@ def run_scan():
 
         time.sleep(0.8)
 
-    # Sort by score tertinggi
     results.sort(key=lambda x: x["score"], reverse=True)
     log.info(f"\nKandidat kuat: {len(results)} coin")
 
@@ -1102,7 +1041,6 @@ def run_scan():
         log.info("Tidak ada sinyal kuat dalam siklus ini")
         return
 
-    # Kirim alert
     sent = 0
     for r in results[:CONFIG["max_alerts_per_run"]]:
         if r["ws"] < CONFIG["min_whale_score"] and r["score"] < 65:
@@ -1126,7 +1064,7 @@ def run_scan():
 
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v2.3 — START       ║")
+    log.info("║  PRE-PUMP SCANNER v2.4 — START       ║")
     log.info("╚══════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
