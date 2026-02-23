@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║         PRE-PUMP INTELLIGENCE SCANNER v2.4                      ║
+║         PRE-PUMP INTELLIGENCE SCANNER v2.5                      ║
 ║         BTC-Independent | Whale Detection | Smart Entry         ║
-║         Fix: Candle endpoint pakai format symbol USDT_UMCBL     ║
+║         Fix: productType huruf kecil (usdt-futures)             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -256,7 +256,7 @@ def percentile_rank(value, data):
 def get_all_futures_tickers():
     """Ambil semua ticker USDT-Futures dari Bitget."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/tickers"
-    data = safe_get(url, params={"productType": "USDT-FUTURES"})
+    data = safe_get(url, params={"productType": "usdt-futures"})
     if data and data.get("code") == "00000":
         return data.get("data", [])
     log.error("Gagal ambil tickers Bitget")
@@ -267,10 +267,10 @@ def get_candles(symbol, granularity="15m", limit=96):
     """
     Ambil data candlestick OHLCV dari Bitget v2.
 
-    FIX v2.4:
-    - Endpoint candles butuh format symbol XXXXXUSDT_UMCBL
+    FIX v2.5:
+    - productType harus huruf kecil: usdt-futures
+    - Symbol pakai format biasa: BTCUSDT (tanpa UMCBL)
     - Granularity valid: 1m,3m,5m,15m,30m,1H,4H,6H,12H,1D
-    - Tidak pakai productType
     """
     gran = GRAN_MAP.get(granularity, granularity)
 
@@ -280,17 +280,12 @@ def get_candles(symbol, granularity="15m", limit=96):
         if time.time() - ts < 90:
             return val
 
-    # Konversi ke format UMCBL yang dibutuhkan endpoint candles
-    if "USDT" in symbol:
-        candle_symbol = symbol.replace("USDT", "USDT_UMCBL")
-    else:
-        candle_symbol = symbol + "_UMCBL"
-
     url    = f"{BITGET_BASE}/api/v2/mix/market/candles"
     params = {
-        "symbol":      candle_symbol,
+        "symbol":      symbol,
         "granularity": gran,
         "limit":       str(limit),
+        "productType": "usdt-futures",
     }
 
     data = safe_get(url, params=params)
@@ -321,7 +316,7 @@ def get_candles(symbol, granularity="15m", limit=96):
 def get_open_interest(symbol):
     """Ambil Open Interest saat ini."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/open-interest"
-    data = safe_get(url, params={"symbol": symbol, "productType": "USDT-FUTURES"})
+    data = safe_get(url, params={"symbol": symbol, "productType": "usdt-futures"})
     if data and data.get("code") == "00000":
         try:
             items = data["data"].get("openInterestList", [])
@@ -336,10 +331,7 @@ def get_open_interest(symbol):
 def get_funding_rate(symbol):
     """Ambil funding rate saat ini."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/current-fund-rate"
-    data = safe_get(url, params={"symbol": symbol, "productType": "USDT-FUTURES"})
-    if data and data.get("code") == "00000":
-        try:
-            return float(data["data"][0].get("fundingRate", 0))
+    data = safe_get(url, params={"symbol": symbol, "productType": "usdt-futures"})
         except:
             return 0
     return 0
@@ -350,7 +342,7 @@ def get_orderbook(symbol, limit=15):
     url  = f"{BITGET_BASE}/api/v2/mix/market/merge-depth"
     data = safe_get(url, params={
         "symbol":      symbol,
-        "productType": "USDT-FUTURES",
+        "productType": "usdt-futures",
         "limit":       str(limit),
     })
     if data and data.get("code") == "00000":
@@ -369,7 +361,7 @@ def get_recent_trades(symbol, limit=200):
     url  = f"{BITGET_BASE}/api/v2/mix/market/fills"
     data = safe_get(url, params={
         "symbol":      symbol,
-        "productType": "USDT-FUTURES",
+        "productType": "usdt-futures",
         "limit":       str(limit),
     })
     if data and data.get("code") == "00000":
@@ -1064,7 +1056,7 @@ def run_scan():
 
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v2.4 — START       ║")
+    log.info("║  PRE-PUMP SCANNER v2.5 — START       ║")
     log.info("╚══════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
