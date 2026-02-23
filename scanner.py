@@ -939,22 +939,40 @@ def calc_entry_zones(candles, funding):
     """
     Hitung VWAP, Point of Control, Stop Loss, Target, R/R.
 
-    ✅ FIX: Target sekarang berbasis resistance teknikal nyata
-            (swing high terdekat) bukan persentase flat.
+    FIX v3.1: Validasi bahwa support/entry HARUS di bawah harga sekarang.
+              Jika VWAP/POC berada di atas harga (harga sedang turun dari area tinggi),
+              fallback ke persentase dari harga sekarang.
     """
     if not candles:
         return None
 
     cur      = candles[-1]["close"]
     vwap, vs = calc_vwap(candles)
-    z1       = (vwap - 1.5 * vs) if (vwap and vs) else cur * 0.97
-    z2       = calc_poc(candles) or cur * 0.98
 
-    # ✅ FIX: Target berbasis resistance level teknikal
+    # z1: VWAP lower band — harus di bawah harga sekarang
+    z1_raw = (vwap - 1.5 * vs) if (vwap and vs) else cur * 0.97
+    z1     = z1_raw if z1_raw < cur else cur * 0.97  # fallback jika di atas harga
+
+    # z2: POC — harus di bawah harga sekarang
+    z2_raw = calc_poc(candles) or cur * 0.98
+    z2     = z2_raw if z2_raw < cur else cur * 0.98  # fallback jika di atas harga
+
+    # Target: resistance teknikal HARUS di atas harga sekarang
     t1, t2 = find_resistance_level(candles, cur)
+    # find_resistance_level sudah memastikan t1 > cur, tapi double check
+    if t1 <= cur:
+        t1 = cur * 1.07
+    if t2 <= t1:
+        t2 = t1 * 1.05
 
-    support = max(z1, z2)
+    # Support = level terkuat yang VALID (di bawah harga)
+    support = max(z1, z2)  # keduanya sudah dipastikan < cur
     entry   = support * 1.002
+
+    # Validasi final: entry tidak boleh melebihi harga sekarang
+    if entry >= cur:
+        entry = cur * 0.999  # entry sedikit di bawah harga sekarang
+
     sl      = support * 0.967
     risk    = cur - sl
     reward  = t1 - cur
