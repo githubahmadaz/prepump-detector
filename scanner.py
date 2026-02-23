@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v6.0 — CALIBRATED & OPTIMIZED                ║
+║  PRE-PUMP SCANNER v6.0 — CALIBRATED & OPTIMIZED (FIXED)        ║
 ║                                                                  ║
 ║  Upgrade dari v5.0 berdasarkan analisis saran + data forensik:  ║
 ║                                                                  ║
@@ -14,12 +14,12 @@
 ║  ✅ Iceberg tolerance: dynamic (0.5%/<$1, 0.3%/$1-10, 0.15%/>$10)║
 ║  ✅ Large trade threshold: $10K → adaptif per vol coin           ║
 ║  ✅ SL berbasis ATR-14 (proporsional, bukan fixed %)            ║
-║  ✅ T1 = min(swing high, entry + 2*ATR) untuk konservatif       ║
+║  ✅ T1 = min(swing high, entry + 2.5*ATR) untuk konservatif     ║
 ║  ✅ Support max distance: 10% dari harga (hindari SL terlalu jauh)║
 ║  ✅ Order book imbalance dari merge-depth API                    ║
 ║  ✅ Gate log terstruktur (bisa dianalisis pola penolakan)        ║
 ║  ✅ pre_filter_min_vol: 30K → 20K/jam (lebih sensitif)          ║
-║  ✅ FIX: pengambilan data candle terbaru (sebelumnya terbalik)  ║
+║  ✅ FIX: pengambilan data candle terbaru (bukan terlama)        ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -44,7 +44,6 @@ log = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════
 CONFIG = {
     "min_score_alert":          48,    # backtest: 74% akurasi di 45-50
-
     "min_whale_score":          15,
 
     # ── Volume gates ──────────────────────────────────────────
@@ -431,7 +430,6 @@ def log_gate(symbol, reason):
             data = []
         data.append({"ts": now, "symbol": symbol, "reason": reason,
                       "dt": datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")})
-        # Simpan hanya 500 entry terakhir
         if len(data) > 500:
             data = data[-500:]
         with open(path, "w") as f:
@@ -441,8 +439,7 @@ def log_gate(symbol, reason):
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔬  FORENSIC SCORING ENGINE
-#  Formula berbasis data nyata dari 19 coin
+#  🔬  FORENSIC SCORING ENGINE (FIXED: menggunakan data terbaru)
 # ══════════════════════════════════════════════════════════════
 
 def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
@@ -460,25 +457,30 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
 
     vols_1h = [c["volume_usd"] for c in candles_1h]
 
-    # ── KALKULASI METRIK FORENSIK (menggunakan data TERBARU) ─────
-    # Vol baseline: median 24-168 jam (seperti forensik)
-    baseline_window = vols_1h[24:] if len(vols_1h) >= 48 else vols_1h
-    baseline_sorted = sorted(baseline_window)
+    # ── KALKULASI METRIK FORENSIK (menggunakan data TERBARU) ──
+    # Vol baseline: median dari candle ke-24 sampai ke-168 (7 hari kecuali 24 jam terakhir)
+    if len(vols_1h) >= 48:
+        baseline_window = vols_1h[24:-24]  # kecualikan 24 jam pertama dan terakhir? Lebih baik: ambil 24-168 (7 hari kecuali 24 terakhir)
+        # Sederhana: median seluruh data kecuali 24 jam terakhir (karena kita ingin baseline jangka panjang)
+        baseline_vals = vols_1h[:-24] if len(vols_1h) > 24 else vols_1h
+    else:
+        baseline_vals = vols_1h
+    baseline_sorted = sorted(baseline_vals)
     vol_baseline    = baseline_sorted[len(baseline_sorted)//2] if baseline_sorted else 1
 
-    # PERBAIKAN: gunakan candle terbaru (indeks negatif)
+    # Volume 24 jam terakhir dan 6 jam terakhir
     vol_24h_avg = sum(vols_1h[-24:]) / 24 if len(vols_1h) >= 24 else sum(vols_1h) / len(vols_1h)
     vol_6h_avg  = sum(vols_1h[-6:])  / 6  if len(vols_1h) >= 6  else sum(vols_1h) / len(vols_1h)
 
     vol_ratio    = vol_24h_avg / vol_baseline if vol_baseline > 0 else 0
     awakening    = vol_6h_avg / vol_24h_avg   if vol_24h_avg  > 0 else 0
 
-    # Price metrics (harga terbaru sudah cur)
+    # Price metrics
     closes      = [c["close"] for c in candles_1h]
-    price_7d    = closes[0] if len(closes) < 168 else closes[-168]  # ambil candle pertama atau 7 hari lalu
+    price_7d    = closes[-168] if len(closes) >= 168 else closes[0]
     price_chg7d = (cur - price_7d) / price_7d * 100 if price_7d > 0 else 0
 
-    # Range 24h TERBARU
+    # Range 24 jam terakhir
     if len(candles_1h) >= 24:
         high_24h = max(c["high"] for c in candles_1h[-24:])
         low_24h  = min(c["low"]  for c in candles_1h[-24:])
@@ -486,9 +488,9 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     else:
         range_24h = 99
 
-    # Coiling: candle kecil berturut di AKHIR
+    # Coiling: jumlah candle kecil berturut di akhir (48 jam terakhir)
     coiling = 0
-    for c in reversed(candles_1h[-48:]):   # 48 candle terakhir, mundur
+    for c in reversed(candles_1h[-48:]):
         body = abs(c["close"] - c["open"]) / c["open"] * 100 if c["open"] else 99
         if body < 1.0:
             coiling += 1
@@ -528,7 +530,7 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
         log_gate(symbol, f"downtrend_7d:{price_chg7d:+.1f}%")
         return 0, {}, [], f"GATE: downtrend kuat 7d ({price_chg7d:+.1f}%)"
 
-    # Gate 4: Funding terlalu negatif (OM pattern)
+    # Gate 4: Funding terlalu negatif
     if funding < CONFIG["gate_funding_min"]:
         log_gate(symbol, f"funding_extreme:{funding:.5f}")
         return 0, {}, [], f"GATE: funding overcrowded short ({funding:.5f})"
@@ -538,14 +540,13 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
         log_gate(symbol, f"range_24h_wide:{range_24h:.0f}%")
         return 0, {}, [], f"GATE: range 24h={range_24h:.0f}% — pump sudah berjalan"
 
-    # Gate 6: Volume 24h USD terlalu besar → coin terlalu populer
-    if vol_24h_usd > CONFIG["max_volume_usd_24h"] * 24 * 1.0:
+    # Gate 6: Volume 24h USD terlalu besar
+    if vol_24h_usd > CONFIG["max_volume_usd_24h"] * 24:
         log_gate(symbol, f"vol_too_large:${vol_24h_usd/1e6:.1f}M")
         return 0, {}, [], f"GATE: vol terlalu besar (${vol_24h_usd/1e6:.1f}M) — sudah terlalu populer"
 
     # ══════════════════════════════════════════════════════
-    #  📊  VOLUME SCORE (max 40) — v6: naik dari 35
-    #  Awakening terbukti prediktif kuat
+    #  📊  VOLUME SCORE (max 40)
     # ══════════════════════════════════════════════════════
 
     vs = 0
@@ -559,13 +560,12 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
         vs += 15
         sigs.append(f"Vol mulai diperhatikan ({vol_ratio:.2f}x baseline)")
 
-    # v6: tier awakening lebih granular
     if awakening > 1.5:
         vs += 15
-        sigs.append(f"🌅 Volume awakening KUAT ({awakening:.2f}x 6h vs 24h avg)")
+        sigs.append(f"🌅 Volume awakening KUAT ({awakening:.2f}x 6h vs 24h)")
     elif awakening > 1.2:
         vs += 10
-        sigs.append(f"🌅 Volume mulai bangun ({awakening:.2f}x 6h vs 24h)")
+        sigs.append(f"🌅 Volume mulai bangun ({awakening:.2f}x)")
     elif awakening > 1.0:
         vs += 5
         sigs.append(f"Volume sedikit naik ({awakening:.2f}x)")
@@ -574,8 +574,7 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     bd["vol_score"] = min(vs, 40)
 
     # ══════════════════════════════════════════════════════
-    #  📐  BBW SCORE (max 20) — v6: diturunkan dari 25
-    #  ENSO case: tidak selalu prediktif
+    #  📐  BBW SCORE (max 20)
     # ══════════════════════════════════════════════════════
 
     bs = 0
@@ -589,7 +588,7 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
         bs += 7
         sigs.append(f"BBW Menyempit ({bbw_pct:.0f}%ile)")
     if bbw_pct > 85:
-        bs -= 8  # expanding = warning
+        bs -= 8
         sigs.append(f"⚠️ BBW Expanding ({bbw_pct:.0f}%ile) — waspadai volatilitas ke bawah")
 
     score += max(min(bs, 20), 0)
@@ -609,7 +608,6 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     elif range_24h < 15:
         ps += 5
 
-    # Bonus: koreksi sehat
     if -10 <= price_chg7d <= -2:
         ps += 8
         sigs.append(f"Koreksi sehat 7d ({price_chg7d:+.1f}%) — akumulasi di bawah")
@@ -620,8 +618,7 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     bd["price_score"] = min(ps, 20)
 
     # ══════════════════════════════════════════════════════
-    #  💰  FUNDING SCORE (max 20) — v6: naik dari 15
-    #  Funding negatif ringan = short squeeze setup terkuat
+    #  💰  FUNDING SCORE (max 20)
     # ══════════════════════════════════════════════════════
 
     fs = 0
@@ -634,7 +631,7 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     elif 0.0001 < funding <= 0.0002:
         fs  = 6
     elif funding < -0.0004:
-        fs  = 0  # sudah digate sebelumnya, backup
+        fs  = 0  # sudah digate
 
     score += fs
     bd["funding_score"] = fs
@@ -665,7 +662,7 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     # ══════════════════════════════════════════════════════
     #  📱  SOCIAL BONUS (max 15)
     # ══════════════════════════════════════════════════════
-    bd["social_score"] = 0  # akan diisi di master_score
+    bd["social_score"] = 0
 
     bd["raw_base_score"] = score
     return score, bd, sigs, None
@@ -692,17 +689,16 @@ def calc_whale(symbol, candles_15m, funding):
             ws += 15
             ev.append(f"🔶 Taker Buy {tr:.0%} — bias beli")
 
-        # Large trade threshold adaptif
         total_usd = sum(t["size"] * t["price"] for t in trades)
         avg_trade = total_usd / len(trades) if trades else 1
-        large_thr = max(avg_trade * 5, 5_000)  # 5x rata-rata trade, min $5K
+        large_thr = max(avg_trade * 5, 5_000)
         lbuy_usd  = sum(t["size"] * t["price"] for t in trades
                         if t["side"] == "buy" and t["size"] * t["price"] > large_thr)
         if total_usd > 0 and lbuy_usd / total_usd > 0.30:
             ws += 25
             ev.append(f"✅ Smart money {lbuy_usd/total_usd:.0%} vol (thr=${large_thr:,.0f})")
 
-        # Iceberg detection dinamis
+        # Iceberg dinamis berdasarkan harga
         if cur > 0:
             if cur < 0.01:
                 ice_tol = 1.0
@@ -722,7 +718,7 @@ def calc_whale(symbol, candles_15m, funding):
                     ws += 20
                     ev.append(f"✅ Iceberg {len(at_level)} tx kecil (${tot_ice:,.0f} total)")
 
-    # Harga flat 4h = stealth positioning
+    # Harga flat 4h
     if candles_15m and len(candles_15m) >= 16:
         p4h  = candles_15m[-16]["close"]
         pchg = abs((cur - p4h) / p4h * 100) if p4h else 99
@@ -733,7 +729,7 @@ def calc_whale(symbol, candles_15m, funding):
             ws += 7
             ev.append("🔶 Harga relatif flat 4h")
 
-    # Funding negatif ringan = bonus
+    # Funding negatif ringan
     if -0.0004 <= funding <= -0.00001:
         ws += 10
         ev.append(f"✅ Funding {funding:.5f} — short squeeze tersembunyi")
@@ -793,14 +789,13 @@ def get_time_mult():
 
 
 # ══════════════════════════════════════════════════════════════
-#  🎯  ENTRY ZONE — ATR-BASED, DIJAMIN VALID
+#  🎯  ENTRY ZONE — ATR-BASED
 # ══════════════════════════════════════════════════════════════
 
 def calc_entry(candles_1h):
     cur  = candles_1h[-1]["close"]
     atr  = calc_atr(candles_1h, period=14) or cur * 0.02  # fallback 2%
 
-    # Support — VWAP lower band dan POC
     vwap, z1 = calc_vwap_support(candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h)
     z2_raw   = calc_poc(candles_1h[-48:] if len(candles_1h) >= 48 else candles_1h)
     z2       = z2_raw if z2_raw and z2_raw < cur * 0.999 else cur * 0.98
@@ -809,19 +804,15 @@ def calc_entry(candles_1h):
     if support >= cur:
         support = cur * 0.97
 
-    # v6: support max distance 10% dari harga
     max_dist  = CONFIG["max_support_distance_pct"] / 100
     if cur - support > cur * max_dist:
-        support = cur * (1 - max_dist + 0.01)  # tempel ke batas atas
+        support = cur * (1 - max_dist + 0.01)
 
     entry = min(support * 1.002, cur * 0.998)
 
-    # v6: SL berbasis ATR-14
     sl = entry - CONFIG["atr_sl_multiplier"] * atr
-    # Pastikan SL tidak lebih dari 12% di bawah entry
     sl = max(sl, entry * 0.88)
 
-    # v6: T1 = min(swing high, entry + 2.5*ATR)
     t1_swing, t2_swing = find_targets(candles_1h, cur)
     t1_atr   = entry + CONFIG["atr_t1_multiplier"] * atr
     t1       = min(t1_swing, t1_atr) if t1_swing > cur * 1.05 else t1_atr
@@ -865,33 +856,28 @@ def master_score(symbol, ticker, tickers_dict):
 
     funding = get_funding(symbol)
 
-    # Core forensic scoring
     score, bd, sigs, gate = calc_forensic_score(symbol, c1h, c15m, ticker, funding)
     if gate:
         log.info(f"  {symbol}: {gate}")
         return None
 
-    # Sector rotation
     sec_sc, sec_sig, sector = layer_sector(symbol, tickers_dict)
     if sec_sig:
         sigs.append(sec_sig)
     score   += sec_sc
     bd["sector_score"] = sec_sc
 
-    # Social
     soc_sc, soc_sig = layer_social(symbol)
     if soc_sig:
         sigs.append(soc_sig)
     score += soc_sc
     bd["social_score"] = soc_sc
 
-    # Whale
     ws, wcls, wev = calc_whale(symbol, c15m, funding)
     whale_bonus = 18 if ws >= 65 else 10 if ws >= 40 else 0
     score += whale_bonus
     bd["whale_bonus"] = whale_bonus
 
-    # Time multiplier
     tmult, tsig = get_time_mult()
     score = int(score * tmult)
     if tsig:
@@ -899,10 +885,7 @@ def master_score(symbol, ticker, tickers_dict):
 
     score = min(score, 100)
 
-    # Entry zone
     entry = calc_entry(c1h)
-
-    # Skip jika target terlalu dekat
     if entry["liq_pct"] < CONFIG["min_target_distance_pct"]:
         log.info(f"  {symbol}: target hanya +{entry['liq_pct']:.1f}%, skip")
         return None
@@ -998,7 +981,6 @@ def run_scan():
         send_telegram("⚠️ <b>Scanner Error</b>: Gagal ambil ticker Bitget")
         return
 
-    # Pre-filter
     candidates = []
     for sym in TARGET_COINS:
         t = tickers.get(sym)
