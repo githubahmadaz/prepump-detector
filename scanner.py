@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║         PRE-PUMP INTELLIGENCE SCANNER v2.2                      ║
+║         PRE-PUMP INTELLIGENCE SCANNER v2.3                      ║
 ║         BTC-Independent | Whale Detection | Smart Entry         ║
-║         Fix: Bitget v2 granularity format                       ║
+║         Fix: Candle endpoint params + debug logging             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -184,6 +184,7 @@ COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 _cache          = {}
 _alert_cooldown = {}
+_candle_error_logged = False  # flag: hanya log error candle sekali saja
 
 
 # ══════════════════════════════════════════════════════════════
@@ -191,7 +192,7 @@ _alert_cooldown = {}
 # ══════════════════════════════════════════════════════════════
 
 def safe_get(url, params=None, timeout=12):
-    """HTTP GET dengan error handling."""
+    """HTTP GET dengan error handling + log body response saat error."""
     try:
         r = requests.get(url, params=params, timeout=timeout)
         r.raise_for_status()
@@ -199,7 +200,12 @@ def safe_get(url, params=None, timeout=12):
     except requests.exceptions.Timeout:
         log.warning(f"Timeout: {url}")
     except requests.exceptions.HTTPError as e:
-        log.warning(f"HTTP {e.response.status_code}: {url}")
+        # ── PERUBAHAN v2.3: tampilkan body response agar tahu pesan error Bitget ──
+        try:
+            body = e.response.text[:300]
+        except:
+            body = "(tidak bisa baca body)"
+        log.warning(f"HTTP {e.response.status_code}: {url} | Body: {body}")
     except Exception as e:
         log.warning(f"Request error: {e}")
     return None
@@ -261,9 +267,14 @@ def get_all_futures_tickers():
 def get_candles(symbol, granularity="15m", limit=96):
     """
     Ambil data candlestick OHLCV dari Bitget v2.
-    granularity otomatis dikonversi ke format Bitget (15m → 15min, 1h → 1H).
+
+    PERUBAHAN v2.3:
+    - Hapus productType dari params candles (endpoint ini tidak butuh/tolak param itu)
+    - Tambah debug log untuk lihat params yang dikirim
+    - Coba 2 format symbol: langsung dan dengan suffix _UMCBL
     """
-    # Konversi format granularity
+    global _candle_error_logged
+
     gran = GRAN_MAP.get(granularity, granularity)
 
     cache_key = f"candle_{symbol}_{gran}_{limit}"
@@ -272,14 +283,47 @@ def get_candles(symbol, granularity="15m", limit=96):
         if time.time() - ts < 90:
             return val
 
-    url    = f"{BITGET_BASE}/api/v2/mix/market/candles"
+    url = f"{BITGET_BASE}/api/v2/mix/market/candles"
+
+    # ── PERUBAHAN v2.3: TANPA productType, coba symbol langsung dulu ──
     params = {
         "symbol":      symbol,
         "granularity": gran,
         "limit":       str(limit),
-        "productType": "USDT-FUTURES",
     }
+
+    # Debug log — hanya tampil untuk coin pertama agar tidak spam
+    if not _candle_error_logged:
+        log.info(f"[DEBUG] Candle params: {params}")
+
     data = safe_get(url, params=params)
+
+    # ── Jika gagal, coba tambah productType ──
+    if not data or data.get("code") != "00000":
+        params2 = {
+            "symbol":      symbol,
+            "granularity": gran,
+            "limit":       str(limit),
+            "productType": "USDT-FUTURES",
+        }
+        if not _candle_error_logged:
+            log.info(f"[DEBUG] Retry dengan productType: {params2}")
+        data = safe_get(url, params=params2)
+
+    # ── Jika masih gagal, coba format symbol _UMCBL ──
+    if not data or data.get("code") != "00000":
+        symbol_alt = symbol.replace("USDT", "USDT_UMCBL") if "USDT" in symbol else symbol + "_UMCBL"
+        params3 = {
+            "symbol":      symbol_alt,
+            "granularity": gran,
+            "limit":       str(limit),
+        }
+        if not _candle_error_logged:
+            log.info(f"[DEBUG] Retry dengan symbol alt: {params3}")
+        data = safe_get(url, params=params3)
+
+    _candle_error_logged = True  # setelah coin pertama, hentikan debug spam
+
     if not data or data.get("code") != "00000":
         return []
 
@@ -1080,7 +1124,7 @@ def run_scan():
 
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v2.2 — START       ║")
+    log.info("║  PRE-PUMP SCANNER v2.3 — START       ║")
     log.info("╚══════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
