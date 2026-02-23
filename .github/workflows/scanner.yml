@@ -1,0 +1,44 @@
+name: Pre-Pump Scanner
+
+on:
+  schedule:
+    # Jalankan setiap 5 menit
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    # Tombol "Run manually" di GitHub Actions
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan scanner
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python scanner.py
+```
+
+---
+
+## Step 3: Cara Buat File `scanner.yml` di GitHub
+
+**Langsung dari browser GitHub — tanpa perlu coding:**
+
+1. Buka repo Anda di GitHub
+2. Klik tombol **"Add file"** → **"Create new file"**
+3. Di kolom nama file, ketik persis seperti ini:
+```
+.github/workflows/scanner.yml
