@@ -283,14 +283,16 @@ def get_candles(symbol, granularity="15m", limit=96):
         if time.time() - ts < 90:
             return val
 
-    url = f"{BITGET_BASE}/api/v2/mix/market/candles"
+   url = f"{BITGET_BASE}/api/v2/mix/market/candles"
 
-    # ── PERUBAHAN v2.3: TANPA productType, coba symbol langsung dulu ──
-    params = {
-        "symbol":      symbol,
-        "granularity": gran,
-        "limit":       str(limit),
-    }
+# Bitget v2 candles butuh format XXXXXUSDT_UMCBL
+candle_symbol = symbol.replace("USDT", "USDT_UMCBL") if "USDT" in symbol else symbol
+
+params = {
+    "symbol":      candle_symbol,
+    "granularity": gran,
+    "limit":       str(limit),
+}
 
     # Debug log — hanya tampil untuk coin pertama agar tidak spam
     if not _candle_error_logged:
