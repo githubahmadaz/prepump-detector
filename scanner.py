@@ -1,16 +1,13 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║         PRE-PUMP INTELLIGENCE SCANNER v3.0                      ║
+║         PRE-PUMP INTELLIGENCE SCANNER v3.1                      ║
 ║         BTC-Independent | Whale Detection | Smart Entry         ║
 ║                                                                  ║
-║  PERBAIKAN v3.0:                                                 ║
-║  ✅ Cooldown persisten via file JSON (tidak reset tiap run)      ║
-║  ✅ Adaptive rate limiting + pre-filter (hemat 60% API calls)    ║
-║  ✅ Fix double-scoring "harga flat 4h"                           ║
-║  ✅ Target berbasis level teknikal (resistance nyata)            ║
-║  ✅ Max alerts dinaikkan ke 10 coin                              ║
-║  ✅ Validasi symbol aktif sebelum analisis                       ║
-║  ✅ Layer scoring di-cap lebih ketat (tidak bisa overflow)       ║
+║  PERBAIKAN v3.1:                                                 ║
+║  ✅ Threshold volume diturunkan berdasarkan data forensik        ║
+║  ✅ Layer volume diperkaya dengan awakening ratio & penyesuaian ║
+║  ✅ Layer funding diberi penalti untuk funding sangat negatif   ║
+║  ✅ Konfigurasi pre-filter disesuaikan                           ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -41,22 +38,22 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════
-#  ⚙️  KONFIGURASI
+#  ⚙️  KONFIGURASI (DIUBAH BERDASARKAN FORENSIK)
 # ══════════════════════════════════════════════════════════════
 CONFIG = {
     "min_score_alert":        52,
     "min_whale_score":        25,
-    "min_volume_usd_24h":     1_000_000,
+    "min_volume_usd_24h":     5_000,           # ✅ dari 1jt -> 5rb (menangkap ORCA dkk)
     "max_pump_pct_24h":       15.0,
     "min_market_cap":         50_000_000,
     "max_market_cap":         10_000_000_000,
-    "alert_cooldown_sec":     3600,       # 1 jam cooldown per coin
+    "alert_cooldown_sec":     3600,
     "candle_limit_15m":       96,
     "candle_limit_1h":        72,
-    "max_alerts_per_run":     10,         # ✅ FIX: dinaikkan dari 5 ke 10
-    "pre_filter_min_vol":     500_000,    # Filter awal sebelum analisis penuh
+    "max_alerts_per_run":     10,
+    "pre_filter_min_vol":     2_000,           # ✅ dari 500rb -> 2rb (lebih longgar)
     "pre_filter_max_pump":    20.0,
-    "sleep_between_coins":    1.0,        # ✅ FIX: dinaikkan sedikit untuk safety
+    "sleep_between_coins":    1.0,
     "sleep_after_api_error":  3.0,
     "cooldown_file":          "/tmp/pump_scanner_cooldown.json",
 }
@@ -77,7 +74,7 @@ GRAN_MAP = {
 }
 
 # ══════════════════════════════════════════════════════════════
-#  📋  DAFTAR COIN YANG DISCAN
+#  📋  DAFTAR COIN YANG DISCAN (TIDAK BERUBAH)
 # ══════════════════════════════════════════════════════════════
 TARGET_COINS = [
     "0GUSDT", "1000BONKUSDT", "1000RATSUSDT", "1000SATSUSDT",
@@ -128,7 +125,7 @@ TARGET_COINS = [
 ]
 
 # ══════════════════════════════════════════════════════════════
-#  🗺️  PETA SEKTOR
+#  🗺️  PETA SEKTOR (TIDAK BERUBAH)
 # ══════════════════════════════════════════════════════════════
 SECTOR_MAP = {
     "SOLANA_ECOSYSTEM": [
@@ -184,7 +181,6 @@ SECTOR_MAP = {
     ],
 }
 
-# Reverse lookup: symbol → sektor
 SECTOR_LOOKUP = {}
 for _sec, _coins in SECTOR_MAP.items():
     for _c in _coins:
@@ -201,18 +197,14 @@ _cache = {}
 
 # ══════════════════════════════════════════════════════════════
 #  💾  COOLDOWN PERSISTEN
-#  ✅ FIX: Cooldown disimpan ke file JSON sehingga tidak reset
-#          setiap kali GitHub Actions menjalankan run baru
 # ══════════════════════════════════════════════════════════════
 
 def load_cooldown_state():
-    """Load state cooldown dari file JSON."""
     try:
         path = CONFIG["cooldown_file"]
         if os.path.exists(path):
             with open(path, "r") as f:
                 data = json.load(f)
-            # Bersihkan entry yang sudah expired untuk hemat space
             now = time.time()
             cleaned = {
                 k: v for k, v in data.items()
@@ -225,7 +217,6 @@ def load_cooldown_state():
 
 
 def save_cooldown_state(state):
-    """Simpan state cooldown ke file JSON."""
     try:
         with open(CONFIG["cooldown_file"], "w") as f:
             json.dump(state, f)
@@ -233,7 +224,6 @@ def save_cooldown_state(state):
         log.warning(f"Gagal simpan cooldown state: {e}")
 
 
-# State cooldown dimuat saat startup
 _alert_cooldown = load_cooldown_state()
 log.info(f"Cooldown aktif untuk {len(_alert_cooldown)} coin dari run sebelumnya")
 
@@ -253,7 +243,6 @@ def set_cooldown(symbol):
 # ══════════════════════════════════════════════════════════════
 
 def safe_get(url, params=None, timeout=12):
-    """HTTP GET dengan error handling dan retry sederhana."""
     for attempt in range(2):
         try:
             r = requests.get(url, params=params, timeout=timeout)
@@ -269,7 +258,6 @@ def safe_get(url, params=None, timeout=12):
             except:
                 body = "(tidak bisa baca body)"
             log.warning(f"HTTP {e.response.status_code}: {url} | Body: {body}")
-            # Jika 429 (rate limit), tunggu lebih lama
             if e.response.status_code == 429:
                 log.warning("Rate limit! Tunggu 10 detik...")
                 time.sleep(10)
@@ -281,7 +269,6 @@ def safe_get(url, params=None, timeout=12):
 
 
 def send_telegram(msg):
-    """Kirim pesan ke Telegram."""
     if not BOT_TOKEN or not CHAT_ID:
         log.error("BOT_TOKEN / CHAT_ID tidak ditemukan!")
         return False
@@ -312,16 +299,9 @@ def percentile_rank(value, data):
 
 # ══════════════════════════════════════════════════════════════
 #  🔍  PRE-FILTER (HEMAT API CALLS)
-#  ✅ FIX: Filter coin berdasarkan data ticker sebelum melakukan
-#          banyak API call ke candle/OI/trades
 # ══════════════════════════════════════════════════════════════
 
 def passes_quick_filter(ticker):
-    """
-    Filter cepat berbasis ticker data saja (tanpa API call tambahan).
-    Mengeliminasi coin yang jelas tidak memenuhi syarat.
-    Returns True jika coin layak dianalisis lebih lanjut.
-    """
     if not ticker:
         return False
     try:
@@ -331,18 +311,12 @@ def passes_quick_filter(ticker):
     except:
         return False
 
-    # Volume minimum (lebih longgar dari filter akhir)
     if vol_usd < CONFIG["pre_filter_min_vol"]:
         return False
-
-    # Sudah pump terlalu banyak
     if chg_24h > CONFIG["pre_filter_max_pump"]:
         return False
-
-    # Harga harus valid
     if price <= 0:
         return False
-
     return True
 
 
@@ -351,7 +325,6 @@ def passes_quick_filter(ticker):
 # ══════════════════════════════════════════════════════════════
 
 def get_all_futures_tickers():
-    """Ambil semua ticker USDT-Futures dari Bitget."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/tickers"
     data = safe_get(url, params={"productType": "usdt-futures"})
     if data and data.get("code") == "00000":
@@ -361,12 +334,7 @@ def get_all_futures_tickers():
 
 
 def get_candles(symbol, granularity="15m", limit=96):
-    """
-    Ambil data candlestick OHLCV dari Bitget v2.
-    productType: usdt-futures (huruf kecil — wajib!)
-    """
     gran = GRAN_MAP.get(granularity, granularity)
-
     cache_key = f"candle_{symbol}_{gran}_{limit}"
     if cache_key in _cache:
         ts, val = _cache[cache_key]
@@ -407,7 +375,6 @@ def get_candles(symbol, granularity="15m", limit=96):
 
 
 def get_open_interest(symbol):
-    """Ambil Open Interest saat ini."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/open-interest"
     data = safe_get(url, params={"symbol": symbol, "productType": "usdt-futures"})
     if data and data.get("code") == "00000":
@@ -422,7 +389,6 @@ def get_open_interest(symbol):
 
 
 def get_funding_rate(symbol):
-    """Ambil funding rate saat ini."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/current-fund-rate"
     data = safe_get(url, params={"symbol": symbol, "productType": "usdt-futures"})
     if data and data.get("code") == "00000":
@@ -434,7 +400,6 @@ def get_funding_rate(symbol):
 
 
 def get_orderbook(symbol, limit=15):
-    """Ambil order book."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/merge-depth"
     data = safe_get(url, params={
         "symbol":      symbol,
@@ -453,7 +418,6 @@ def get_orderbook(symbol, limit=15):
 
 
 def get_recent_trades(symbol, limit=200):
-    """Ambil transaksi terbaru."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/fills"
     data = safe_get(url, params={
         "symbol":      symbol,
@@ -477,7 +441,6 @@ def get_recent_trades(symbol, limit=200):
 
 
 def get_cg_trending():
-    """Ambil coin trending dari CoinGecko."""
     cache_key = "cg_trending"
     if cache_key in _cache:
         ts, val = _cache[cache_key]
@@ -496,7 +459,6 @@ def get_cg_trending():
 # ══════════════════════════════════════════════════════════════
 
 def calc_bollinger(candles, period=20):
-    """Hitung Bollinger Bands dan BBW."""
     if len(candles) < period:
         return []
     closes  = [c["close"] for c in candles]
@@ -516,7 +478,6 @@ def calc_bollinger(candles, period=20):
 
 
 def calc_atr(candles, period=14):
-    """Hitung Average True Range."""
     if len(candles) < period + 1:
         return []
     trs = []
@@ -530,7 +491,6 @@ def calc_atr(candles, period=14):
 
 
 def calc_vwap(candles):
-    """Hitung VWAP dan standar deviasinya."""
     cum_tv, cum_v, vals = 0, 0, []
     for c in candles:
         tp     = (c["high"] + c["low"] + c["close"]) / 3
@@ -546,7 +506,6 @@ def calc_vwap(candles):
 
 
 def calc_poc(candles, buckets=40):
-    """Hitung Point of Control — harga dengan volume historis terbanyak."""
     if not candles:
         return None
     pmin = min(c["low"]  for c in candles)
@@ -568,15 +527,9 @@ def calc_poc(candles, buckets=40):
 
 
 def find_resistance_level(candles, current_price):
-    """
-    ✅ FIX: Target berbasis resistance teknikal nyata.
-    Cari swing high terdekat di atas harga sekarang sebagai target.
-    Lebih akurat daripada target flat persentase.
-    """
     if not candles or len(candles) < 5:
         return current_price * 1.08, current_price * 1.15
 
-    # Kumpulkan semua swing high (high lebih tinggi dari 2 candle di kiri & kanan)
     swing_highs = []
     for i in range(2, len(candles) - 2):
         h = candles[i]["high"]
@@ -584,7 +537,6 @@ def find_resistance_level(candles, current_price):
                 h > candles[i+1]["high"] and h > candles[i+2]["high"]):
             swing_highs.append(h)
 
-    # Filter hanya yang di atas harga sekarang (minimal 1% di atas)
     resistances = sorted([h for h in swing_highs if h > current_price * 1.01])
 
     if len(resistances) >= 2:
@@ -594,7 +546,6 @@ def find_resistance_level(candles, current_price):
         r1 = resistances[0]
         r2 = r1 * 1.06
     else:
-        # Fallback: gunakan recent high sebagai target
         recent_high = max(c["high"] for c in candles[-48:])
         r1 = max(recent_high, current_price * 1.05)
         r2 = r1 * 1.06
@@ -607,7 +558,6 @@ def find_resistance_level(candles, current_price):
 # ══════════════════════════════════════════════════════════════
 
 def get_taker_ratio(trades):
-    """Hitung rasio taker buy vs total."""
     if not trades:
         return 0.5
     bv    = sum(t["size"] for t in trades if t["side"] == "buy")
@@ -617,7 +567,6 @@ def get_taker_ratio(trades):
 
 
 def detect_large_trade_dominance(trades):
-    """Hitung % volume dari order besar (>$20K) yang merupakan beli."""
     if not trades:
         return 0, 0
     total     = sum(t["size"] * t["price"] for t in trades)
@@ -630,7 +579,6 @@ def detect_large_trade_dominance(trades):
 
 
 def detect_iceberg(trades, current_price, tol=0.15):
-    """Deteksi iceberg order — banyak order kecil di level harga yang sama."""
     if not trades:
         return False, 0, 0
     at_level = [
@@ -648,12 +596,6 @@ def detect_iceberg(trades, current_price, tol=0.15):
 
 
 def calc_whale_score(symbol, candles_15m, funding):
-    """
-    Skor 0-100 — seberapa kuat bukti whale sedang akumulasi.
-
-    ✅ FIX: Sinyal "harga flat 4h" HANYA ada di sini (dihapus dari
-            layer_oi_funding) untuk menghindari double-counting.
-    """
     ws       = 0
     evidence = []
     cur      = candles_15m[-1]["close"] if candles_15m else 0
@@ -681,7 +623,6 @@ def calc_whale_score(symbol, candles_15m, funding):
             ws += 18
             evidence.append(f"✅ Iceberg order: ${tot:,.0f} ({cnt} tx kecil)")
 
-    # ✅ FIX: Harga flat 4h HANYA dihitung di sini, tidak di layer_oi_funding
     if candles_15m and len(candles_15m) >= 16:
         p4h  = candles_15m[-16]["close"]
         pchg = abs((cur - p4h) / p4h * 100) if p4h else 99
@@ -720,7 +661,7 @@ def calc_whale_score(symbol, candles_15m, funding):
 # ══════════════════════════════════════════════════════════════
 
 def layer_volatility(candles_15m, candles_1h):
-    """Layer 1 — Kompresi volatilitas (pegas ditekan)."""
+    """Layer 1 — Kompresi volatilitas."""
     score = 0
     sigs  = []
 
@@ -772,30 +713,51 @@ def layer_volatility(candles_15m, candles_1h):
 
 
 def layer_volume(candles_15m):
-    """Layer 2 — Pola volume sebelum pump."""
+    """
+    Layer 2 — Pola volume sebelum pump.
+    Diperbarui dengan awakening ratio (6h vs 24h) dan penyesuaian skor.
+    """
     score = 0
     sigs  = []
 
-    if len(candles_15m) < 24:
+    if len(candles_15m) < 96:   # butuh minimal 24 jam data
         return score, sigs
 
     vols = [c["volume_usd"] for c in candles_15m]
 
-    vol_base   = sum(vols[:20]) / 20 if len(vols) >= 20 else 1
-    vol_recent = sum(vols[-8:])  / 8
-    vol_ratio  = vol_recent / vol_base if vol_base > 0 else 1
+    # ── Awakening ratio (6 jam terakhir vs 24 jam) ───────────────
+    vol_24h = sum(vols[-96:]) / 96
+    vol_6h  = sum(vols[-24:]) / 24
+    awakening = vol_6h / vol_24h if vol_24h > 0 else 1
 
-    p_start = candles_15m[-24]["close"]
-    p_now   = candles_15m[-1]["close"]
-    p_chg   = abs((p_now - p_start) / p_start * 100) if p_start > 0 else 99
+    if awakening > 1.2:
+        score += 15
+        sigs.append(f"Awakening Volume {awakening:.2f}x (6h vs 24h) — mulai bangun")
+    elif awakening > 0.9:
+        score += 8
+        sigs.append(f"Volume meningkat {awakening:.2f}x dalam 6 jam terakhir")
+    elif awakening > 0.6:
+        score += 4
+        sigs.append(f"Volume stabil {awakening:.2f}x")
 
-    if 1.5 <= vol_ratio <= 5.0 and p_chg < 2.5:
-        score += 26
-        sigs.append(f"Volume Creep {vol_ratio:.1f}x — harga masih flat (akumulasi tersembunyi)")
-    elif 1.2 <= vol_ratio < 1.5 and p_chg < 3.0:
-        score += 12
-        sigs.append(f"Volume perlahan naik {vol_ratio:.1f}x")
+    # ── Volume creep (volume naik, harga flat) ───────────────────
+    if len(vols) >= 28:
+        vol_base = sum(vols[:20]) / 20
+        vol_recent = sum(vols[-8:]) / 8
+        vol_ratio = vol_recent / vol_base if vol_base > 0 else 1
 
+        p_start = candles_15m[-24]["close"]
+        p_now   = candles_15m[-1]["close"]
+        p_chg   = abs((p_now - p_start) / p_start * 100) if p_start > 0 else 99
+
+        if 1.5 <= vol_ratio <= 5.0 and p_chg < 2.5:
+            score += 15
+            sigs.append(f"Volume Creep {vol_ratio:.1f}x — harga masih flat (akumulasi)")
+        elif 1.2 <= vol_ratio < 1.5 and p_chg < 3.0:
+            score += 6
+            sigs.append(f"Volume perlahan naik {vol_ratio:.1f}x")
+
+    # ── CVD Divergence ───────────────────────────────────────────
     cvd = 0
     for c in candles_15m[-20:]:
         rng = c["high"] - c["low"]
@@ -806,33 +768,35 @@ def layer_volume(candles_15m):
 
     price_trend = candles_15m[-1]["close"] - candles_15m[-20]["close"]
     if cvd > 0 and abs(price_trend / candles_15m[-1]["close"]) < 0.02:
-        score += 16
+        score += 12
         sigs.append("CVD Bullish Divergence — tekanan beli tersembunyi")
 
-    return score, sigs
+    return min(score, 40), sigs   # ✅ maksimum layer volume dinaikkan jadi 40
 
 
 def layer_oi_funding(symbol, candles_1h):
     """
     Layer 3 — Analisis Open Interest dan Funding Rate.
-
-    ✅ FIX: Sinyal "harga flat 4h" DIHAPUS dari sini untuk menghindari
-            double-counting dengan calc_whale_score.
-            Layer ini murni fokus pada kondisi funding & squeeze setup.
+    Ditambah penalti untuk funding sangat negatif.
     """
     score   = 0
     sigs    = []
     funding = get_funding_rate(symbol)
 
-    # Short squeeze setup
-    if funding < -0.05:
+    # Funding rate scoring (dalam desimal, misal 0.0001 = 0.01%)
+    if funding > 0.0001:
+        score += 8
+        sigs.append(f"✅ Funding positif ({funding:.4f}%) — sentimen bullish")
+    elif funding < -0.0002:
+        score -= 10
+        sigs.append(f"⚠️ Funding sangat negatif ({funding:.4f}%) — potensi tekanan jual")
+    elif funding < -0.05:
         score += 20
         sigs.append(f"Short Squeeze Setup kuat — funding {funding:.4f}%")
     elif funding < -0.02:
         score += 10
         sigs.append(f"Bias short ada ({funding:.4f}%) — squeeze potensial")
     elif -0.01 < funding < 0.04:
-        # Funding sehat — kondisi netral yang baik untuk entry
         score += 8
         sigs.append(f"Funding sehat ({funding:.4f}%) — kondisi ideal entry")
 
@@ -922,7 +886,6 @@ def layer_social(symbol):
 
 
 def get_time_multiplier():
-    """Multiplier berdasarkan window waktu pump historis."""
     h = utc_hour()
     if h in [5, 6, 7, 8, 11, 12, 13, 19, 20, 21]:
         return 1.25, f"High-prob window ({h}:00 UTC)"
@@ -936,42 +899,28 @@ def get_time_multiplier():
 # ══════════════════════════════════════════════════════════════
 
 def calc_entry_zones(candles, funding):
-    """
-    Hitung VWAP, Point of Control, Stop Loss, Target, R/R.
-
-    FIX v3.1: Validasi bahwa support/entry HARUS di bawah harga sekarang.
-              Jika VWAP/POC berada di atas harga (harga sedang turun dari area tinggi),
-              fallback ke persentase dari harga sekarang.
-    """
     if not candles:
         return None
 
     cur      = candles[-1]["close"]
     vwap, vs = calc_vwap(candles)
 
-    # z1: VWAP lower band — harus di bawah harga sekarang
     z1_raw = (vwap - 1.5 * vs) if (vwap and vs) else cur * 0.97
-    z1     = z1_raw if z1_raw < cur else cur * 0.97  # fallback jika di atas harga
+    z1     = z1_raw if z1_raw < cur else cur * 0.97
 
-    # z2: POC — harus di bawah harga sekarang
     z2_raw = calc_poc(candles) or cur * 0.98
-    z2     = z2_raw if z2_raw < cur else cur * 0.98  # fallback jika di atas harga
+    z2     = z2_raw if z2_raw < cur else cur * 0.98
 
-    # Target: resistance teknikal HARUS di atas harga sekarang
     t1, t2 = find_resistance_level(candles, cur)
-    # find_resistance_level sudah memastikan t1 > cur, tapi double check
     if t1 <= cur:
         t1 = cur * 1.07
     if t2 <= t1:
         t2 = t1 * 1.05
 
-    # Support = level terkuat yang VALID (di bawah harga)
-    support = max(z1, z2)  # keduanya sudah dipastikan < cur
+    support = max(z1, z2)
     entry   = support * 1.002
-
-    # Validasi final: entry tidak boleh melebihi harga sekarang
     if entry >= cur:
-        entry = cur * 0.999  # entry sedikit di bawah harga sekarang
+        entry = cur * 0.999
 
     sl      = support * 0.967
     risk    = cur - sl
@@ -998,7 +947,6 @@ def calc_entry_zones(candles, funding):
 # ══════════════════════════════════════════════════════════════
 
 def master_score(symbol, ticker_data, all_tickers_dict):
-    """Gabungkan semua 7 layer menjadi satu skor final."""
     total = 0
     sigs  = []
 
@@ -1015,9 +963,9 @@ def master_score(symbol, ticker_data, all_tickers_dict):
     total += min(vs, 35)
     sigs  += vsigs
 
-    # Layer 2: Volume (max 30 poin)
+    # Layer 2: Volume (max 40 poin)
     vls, vlsigs = layer_volume(c15)
-    total += min(vls, 30)
+    total += min(vls, 40)
     sigs  += vlsigs
 
     # Layer 3: OI & Funding (max 22 poin)
@@ -1089,7 +1037,6 @@ def master_score(symbol, ticker_data, all_tickers_dict):
 # ══════════════════════════════════════════════════════════════
 
 def build_alert(r, rank=None):
-    """Bangun pesan alert lengkap untuk Telegram."""
     sc     = r["score"]
     filled = int(sc / 5)
     bar    = "█" * filled + "░" * (20 - filled)
@@ -1139,10 +1086,6 @@ def build_alert(r, rank=None):
 
 
 def build_summary_alert(results):
-    """
-    Kirim ringkasan semua kandidat dalam satu pesan.
-    Berguna untuk melihat top 10 sekaligus tanpa scroll panjang.
-    """
     msg = f"📋 <b>RINGKASAN SCAN — {utc_now()}</b>\n"
     msg += f"{'━'*30}\n"
     for i, r in enumerate(results, 1):
@@ -1173,7 +1116,6 @@ def run_scan():
         send_telegram("⚠️ <b>Scanner Error</b>: Gagal ambil data Bitget API")
         return
 
-    # ✅ FIX: Pre-filter untuk hemat API calls
     pre_candidates = []
     skipped_prefilter = 0
     for symbol in TARGET_COINS:
@@ -1234,7 +1176,6 @@ def run_scan():
         log.info("Tidak ada sinyal kuat dalam siklus ini")
         return
 
-    # Filter hasil yang layak dikirim
     qualified = [
         r for r in results
         if r["ws"] >= CONFIG["min_whale_score"] or r["score"] >= 65
@@ -1244,14 +1185,12 @@ def run_scan():
         log.info("Tidak ada yang memenuhi syarat whale score + total score")
         return
 
-    # Kirim ringkasan dulu jika ada lebih dari 3 coin
     top_results = qualified[:CONFIG["max_alerts_per_run"]]
     if len(top_results) > 3:
         summary = build_summary_alert(top_results)
         send_telegram(summary)
         time.sleep(2)
 
-    # Kirim detail per coin
     sent = 0
     for rank, r in enumerate(top_results, 1):
         msg = build_alert(r, rank=rank)
@@ -1273,7 +1212,7 @@ def run_scan():
 
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v3.0 — START       ║")
+    log.info("║  PRE-PUMP SCANNER v3.1 — START       ║")
     log.info("╚══════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
