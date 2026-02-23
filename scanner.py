@@ -1,20 +1,24 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v5.0 — DATA-DRIVEN FORENSIC EDITION          ║
+║  PRE-PUMP SCANNER v6.0 — CALIBRATED & OPTIMIZED                ║
 ║                                                                  ║
-║  Dibangun berdasarkan analisis forensik 19 coin nyata:          ║
-║  8 pumped (ORCA+80%, BIO+50%, AGLD+90%, POWER+150%,            ║
-║            ENSO+95%, SNX+45%, SIREN+200%, AZTEC+90%)           ║
-║  11 non-pumped (PHA, PEAQ, PORTAL, OM, GTC, A2Z, NFP,          ║
-║                 NTRN, LINK, ZEC, HYPE)                          ║
+║  Upgrade dari v5.0 berdasarkan analisis saran + data forensik:  ║
 ║                                                                  ║
-║  TEMUAN KUNCI FORENSIK:                                          ║
-║  ✅ BBW percentile BUKAN pembeda tunggal (ENSO pump BBW=99%ile) ║
-║  ✅ Vol ratio 0.18-2.0x = zona sehat (bukan terlalu mati/ramai) ║
-║  ✅ Gate funding < -0.0005 penting (OM pattern = dump)          ║
-║  ✅ Price change 7d: pumped semua di -10% s/d +8%               ║
-║  ✅ Vol 24h > $500K/jam = sudah terlalu populer (false pos)     ║
-║  ✅ Awakening 6h/24h: pumped avg 0.89x, delisting avg 0.02x    ║
+║  PERUBAHAN v6.0:                                                 ║
+║  ✅ max_volume_24h: 12M → 18M (POWER pump 14.3M/hari)          ║
+║  ✅ downtrend_gate: -11% → -14% (lebih longgar, aman)           ║
+║  ✅ Vol score: max 35 → 40, awakening >1.2 dapat tier baru      ║
+║  ✅ Funding score: max 15 → 20 (pembeda kuat di forensik)       ║
+║  ✅ BBW score: max 25 → 20 (ENSO case: tidak selalu prediktif)  ║
+║  ✅ Trades limit: 200 → 500 (sampel lebih representatif)        ║
+║  ✅ Iceberg tolerance: dynamic (0.5%/<$1, 0.3%/$1-10, 0.15%/>$10)║
+║  ✅ Large trade threshold: $10K → adaptif per vol coin           ║
+║  ✅ SL berbasis ATR-14 (proporsional, bukan fixed %)            ║
+║  ✅ T1 = min(swing high, entry + 2*ATR) untuk konservatif       ║
+║  ✅ Support max distance: 10% dari harga (hindari SL terlalu jauh)║
+║  ✅ Order book imbalance dari merge-depth API                    ║
+║  ✅ Gate log terstruktur (bisa dianalisis pola penolakan)        ║
+║  ✅ pre_filter_min_vol: 30K → 20K/jam (lebih sensitif)          ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -39,34 +43,45 @@ log = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════
 CONFIG = {
     "min_score_alert":          48,    # backtest: 74% akurasi di 45-50
+
     "min_whale_score":          15,
 
-    # Volume: dari forensik, pumped all di 0.227x - 1.242x baseline
-    "min_volume_usd_24h":       80_000,   # $80K/jam minimum
-    "max_volume_usd_24h":       500_000,  # $500K/jam max (LINK/HYPE false pos di atas ini)
-    "pre_filter_min_vol":       30_000,
+    # ── Volume gates ──────────────────────────────────────────
+    # v6: min tetap, max dinaikkan 12M→18M (POWER pump 14.3M/hari)
+    "min_volume_usd_24h":       80_000,    # $80K/jam minimum
+    "max_volume_usd_24h":       750_000,   # $750K/jam = 18M/hari (naik dari 500K)
+    "pre_filter_min_vol":       20_000,    # v6: turun 30K→20K/jam (lebih sensitif)
 
-    # Gate values dari forensik
-    "gate_price_change_7d_max":  12.0,   # pumped max +4.8%, gate di +12% (margin)
-    "gate_price_change_7d_min": -11.0,   # pumped min -7.9%, gate di -11%
-    "gate_funding_min":         -0.0005, # OM pattern: -0.00131 = dump
-    "gate_awakening_min":        0.05,   # delisting avg 0.019, gate di 0.05
-    "gate_vol_ratio_min":        0.18,   # delisting avg 0.10, gate di 0.18
+    # ── Gate threshold dari forensik ──────────────────────────
+    "gate_price_change_7d_max":  12.0,    # pumped max +4.8%, gate +12%
+    "gate_price_change_7d_min": -14.0,    # v6: dilonggarkan -11%→-14%
+    "gate_funding_min":         -0.0005,  # OM=-0.00131 → dump. AZTEC=-0.000256 aman
+    "gate_awakening_min":        0.05,    # pumped min 0.175, delisting avg 0.019
+    "gate_vol_ratio_min":        0.18,    # delisting avg 0.099, pumped min 0.227
 
-    # Target
+    # ── Entry / SL ────────────────────────────────────────────
     "min_target_distance_pct":   8.0,
+    "max_support_distance_pct":  10.0,    # v6: SL max 10% dari harga
+    "atr_sl_multiplier":          1.5,    # v6: SL = entry - 1.5 * ATR(14)
+    "atr_t1_multiplier":          2.5,    # v6: T1 = entry + 2.5 * ATR(14) sebagai floor
 
-    # Candles
-    "candle_limit_1h":          168,    # 7 hari (forensik butuh 7d data)
-    "candle_limit_15m":         96,     # 24 jam
+    # ── Candles ───────────────────────────────────────────────
+    "candle_limit_1h":           168,    # 7 hari
+    "candle_limit_15m":           96,    # 24 jam
 
-    # Ops
-    "alert_cooldown_sec":       3600,
-    "max_alerts_per_run":       8,
-    "sleep_between_coins":      1.2,
-    "sleep_after_error":        5.0,
-    "cooldown_file":            "/tmp/pump_scanner_v5_cooldown.json",
-    "pre_filter_max_pump":      20.0,
+    # ── Ops ───────────────────────────────────────────────────
+    "alert_cooldown_sec":        3600,
+    "max_alerts_per_run":           8,
+    "sleep_between_coins":        1.2,
+    "sleep_after_error":          5.0,
+    "cooldown_file":   "/tmp/pump_scanner_v6_cooldown.json",
+    "pre_filter_max_pump":        20.0,
+
+    # ── Trades ────────────────────────────────────────────────
+    "trades_limit":               500,   # v6: 200→500 sampel lebih representatif
+
+    # ── Gate log ──────────────────────────────────────────────
+    "gate_log_file": "/tmp/pump_scanner_v6_gates.json",
 }
 
 GRAN_MAP = {
@@ -354,7 +369,63 @@ def calc_poc(candles):
     poc_b = max(vol_bkt, key=vol_bkt.get) if vol_bkt else 20
     return pmin + (poc_b + 0.5) * bsize
 
-def find_targets(candles, cur):
+def calc_atr(candles, period=14):
+    """ATR(14) — untuk SL dan T1 yang proporsional."""
+    if len(candles) < period + 1:
+        return None
+    trs = []
+    for i in range(1, len(candles)):
+        h, l, pc = candles[i]["high"], candles[i]["low"], candles[i-1]["close"]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    atr = sum(trs[:period]) / period
+    for i in range(period, len(trs)):
+        atr = (atr * (period - 1) + trs[i]) / period
+    return atr
+
+def get_orderbook_imbalance(symbol):
+    """
+    Ambil order book dari merge-depth dan hitung imbalance bid/ask.
+    Imbalance > 0.6 = lebih banyak bid (tekanan beli) = bullish.
+    Return: (imbalance_ratio, total_bid_usd, total_ask_usd)
+    """
+    data = safe_get(f"{BITGET_BASE}/api/v2/mix/market/merge-depth",
+                    params={"symbol": symbol, "productType": "usdt-futures",
+                            "precision": "scale0", "limit": "50"})
+    if not data or data.get("code") != "00000":
+        return None, 0, 0
+    try:
+        book = data["data"]
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+        bid_usd = sum(float(b[0]) * float(b[1]) for b in bids[:20])
+        ask_usd = sum(float(a[0]) * float(a[1]) for a in asks[:20])
+        total   = bid_usd + ask_usd
+        ratio   = bid_usd / total if total > 0 else 0.5
+        return ratio, bid_usd, ask_usd
+    except:
+        return None, 0, 0
+
+def log_gate(symbol, reason):
+    """Simpan log gate ke file JSON untuk analisis pola penolakan."""
+    try:
+        path = CONFIG["gate_log_file"]
+        now  = time.time()
+        if os.path.exists(path):
+            with open(path) as f:
+                data = json.load(f)
+        else:
+            data = []
+        data.append({"ts": now, "symbol": symbol, "reason": reason,
+                      "dt": datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")})
+        # Simpan hanya 500 entry terakhir
+        if len(data) > 500:
+            data = data[-500:]
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
+
+
     """Swing high minimal 8% di atas harga sekarang."""
     min_t = cur * (1 + CONFIG["min_target_distance_pct"] / 100)
     swings = []
@@ -437,39 +508,45 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     # Gate 1: Awakening terlalu rendah → coin mati/delisting
     # Forensik: delisting avg awakening = 0.019, pumped min = 0.175
     if awakening < CONFIG["gate_awakening_min"]:
-        return 0, {}, [], f"GATE: coin mati (awakening={awakening:.3f}, min={CONFIG['gate_awakening_min']})"
+        log_gate(symbol, f"dead_coin:awakening={awakening:.3f}")
+        return 0, {}, [], f"GATE: coin mati (awakening={awakening:.3f})"
 
     # Gate 2: Vol ratio terlalu rendah → tidak ada aktivitas sama sekali
     # Forensik: delisting avg vol_ratio = 0.099, pumped min = 0.227
     if vol_ratio < CONFIG["gate_vol_ratio_min"]:
+        log_gate(symbol, f"low_liquidity:vol_ratio={vol_ratio:.3f}")
         return 0, {}, [], f"GATE: likuiditas terlalu rendah (vol_ratio={vol_ratio:.3f})"
 
     # Gate 3: Price change 7d terlalu ekstrem
-    # Forensik: pumped semua di -7.9% s/d +4.8%. Gate longgar di -11% dan +12%
+    # v6: dilonggarkan dari -11% → -14% (pumped min -7.9%, masih ada margin 6%)
     if price_chg7d > CONFIG["gate_price_change_7d_max"]:
+        log_gate(symbol, f"overbought_7d:{price_chg7d:+.1f}%")
         return 0, {}, [], f"GATE: sudah overbought 7d ({price_chg7d:+.1f}%)"
     if price_chg7d < CONFIG["gate_price_change_7d_min"]:
+        log_gate(symbol, f"downtrend_7d:{price_chg7d:+.1f}%")
         return 0, {}, [], f"GATE: downtrend kuat 7d ({price_chg7d:+.1f}%)"
 
     # Gate 4: Funding terlalu negatif (OM pattern = dump, bukan pump)
     # Forensik: OM funding=-0.00131 → turun -11%. Pumped max negatif = -0.000256 (AZTEC)
     if funding < CONFIG["gate_funding_min"]:
+        log_gate(symbol, f"funding_extreme:{funding:.5f}")
         return 0, {}, [], f"GATE: funding overcrowded short ({funding:.5f})"
 
     # Gate 5: Range 24h terlalu lebar = pump sudah berjalan
     if range_24h > 50:
+        log_gate(symbol, f"range_24h_wide:{range_24h:.0f}%")
         return 0, {}, [], f"GATE: range 24h={range_24h:.0f}% — pump sudah berjalan"
 
-    # Gate 6: Volume 24h USD terlalu besar → coin terlalu populer (LINK, HYPE, ZEC pattern)
-    # Forensik: LINK=$1M/jam, HYPE=$977K/jam → false positive. Pumped max = $596K (POWER).
-    if vol_24h_usd > CONFIG["max_volume_usd_24h"] * 24 * 1.5:
+    # Gate 6: Volume 24h USD terlalu besar → coin terlalu populer
+    # v6: max_volume_usd_24h dinaikkan 500K→750K/jam = 18M/hari (POWER pump 14.3M)
+    if vol_24h_usd > CONFIG["max_volume_usd_24h"] * 24 * 1.0:
+        log_gate(symbol, f"vol_too_large:${vol_24h_usd/1e6:.1f}M")
         return 0, {}, [], f"GATE: vol terlalu besar (${vol_24h_usd/1e6:.1f}M) — sudah terlalu populer"
 
     # ══════════════════════════════════════════════════════
-    #  📊  VOLUME SCORE (max 35)
-    #  Zona sehat dari forensik: 0.18x - 2.0x baseline
-    #  Pumped avg: 0.71x, non-pumped-turun avg: 0.80x (overlap)
-    #  Diferensiator: awakening ratio lebih penting
+    #  📊  VOLUME SCORE (max 40) — v6: naik dari 35
+    #  Awakening terbukti prediktif kuat (forensik: pumped 0.89 vs NP 0.49)
+    #  Tier baru: awakening >1.2 dapat bonus lebih besar
     # ══════════════════════════════════════════════════════
 
     vs = 0
@@ -483,40 +560,42 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
         vs += 15
         sigs.append(f"Vol mulai diperhatikan ({vol_ratio:.2f}x baseline)")
 
+    # v6: tier awakening lebih granular (>1.2 dapat bonus lebih)
     if awakening > 1.5:
+        vs += 15
+        sigs.append(f"🌅 Volume awakening KUAT ({awakening:.2f}x 6h vs 24h avg)")
+    elif awakening > 1.2:
         vs += 10
-        sigs.append(f"🌅 Volume awakening kuat ({awakening:.2f}x 6h vs 24h)")
+        sigs.append(f"🌅 Volume mulai bangun ({awakening:.2f}x 6h vs 24h)")
     elif awakening > 1.0:
         vs += 5
-        sigs.append(f"Volume mulai bangun ({awakening:.2f}x)")
+        sigs.append(f"Volume sedikit naik ({awakening:.2f}x)")
 
-    score += min(vs, 35)
-    bd["vol_score"] = min(vs, 35)
+    score += min(vs, 40)
+    bd["vol_score"] = min(vs, 40)
 
     # ══════════════════════════════════════════════════════
-    #  📐  BBW SCORE (max 25)
-    #  CATATAN FORENSIK: BBW bukan pembeda tunggal!
-    #  ENSO pump+95% tapi BBW=99%ile. Tapi coin dengan
-    #  BBW rendah CENDERUNG pump lebih eksplosif.
-    #  Kombinasikan dengan kondisi lain.
+    #  📐  BBW SCORE (max 20) — v6: diturunkan dari 25
+    #  ENSO pump+95% tapi BBW=99%ile → bukan pembeda tunggal
+    #  Tetap berguna sebagai konfirmasi, bukan sinyal utama
     # ══════════════════════════════════════════════════════
 
     bs = 0
     if bbw_pct < 15:
-        bs += 25
-        sigs.append(f"BBW Squeeze Ekstrem ({bbw_pct:.0f}%ile — sangat jarang)")
+        bs += 20
+        sigs.append(f"BBW Squeeze Ekstrem ({bbw_pct:.0f}%ile)")
     elif bbw_pct < 30:
-        bs += 18
+        bs += 15
         sigs.append(f"BBW Squeeze Kuat ({bbw_pct:.0f}%ile)")
     elif bbw_pct < 50:
-        bs += 8
+        bs += 7
         sigs.append(f"BBW Menyempit ({bbw_pct:.0f}%ile)")
     if bbw_pct > 85:
-        bs -= 10  # expanding = bahaya (LINK, PORTAL pattern)
-        sigs.append(f"⚠️ BBW Expanding ({bbw_pct:.0f}%ile) — awas volatilitas turun")
+        bs -= 8  # expanding = warning (LINK, PORTAL pattern)
+        sigs.append(f"⚠️ BBW Expanding ({bbw_pct:.0f}%ile) — waspadai volatilitas ke bawah")
 
-    score += max(min(bs, 25), 0)
-    bd["bbw_score"] = max(min(bs, 25), 0)
+    score += max(min(bs, 20), 0)
+    bd["bbw_score"] = max(min(bs, 20), 0)
 
     # ══════════════════════════════════════════════════════
     #  📍  PRICE SCORE (max 20)
@@ -547,23 +626,22 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
     bd["price_score"] = min(ps, 20)
 
     # ══════════════════════════════════════════════════════
-    #  💰  FUNDING SCORE (max 15)
-    #  Forensik kuat: pumped di -0.000256 s/d +0.0001
-    #  OM (dump): -0.001310 → sudah digate
-    #  Slight negatif = short squeeze setup terbaik
+    #  💰  FUNDING SCORE (max 20) — v6: naik dari 15
+    #  Forensik: funding negatif ringan = short squeeze setup terkuat
+    #  Pumped median ~0, non-pumped lebih negatif (OM pattern digate)
     # ══════════════════════════════════════════════════════
 
     fs = 0
     if -0.0004 <= funding <= -0.00001:
-        fs  = 15
-        sigs.append(f"Funding negatif ringan ({funding:.5f}%) — short squeeze setup")
+        fs  = 20
+        sigs.append(f"💰 Funding negatif ringan ({funding:.5f}) — short squeeze setup!")
     elif 0 <= funding <= 0.0001:
-        fs  = 10
-        sigs.append(f"Funding netral sehat ({funding:.5f}%)")
+        fs  = 13
+        sigs.append(f"Funding netral sehat ({funding:.5f})")
     elif 0.0001 < funding <= 0.0002:
-        fs  = 5
+        fs  = 6
     elif funding < -0.0004:
-        fs  = 0  # sudah di-gate tapi ini backup
+        fs  = 0  # sudah digate sebelumnya, backup saja
 
     score += fs
     bd["funding_score"] = fs
@@ -607,40 +685,57 @@ def calc_forensic_score(symbol, candles_1h, candles_15m, ticker, funding):
 # ══════════════════════════════════════════════════════════════
 
 def calc_whale(symbol, candles_15m, funding):
-    ws = 0
-    ev = []
+    ws  = 0
+    ev  = []
     cur = candles_15m[-1]["close"] if candles_15m else 0
 
-    trades = get_trades(symbol)
+    # v6: trades limit 200→500 untuk sampel lebih representatif
+    trades = get_trades(symbol, CONFIG["trades_limit"])
     if trades:
         buy_v = sum(t["size"] for t in trades if t["side"] == "buy")
         tot_v = sum(t["size"] for t in trades)
         tr    = buy_v / tot_v if tot_v > 0 else 0.5
         if tr > 0.70:
             ws += 30
-            ev.append(f"✅ Taker Buy {tr:.0%} — pembeli dominan")
+            ev.append(f"✅ Taker Buy {tr:.0%} — pembeli sangat dominan")
         elif tr > 0.60:
             ws += 15
             ev.append(f"🔶 Taker Buy {tr:.0%} — bias beli")
 
-        # Large trade dominance
+        # v6: large trade threshold adaptif berdasarkan vol coin
+        # Coin kecil: $5K sudah signifikan. Coin besar: $20K+
         total_usd = sum(t["size"] * t["price"] for t in trades)
+        avg_trade = total_usd / len(trades) if trades else 1
+        large_thr = max(avg_trade * 5, 5_000)  # 5x rata-rata trade, min $5K
         lbuy_usd  = sum(t["size"] * t["price"] for t in trades
-                        if t["side"] == "buy" and t["size"] * t["price"] > 10_000)
-        if total_usd > 0 and lbuy_usd / total_usd > 0.35:
+                        if t["side"] == "buy" and t["size"] * t["price"] > large_thr)
+        if total_usd > 0 and lbuy_usd / total_usd > 0.30:
             ws += 25
-            ev.append(f"✅ Smart money {lbuy_usd/total_usd:.0%} vol (${lbuy_usd:,.0f})")
+            ev.append(f"✅ Smart money {lbuy_usd/total_usd:.0%} vol (thr=${large_thr:,.0f})")
 
-        # Iceberg
-        at_level = [t for t in trades if t["side"] == "buy"
-                    and cur > 0 and abs(t["price"] - cur) / cur * 100 < 0.2]
-        if len(at_level) >= 10:
-            tot_ice = sum(t["size"] * t["price"] for t in at_level)
-            if tot_ice > 15_000:
-                ws += 20
-                ev.append(f"✅ Iceberg: ${tot_ice:,.0f} ({len(at_level)} tx kecil)")
+        # v6: iceberg tolerance DINAMIS berdasarkan harga coin
+        # Harga < $0.01: tol 1.0% | $0.01-$1: tol 0.5% | $1-$10: tol 0.3% | >$10: tol 0.15%
+        if cur > 0:
+            if cur < 0.01:
+                ice_tol = 1.0
+            elif cur < 1.0:
+                ice_tol = 0.5
+            elif cur < 10.0:
+                ice_tol = 0.3
+            else:
+                ice_tol = 0.15
 
-    # Harga flat 4h = stealth
+            at_level = [t for t in trades if t["side"] == "buy"
+                        and abs(t["price"] - cur) / cur * 100 < ice_tol]
+            if len(at_level) >= 8:
+                tot_ice = sum(t["size"] * t["price"] for t in at_level)
+                avg_ice = tot_ice / len(at_level)
+                # Iceberg = banyak order kecil di satu level (avg < 20% large_thr)
+                if tot_ice > large_thr * 1.5 and avg_ice < large_thr * 0.2:
+                    ws += 20
+                    ev.append(f"✅ Iceberg {len(at_level)} tx kecil (${tot_ice:,.0f} total)")
+
+    # Harga flat 4h = stealth positioning
     if candles_15m and len(candles_15m) >= 16:
         p4h  = candles_15m[-16]["close"]
         pchg = abs((cur - p4h) / p4h * 100) if p4h else 99
@@ -651,10 +746,23 @@ def calc_whale(symbol, candles_15m, funding):
             ws += 7
             ev.append("🔶 Harga relatif flat 4h")
 
-    # Funding negatif kecil = bonus whale
+    # Funding negatif ringan = bonus
     if -0.0004 <= funding <= -0.00001:
         ws += 10
-        ev.append(f"✅ Funding {funding:.5f}% — short squeeze tersembunyi")
+        ev.append(f"✅ Funding {funding:.5f} — short squeeze tersembunyi")
+
+    # v6: Order book imbalance — sinyal real-time
+    ob_ratio, bid_usd, ask_usd = get_orderbook_imbalance(symbol)
+    if ob_ratio is not None:
+        if ob_ratio > 0.65:
+            ws += 15
+            ev.append(f"✅ OB Imbalance: bid {ob_ratio:.0%} — tekanan beli kuat")
+        elif ob_ratio > 0.55:
+            ws += 7
+            ev.append(f"🔶 OB Imbalance: bid {ob_ratio:.0%}")
+        elif ob_ratio < 0.35:
+            ws -= 10
+            ev.append(f"⚠️ OB: ask dominan {1-ob_ratio:.0%} — tekanan jual")
 
     ws  = min(ws, 100)
     cls = ("🐋 WHALE ACCUMULATION" if ws >= 65
@@ -698,40 +806,65 @@ def get_time_mult():
 
 
 # ══════════════════════════════════════════════════════════════
-#  🎯  ENTRY ZONE — DIJAMIN VALID
+#  🎯  ENTRY ZONE — ATR-BASED, DIJAMIN VALID
+#  v6: SL berbasis ATR-14, T1 = min(swing high, entry+2.5*ATR)
+#      Support max distance 10% dari harga
 # ══════════════════════════════════════════════════════════════
 
 def calc_entry(candles_1h):
-    cur = candles_1h[-1]["close"]
+    cur  = candles_1h[-1]["close"]
+    atr  = calc_atr(candles_1h, period=14) or cur * 0.02  # fallback 2%
 
-    # Support
+    # Support — VWAP lower band dan POC
     vwap, z1 = calc_vwap_support(candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h)
     z2_raw   = calc_poc(candles_1h[-48:] if len(candles_1h) >= 48 else candles_1h)
     z2       = z2_raw if z2_raw and z2_raw < cur * 0.999 else cur * 0.98
 
-    support = max(z1 or cur*0.97, z2)
+    support = max(z1 or cur * 0.97, z2)
     if support >= cur:
         support = cur * 0.97
-    entry = min(support * 1.002, cur * 0.998)
-    sl    = support * 0.967
 
-    # Target
-    t1, t2  = find_targets(candles_1h, cur)
+    # v6: support max distance 10% dari harga (hindari SL terlalu jauh)
+    max_dist  = CONFIG["max_support_distance_pct"] / 100
+    if cur - support > cur * max_dist:
+        support = cur * (1 - max_dist + 0.01)  # tempel ke batas atas
+
+    entry = min(support * 1.002, cur * 0.998)
+
+    # v6: SL berbasis ATR-14 (proporsional, adaptif)
+    sl = entry - CONFIG["atr_sl_multiplier"] * atr
+    # Pastikan SL tidak lebih dari 12% di bawah entry
+    sl = max(sl, entry * 0.88)
+
+    # v6: T1 = min(swing high, entry + 2.5*ATR) — lebih konservatif
+    t1_swing, t2_swing = find_targets(candles_1h, cur)
+    t1_atr   = entry + CONFIG["atr_t1_multiplier"] * atr
+    t1       = min(t1_swing, t1_atr) if t1_swing > cur * 1.05 else t1_atr
+
     if t1 <= cur * 1.05:
         t1 = cur * 1.10
-    if t2 <= t1:
-        t2 = t1 * 1.08
+    t2 = t2_swing if t2_swing > t1 * 1.02 else t1 * 1.08
 
-    risk    = cur - sl
-    reward  = t1 - cur
+    risk    = entry - sl
+    reward  = t1 - entry
     rr      = round(reward / risk, 1) if risk > 0 else 0
     t1_pct  = round((t1 - cur) / cur * 100, 1)
+    sl_pct  = round((entry - sl) / entry * 100, 1)
 
-    return {"cur": cur, "vwap": round(vwap,8) if vwap else 0,
-            "z1": round(z1,8) if z1 else 0, "z2": round(z2,8),
-            "entry": round(entry,8), "sl": round(sl,8),
-            "t1": round(t1,8), "t2": round(t2,8),
-            "rr": rr, "liq_pct": t1_pct}
+    return {
+        "cur":    cur,
+        "atr":    round(atr, 8),
+        "vwap":   round(vwap, 8) if vwap else 0,
+        "z1":     round(z1, 8)   if z1   else 0,
+        "z2":     round(z2, 8),
+        "entry":  round(entry, 8),
+        "sl":     round(sl, 8),
+        "sl_pct": sl_pct,
+        "t1":     round(t1, 8),
+        "t2":     round(t2, 8),
+        "rr":     rr,
+        "liq_pct": t1_pct,
+    }
 
 
 # ══════════════════════════════════════════════════════════════
@@ -835,11 +968,11 @@ def build_alert(r, rank=None):
                 f"  🟢 VWAP  : ${e['z1']}\n"
                 f"  🟢 POC   : ${e['z2']}\n"
                 f"  📌 Entry : ${e['entry']}\n"
-                f"  🛑 SL    : ${e['sl']}\n\n"
+                f"  🛑 SL    : ${e['sl']}  (-{e['sl_pct']:.1f}% | ATR×{CONFIG['atr_sl_multiplier']})\n\n"
                 f"🎯 <b>TARGET</b>\n"
                 f"  T1 : ${e['t1']}  (+{e['liq_pct']:.1f}%)\n"
                 f"  T2 : ${e['t2']}\n"
-                f"  R/R: 1:{e['rr']}\n")
+                f"  R/R: 1:{e['rr']}  |  ATR: ${e['atr']}\n")
 
     msg += f"\n━━━━━━━━━━━━━━━━━━━━\n📊 <b>SINYAL</b>\n"
     for s in r["signals"][:8]:
