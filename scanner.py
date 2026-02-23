@@ -332,6 +332,9 @@ def get_funding_rate(symbol):
     """Ambil funding rate saat ini."""
     url  = f"{BITGET_BASE}/api/v2/mix/market/current-fund-rate"
     data = safe_get(url, params={"symbol": symbol, "productType": "usdt-futures"})
+    if data and data.get("code") == "00000":
+        try:
+            return float(data["data"][0].get("fundingRate", 0))
         except:
             return 0
     return 0
