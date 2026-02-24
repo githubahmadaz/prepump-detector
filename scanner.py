@@ -1,18 +1,18 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v7.1 — FORENSIC-ADAPTIVE                         ║
+║  PRE-PUMP SCANNER v7.2 — FLOW-INTEGRATED & OI-AWARE                ║
 ║                                                                      ║
-║  Berdasarkan analisis forensik 4 coin pump (ESP, SKR, STEEM, POWER) ║
-║  dan 9 coin non-pump.                                               ║
+║  Berdasarkan analisis forensik dan masukan terkait flow & OI.       ║
 ║                                                                      ║
 ║  PERUBAHAN UTAMA:                                                    ║
-║  ✅ Filter coin tidak relevan (XAU, PAXG, BTC, ETH, dll)            ║
-║  ✅ Volume minimum diturunkan (5k) untuk tangkap stealth             ║
-║  ✅ Bonus khusus stealth (volume <50k, coiling>20, range<3%) +30    ║
-║  ✅ Bonus khusus eksplosif (volume>200k, range>10%, BBW>5%) +15     ║
-║  ✅ BBW ekspansi dapat poin, tidak hanya squeeze                     ║
-║  ✅ Gate range 24h dihapus, diganti penalti                          ║
-║  ✅ Pre-filter lebih longgar                                         ║
+║  ✅ OI snapshot untuk deteksi perubahan posisi                       ║
+║  ✅ Penalti OI turun, bonus OI naik + inflow                        ║
+║  ✅ Divergensi volume vs OI                                          ║
+║  ✅ Bobot whale score ditingkatkan (maks 20)                        ║
+║  ✅ L/S ratio penalti bertingkat hingga -20                         ║
+║  ✅ Order book 50 level + weighted imbalance                        ║
+║  ✅ Filter coin tidak relevan                                        ║
+║  ✅ Volume minimum 5k/hari (stealth)                                ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
@@ -73,6 +73,7 @@ CONFIG = {
     "sleep_error":               3.0,
     "max_deep_scan":              80,    # max coin untuk deep analysis per run
     "cooldown_file":    "/tmp/v7_cooldown.json",
+    "oi_snapshot_file": "/tmp/oi_snapshots.json",
 
     # Bonus thresholds (berdasarkan forensik)
     "stealth_max_vol":       50_000,     # volume pre 6h < 50k
@@ -93,7 +94,7 @@ GRAN_MAP = {
 
 
 # ══════════════════════════════════════════════════════════════
-#  🗺️  SECTOR MAP (tidak berubah)
+#  🗺️  SECTOR MAP
 # ══════════════════════════════════════════════════════════════
 SECTOR_MAP = {
     "DEFI": [
@@ -149,7 +150,7 @@ _cache         = {}
 
 
 # ══════════════════════════════════════════════════════════════
-#  💾  COOLDOWN
+#  💾  COOLDOWN & OI SNAPSHOT
 # ══════════════════════════════════════════════════════════════
 def load_cooldown():
     try:
@@ -170,6 +171,61 @@ def save_cooldown(state):
             json.dump(state, f)
     except:
         pass
+
+def load_oi_snapshots():
+    try:
+        if os.path.exists(CONFIG["oi_snapshot_file"]):
+            with open(CONFIG["oi_snapshot_file"]) as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_oi_snapshot(symbol, oi_value):
+    snapshots = load_oi_snapshots()
+    now = time.time()
+    if symbol not in snapshots:
+        snapshots[symbol] = []
+    snapshots[symbol].append({"ts": now, "oi": oi_value})
+    # Simpan maks 100 data per symbol (sekitar 24 jam jika scan tiap 15 menit)
+    snapshots[symbol] = sorted(snapshots[symbol], key=lambda x: x["ts"])[-100:]
+    try:
+        with open(CONFIG["oi_snapshot_file"], "w") as f:
+            json.dump(snapshots, f)
+    except:
+        pass
+
+def get_oi_changes(symbol, current_oi):
+    """
+    Hitung perubahan OI dalam 1 jam dan 24 jam terakhir.
+    Return (change_1h_pct, change_24h_pct)
+    """
+    snapshots = load_oi_snapshots()
+    if symbol not in snapshots:
+        return 0, 0
+    data = snapshots[symbol]
+    now = time.time()
+    # Cari snapshot 1 jam yang lalu (toleransi 10 menit)
+    one_hour_ago = now - 3600
+    candidates_1h = [d for d in data if abs(d["ts"] - one_hour_ago) < 600]
+    if not candidates_1h:
+        change_1h = 0
+    else:
+        closest = min(candidates_1h, key=lambda d: abs(d["ts"] - one_hour_ago))
+        old = closest["oi"]
+        change_1h = (current_oi - old) / old * 100 if old else 0
+
+    # Cari snapshot 24 jam yang lalu (toleransi 1 jam)
+    one_day_ago = now - 86400
+    candidates_24h = [d for d in data if abs(d["ts"] - one_day_ago) < 3600]
+    if not candidates_24h:
+        change_24h = 0
+    else:
+        closest = min(candidates_24h, key=lambda d: abs(d["ts"] - one_day_ago))
+        old = closest["oi"]
+        change_24h = (current_oi - old) / old * 100 if old else 0
+
+    return change_1h, change_24h
 
 _cooldown = load_cooldown()
 log.info(f"Cooldown aktif: {len(_cooldown)} coin")
@@ -275,6 +331,22 @@ def get_funding(symbol):
             pass
     return 0
 
+def get_open_interest(symbol):
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/open-interest",
+        params={"symbol": symbol, "productType": "usdt-futures"}
+    )
+    if data and data.get("code") == "00000":
+        try:
+            oi_data = data.get("data", {})
+            if "openInterestList" in oi_data and oi_data["openInterestList"]:
+                return float(oi_data["openInterestList"][0].get("size", 0))
+            else:
+                return float(oi_data.get("size", 0))
+        except:
+            pass
+    return 0
+
 def get_long_short_ratio(symbol):
     data = safe_get(
         f"{BITGET_BASE}/api/v2/mix/market/account-long-short-ratio",
@@ -288,7 +360,7 @@ def get_long_short_ratio(symbol):
             pass
     return None
 
-def get_trades(symbol, limit=300):
+def get_trades(symbol, limit=500):
     data = safe_get(
         f"{BITGET_BASE}/api/v2/mix/market/fills",
         params={"symbol": symbol, "productType": "usdt-futures", "limit": str(limit)}
@@ -307,19 +379,28 @@ def get_trades(symbol, limit=300):
         return trades
     return []
 
-def get_orderbook(symbol):
+def get_orderbook(symbol, levels=50):
     data = safe_get(
         f"{BITGET_BASE}/api/v2/mix/market/merge-depth",
         params={"symbol": symbol, "productType": "usdt-futures",
-                "precision": "scale0", "limit": "50"}
+                "precision": "scale0", "limit": str(levels)}
     )
     if data and data.get("code") == "00000":
         try:
             book    = data["data"]
-            bid_usd = sum(float(b[0]) * float(b[1]) for b in book.get("bids", [])[:20])
-            ask_usd = sum(float(a[0]) * float(a[1]) for a in book.get("asks", [])[:20])
-            total   = bid_usd + ask_usd
-            return (bid_usd / total if total > 0 else 0.5), bid_usd, ask_usd
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            # Hitung weighted bid/ask volume hingga levels
+            bid_vol = 0
+            ask_vol = 0
+            for b in bids:
+                bid_vol += float(b[1])
+            for a in asks:
+                ask_vol += float(a[1])
+            # Hitung imbalance dengan volume (bukan USD)
+            total = bid_vol + ask_vol
+            ratio = bid_vol / total if total > 0 else 0.5
+            return ratio, bid_vol, ask_vol
         except:
             pass
     return 0.5, 0, 0
@@ -669,7 +750,6 @@ def layer_structure(candles_1h):
     sigs  = []
     bbw_val, bbw_pct = bbw_percentile(candles_1h)
 
-    # Skor squeeze (low BBW)
     if bbw_pct < 10:
         score += 12
         sigs.append(f"BBW Squeeze Ekstrem ({bbw_pct:.0f}%ile) — siap meledak")
@@ -682,8 +762,6 @@ def layer_structure(candles_1h):
     elif bbw_pct > 85:
         score -= 5
         sigs.append(f"⚠️ BBW Melebar ({bbw_pct:.0f}%ile) — volatilitas sudah terjadi")
-
-    # Bonus ekspansi (high BBW) jika didukung volume dan range (akan ditambahkan di master_score)
 
     coiling = 0
     for c in reversed(candles_1h[-72:]):
@@ -720,21 +798,32 @@ def layer_positioning(symbol, funding):
 
     ls = get_long_short_ratio(symbol)
     ls_score = 0
+    ls_ratio = None
     if ls is not None:
-        if ls < 0.75:
-            ls_score = 7
+        ls_ratio = ls
+        if ls < 0.6:
+            ls_score = 15
             sigs.append(f"🎯 L/S {ls:.2f} — short dominan, squeeze fuel besar!")
-        elif ls < 0.90:
-            ls_score = 5
-            sigs.append(f"L/S {ls:.2f} — lebih banyak short dari long")
+        elif ls < 0.75:
+            ls_score = 12
+            sigs.append(f"🎯 L/S {ls:.2f} — short dominan")
+        elif ls < 0.9:
+            ls_score = 7
+            sigs.append(f"L/S {ls:.2f} — lebih banyak short")
         elif ls <= 1.15:
             ls_score = 3
+        elif ls > 3.0:
+            ls_score = -20
+            sigs.append(f"⚠️⚠️ L/S {ls:.2f} — long overcrowded ekstrem, risiko tinggi!")
+        elif ls > 2.5:
+            ls_score = -12
+            sigs.append(f"⚠️ L/S {ls:.2f} — long sangat dominan")
         elif ls > 2.0:
-            ls_score = -4
-            sigs.append(f"⚠️ L/S {ls:.2f} — long berlebihan")
+            ls_score = -8
+            sigs.append(f"L/S {ls:.2f} — long dominan")
 
     score = min(score + ls_score, 15)
-    return score, sigs, ls
+    return score, sigs, ls_ratio
 
 def layer_context(symbol, tickers_dict):
     sector = SECTOR_LOOKUP.get(symbol, "MISC")
@@ -778,14 +867,14 @@ def get_time_mult():
 
 
 # ══════════════════════════════════════════════════════════════
-#  🐋  WHALE DETECTION (improved dari v6)
+#  🐋  WHALE DETECTION — ditingkatkan bobotnya
 # ══════════════════════════════════════════════════════════════
 def calc_whale(symbol, candles_15m, funding):
     ws  = 0
     ev  = []
     cur = candles_15m[-1]["close"] if candles_15m else 0
 
-    trades = get_trades(symbol, 300)
+    trades = get_trades(symbol, 500)  # limit 500
     if trades:
         buy_v = sum(t["size"] for t in trades if t["side"] == "buy")
         tot_v = sum(t["size"] for t in trades)
@@ -809,6 +898,7 @@ def calc_whale(symbol, candles_15m, funding):
             ws += 25
             ev.append(f"✅ Smart money {lbuy_usd/total_usd:.0%} vol (>${thr:,.0f}/trade)")
 
+        # Iceberg detection
         if cur > 0:
             tol = (0.15 if cur >= 10 else 0.30 if cur >= 1 else 0.50)
             at_level = [
@@ -837,7 +927,8 @@ def calc_whale(symbol, candles_15m, funding):
         ws += 10
         ev.append(f"✅ Funding {funding:.5f} — short squeeze setup")
 
-    ob_ratio, bid_usd, ask_usd = get_orderbook(symbol)
+    # Order book imbalance dengan 50 level
+    ob_ratio, bid_vol, ask_vol = get_orderbook(symbol, 50)
     if ob_ratio > 0.65:
         ws += 15
         ev.append(f"✅ OB Bid {ob_ratio:.0%} — tekanan beli kuat di book")
@@ -849,13 +940,8 @@ def calc_whale(symbol, candles_15m, funding):
         ev.append(f"⚠️ OB Ask dominan — tekanan jual lebih besar")
 
     ws  = min(ws, 100)
-    cls = (
-        "🐋 WHALE ACCUMULATION"    if ws >= 65
-        else "🦈 SMART MONEY"      if ws >= 45
-        else "👀 POSSIBLE INST."   if ws >= 20
-        else "🔇 NO SIGNAL"
-    )
-    return ws, cls, ev
+    # Bobot whale score sekarang linier: bonus = ws // 5 (maks 20)
+    return ws, ws // 5, ev
 
 
 # ══════════════════════════════════════════════════════════════
@@ -913,7 +999,7 @@ def calc_entry(candles_1h):
 
 
 # ══════════════════════════════════════════════════════════════
-#  🧠  MASTER SCORE — dengan bonus stealth & eksplosif
+#  🧠  MASTER SCORE — dengan bonus stealth, eksplosif, OI, L/S
 # ══════════════════════════════════════════════════════════════
 def master_score(symbol, ticker, tickers_dict):
     c1h  = get_candles(symbol, "1h",  CONFIG["candle_1h"])
@@ -975,7 +1061,7 @@ def master_score(symbol, ticker, tickers_dict):
     sigs  += st_sigs
     bd["struct"] = st_sc
 
-    # ── Bonus Stealth (berdasarkan forensik) ──────────────────
+    # ── Bonus Stealth ──────────────────────────────────
     stealth_bonus = 0
     if (avg_vol_pre < CONFIG["stealth_max_vol"] and
         coiling > CONFIG["stealth_min_coiling"] and
@@ -985,7 +1071,7 @@ def master_score(symbol, ticker, tickers_dict):
     score += stealth_bonus
     bd["stealth"] = stealth_bonus
 
-    # ── Bonus Eksplosif (berdasarkan forensik) ────────────────
+    # ── Bonus Eksplosif ────────────────────────────────
     explosive_bonus = 0
     if (avg_vol_pre > CONFIG["explosive_min_vol"] and
         range_6h > CONFIG["explosive_min_range"] and
@@ -1016,16 +1102,45 @@ def master_score(symbol, ticker, tickers_dict):
     sigs  += ctx_sigs
     bd["ctx"] = ctx_sc
 
-    # ── Whale Bonus ───────────────────────────────────────────
-    ws, wcls, wev = calc_whale(symbol, c15m, funding)
-    whale_bonus   = (
-        15 if ws >= 65
-        else 10 if ws >= 45
-        else 5  if ws >= 25
-        else 0
-    )
+    # ── Whale & OI ───────────────────────────────────────────
+    ws, whale_bonus, wev = calc_whale(symbol, c15m, funding)
     score += whale_bonus
     bd["whale"] = whale_bonus
+    for ev in wev:
+        sigs.append(ev)
+
+    # ── Open Interest Changes ────────────────────────────────
+    oi_value = get_open_interest(symbol)
+    if oi_value > 0:
+        save_oi_snapshot(symbol, oi_value)
+        oi_change_1h, oi_change_24h = get_oi_changes(symbol, oi_value)
+
+        # Penalti jika OI turun drastis
+        if oi_change_24h < -20:
+            score -= 15
+            sigs.append(f"⚠️ OI 24h turun {oi_change_24h:.1f}% — distribusi besar")
+        elif oi_change_24h < -10:
+            score -= 7
+            sigs.append(f"OI 24h turun {oi_change_24h:.1f}%")
+
+        if oi_change_1h < -5:
+            score -= 5
+            sigs.append(f"OI 1h turun {oi_change_1h:.1f}% — tekanan jual jangka pendek")
+        elif oi_change_1h > 5:
+            score += 5
+            sigs.append(f"✅ OI 1h naik {oi_change_1h:.1f}% — posisi baru masuk")
+
+        # Divergensi volume vs OI
+        if rvol > 1.5 and oi_change_24h < -10:
+            score -= 8
+            sigs.append(f"⚠️ Volume naik tapi OI turun — distribusi terindikasi")
+        elif rvol > 1.5 and oi_change_24h > 5:
+            score += 8
+            sigs.append(f"✅ Volume naik + OI naik — akumulasi kuat")
+
+        bd["oi_change"] = round(oi_change_24h, 1)
+    else:
+        bd["oi_change"] = 0
 
     # ── Time Multiplier ───────────────────────────────────────
     tmult, tsig = get_time_mult()
@@ -1056,7 +1171,7 @@ def master_score(symbol, ticker, tickers_dict):
         if low24 > 0:
             range24 = (high24 - low24) / low24 * 100
             if range24 > 55:
-                score = max(0, score - 10)  # penalti jika sudah terlalu lebar
+                score = max(0, score - 10)
                 sigs.append(f"⚠️ Range 24h {range24:.0f}% — pump mungkin sudah berjalan")
 
     return {
@@ -1064,7 +1179,6 @@ def master_score(symbol, ticker, tickers_dict):
         "score":    score,
         "signals":  sigs,
         "ws":       ws,
-        "wcls":     wcls,
         "wev":      wev,
         "entry":    entry,
         "sector":   sector,
@@ -1080,6 +1194,7 @@ def master_score(symbol, ticker, tickers_dict):
         "range_6h": range_6h,
         "coiling":  coiling,
         "bbw_val":  bbw_val,
+        "oi_change_24h": bd.get("oi_change", 0),
     }
 
 
@@ -1103,9 +1218,10 @@ def build_alert(r, rank=None):
         f"<b>Harga  :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h | {r['chg_7d']:+.1f}% 7d)\n"
         f"<b>Vol 24h:</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
         f"<b>6h Vol :</b> ${r['avg_vol_pre']:.0f}  | 6h Range: {r['range_6h']:.1f}%\n"
-        f"<b>Coiling:</b> {r['coiling']}h  | BBW: {r['bbw_val']:.1f}%\n\n"
+        f"<b>Coiling:</b> {r['coiling']}h  | BBW: {r['bbw_val']:.1f}%\n"
+        f"<b>OI 24h :</b> {r['oi_change_24h']:+.1f}%\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🐋 <b>WHALE: {r['ws']}/100</b> — {r['wcls']}\n"
+        f"🐋 <b>WHALE: {r['ws']}/100</b>\n"
     )
     for ev in r["wev"]:
         msg += f"  {ev}\n"
@@ -1198,7 +1314,7 @@ def pre_score_ticker(ticker):
 #  🚀  MAIN SCAN — Dynamic Discovery + Smart Pre-filter
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v7.1 — FORENSIC ADAPTIVE — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v7.2 — FLOW-INTEGRATED — {utc_now()} ===")
     log.info(f"Dynamic discovery: scan semua USDT-futures Bitget")
 
     tickers = get_all_tickers()
@@ -1302,8 +1418,8 @@ def run_scan():
 
 if __name__ == "__main__":
     log.info("╔════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v7.1 — FORENSIC EDITION  ║")
-    log.info("║  Adaptive | Stealth | Explosive | RVOL     ║")
+    log.info("║  PRE-PUMP SCANNER v7.2 — FLOW-INTEGRATED  ║")
+    log.info("║  Adaptive | Stealth | Explosive | OI      ║")
     log.info("╚════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
