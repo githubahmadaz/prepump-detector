@@ -1,35 +1,27 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.5                                                   ║
+║  PRE-PUMP SCANNER v9.7                                                   ║
 ║                                                                          ║
-║  GAME CHANGER BARU:                                                      ║
+║  FIX v9.7 (dari forensik alert v9.5 vs CoinGlass):                      ║
 ║                                                                          ║
-║  GC-2: LIQUIDATION CASCADE DETECTOR                                      ║
-║    Bitget /api/v2/mix/market/liquidation-orders dipakai untuk:           ║
-║    a) Cluster short liquidation di atas harga = squeeze fuel (BONUS)     ║
-║    b) Long liquidation massal baru saja terjadi = BLOCK (pump aborted)   ║
+║  FIX-1: RDDTUSDT + 11 stock tokens baru ke blacklist                    ║
+║    RDDT = Reddit Inc (NYSE) — CONFIRMED lolos v9.5 sebagai false alert  ║
 ║                                                                          ║
-║  GC-3: "LINEA SIGNATURE" — PRIMARY PRE-PUMP TEMPLATE LAYER              ║
-║    Dari forensik: LINEA satu-satunya valid karena kombinasi:             ║
-║    OI naik + harga turun/flat + RSI oversold + short dominan +           ║
-║    futures inflow. Kini menjadi layer scoring tersendiri (max 25 poin).  ║
+║  FIX-2: Volume Exhaustion Gate                                           ║
+║    MEME Volume -73.72% lolos karena RVOL historis tinggi (bug serius)   ║
+║    Fix: Gate langsung jika vol change 24h < -60% (minat pasar habis)    ║
 ║                                                                          ║
-║  GC-4: STRATIFIED PRE-FILTER (3 BUCKET — fix "80 coin yang sama")       ║
-║    Problem v9.4: top-N flat → coin identik tiap run, 2 pump masif miss.  ║
-║    Fix v9.5: 3 bucket independen:                                        ║
-║    • SPIKE BUCKET (30): proxy volume-anomaly dari ticker saja            ║
-║    • QUALITY BUCKET (35): top pre-score seperti biasa                    ║
-║    • WILDCARD BUCKET (25): rotasi semi-random dari pool sisanya          ║
-║    → Total 90 kandidat, rotasi tiap run, tidak ada coin yang stuck       ║
+║  FIX-3: OI-Invalid Fallback Protection                                   ║
+║    BANANA OI -15.44% lolos karena oi_valid=False → penalti OI = 0      ║
+║    Fix: 4 proxy pengganti OI saat history belum ada                      ║
+║    (vol ratio, vol change candle, L/S proxy, funding proxy)              ║
 ║                                                                          ║
-║  BUG FIX:                                                                ║
-║  BUG-A: BABA, AVGO + 5 stock tickers baru                               ║
-║  BUG-B: OI 24h threshold bertingkat (-3/-5/-10/-20%) + hard block       ║
-║  BUG-C: OI 1h threshold bertingkat (-2/-5/-8%)                          ║
-║  BUG-D: Gate "already pumped" — OI 24h>25% + price>3% = block           ║
-║  BUG-E: RVOL>5x + CVD negatif = penalti kuat (bukan reward)             ║
-║  BUG-F: find_resistance_targets() — gantikan swing yang selalu +10%     ║
-║  BUG-G: Score overflow — raw_score tidak di-cap sebelum composite        ║
+║  FIX-4: L/S Hard Block + Penalti 2x Lebih Kuat                          ║
+║    BANANA L/S=1.396 hanya -3 poin, SFPUSDT L/S=1.665 hanya -6 poin    ║
+║    Fix: penalti berlipat, hard block jika L/S > 3.0                     ║
+║    Exception: L/S tinggi + funding sangat negatif = mitigasi parsial   ║
+║                                                                          ║
+║  (Semua fix v9.6 dipertahankan: Linea, BUG-E, Qualified filter)        ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -168,6 +160,21 @@ STOCK_TICKERS = {
     "MAUSDT",       # Mastercard
     "ABNBUSDT",     # Airbnb
     "AIRBNBUSDT",   # alias
+    # ════════════════════════════════════════════════════
+    # v9.7 FIX-1: CONFIRMED lolos alert v9.5
+    # ════════════════════════════════════════════════════
+    "RDDTUSDT",     # Reddit Inc (NYSE: RDDT) — lolos alert v9.5 ❌
+    "RDDUSDT",      # alias Reddit
+    "PLTRUSDT",     # Palantir Technologies (NYSE: PLTR)
+    "MSTRUSDT",     # MicroStrategy (NASDAQ: MSTR)
+    "SOFIUSDT",     # SoFi Technologies
+    "NUSDT",        # Nu Holdings (NYSE: NU)
+    "AFRMUSDT",     # Affirm Holdings
+    "UPSTUSDT",     # Upstart Holdings
+    "CARVAUSDT",    # Carvana
+    "IONQUSDT",     # IonQ (quantum computing stock)
+    "ARQITUSDT",    # Arqit Quantum
+    "ROBHUSDT",     # Robinhood (already HOODUSDT but alias)
 }
 
 MANUAL_EXCLUDE = set()
@@ -884,13 +891,18 @@ def layer_volume_intelligence(candles_1h):
     if cvd_sig:
         sigs.append(cvd_sig)
 
-    # BUG-E FIX: RVOL tinggi + CVD short-term negatif = distribusi, bukan akumulasi
+    # BUG-E FIX v9.6: RVOL tinggi + CVD negatif = distribusi
+    # v9.5 terlalu agresif → penalty di-cap maks 12, tier berdasarkan CVD severity
     if rvol >= 5.0:
         stcvd_check, _ = calc_short_term_cvd(candles_1h)
-        if stcvd_check < 0:
-            penalty = int(min(rvol, 30) * 0.6)
+        if stcvd_check <= -10:
+            penalty = min(int(rvol * 0.4), 12)
             score  -= penalty
-            sigs.append(f"⚠️ RVOL {rvol:.1f}x + CVD negatif — volume = distribusi/likuidasi")
+            sigs.append(f"⚠️ RVOL {rvol:.1f}x + CVD negatif kuat — distribusi/likuidasi")
+        elif stcvd_check < 0:
+            penalty = min(int(rvol * 0.2), 6)
+            score  -= penalty
+            sigs.append(f"RVOL {rvol:.1f}x + CVD negatif ringan — pantau distribusi")
 
     return min(score, CONFIG["max_vol_score"]), sigs, rvol
 
@@ -971,11 +983,23 @@ def layer_structure(candles_1h):
 
 def layer_positioning(symbol, funding, oi_chg1h):
     """
-    v9.4 FIX BUG 1+2 dipertahankan:
+    v9.7 FIX-4: L/S penalty diperkuat + hard block untuk long overcrowded.
+    
+    Dari forensik v9.5:
+    - BANANA L/S=1.396 hanya -3 poin → lolos, padahal longs sudah dominan
+    - SFPUSDT L/S=1.665 hanya -6 poin → lolos, padahal squeeze fuel habis
+    
+    Masalah: L/S tinggi artinya TIDAK ADA short yang bisa di-squeeze.
+    Pump butuh short squeeze atau akumulasi baru. L/S > 1.3 tanpa
+    fundamental kuat = distribusi aktif atau pump sudah terjadi.
+    
+    Fix: penalti diperbesar 2x, dan return flag `ls_block` untuk gate di master_score.
+    
+    v9.4 FIX dipertahankan:
     - Funding 5 tier presisi (true neutral < ±0.001%)
-    - L/S gap 1.15-2.0 diisi penalti bertingkat
     """
     score, sigs = 0, []
+    ls_block = False  # v9.7: flag hard block jika L/S terlalu tinggi
 
     if funding <= -0.0004:
         score += 8;  sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup KUAT!")
@@ -1006,18 +1030,30 @@ def layer_positioning(symbol, funding, oi_chg1h):
             ls_score = 5;  sigs.append(f"L/S {ls:.2f} — lebih banyak short")
         elif ls <= 1.15:
             ls_score = 2
-        elif 1.15 < ls <= 1.5:
-            ls_score = -3; sigs.append(f"L/S {ls:.2f} — longs mulai dominan")
-        elif 1.5 < ls <= 2.0:
-            ls_score = -6; sigs.append(f"⚠️ L/S {ls:.2f} — longs dominan, squeeze fuel berkurang")
+        # ── FIX-4 v9.7: Penalti L/S diperbesar, ditambah hard block ──────────
+        elif 1.15 < ls <= 1.3:
+            ls_score = -5;  sigs.append(f"L/S {ls:.2f} — longs mulai dominan")
+        elif 1.3 < ls <= 1.6:
+            ls_score = -10; sigs.append(f"⚠️ L/S {ls:.2f} — longs dominan, squeeze fuel habis")
+        elif 1.6 < ls <= 2.0:
+            ls_score = -16; sigs.append(f"⚠️⚠️ L/S {ls:.2f} — longs sangat dominan, pump sangat sulit")
+        elif 2.0 < ls <= 2.5:
+            ls_score = -20; sigs.append(f"🚨 L/S {ls:.2f} — long overcrowded berat")
+        elif 2.5 < ls <= 3.0:
+            ls_score = -25; sigs.append(f"🚨 L/S {ls:.2f} — long overcrowded ekstrem")
         elif ls > 3.0:
-            ls_score = -15; sigs.append(f"⚠️⚠️ L/S {ls:.2f} — long overcrowded ekstrem!")
-        elif ls > 2.5:
-            ls_score = -9;  sigs.append(f"⚠️ L/S {ls:.2f} — long sangat dominan")
-        elif ls > 2.0:
-            ls_score = -5;  sigs.append(f"L/S {ls:.2f} — long dominan")
+            ls_score  = -30
+            ls_block  = True   # Hard block: tidak mungkin pump
+            sigs.append(f"🚨🚨 L/S {ls:.2f} — long overcrowded KRITIS, hard block aktif")
 
-    return min(score + ls_score, CONFIG["max_pos_score"]), sigs, ls
+        # ── Special: L/S 1.3-2.0 tapi funding negatif kuat = mungkin masih bisa ──
+        # Jika funding sangat negatif, short masih ada meski jumlah longs lebih banyak
+        if 1.3 < ls <= 2.0 and funding <= -0.0003:
+            override = min(abs(ls_score) * 0.4, 8)
+            ls_score += int(override)
+            sigs.append(f"⚡ Mitigasi: funding {funding:.5f} kurangi dampak L/S tinggi")
+
+    return min(score + ls_score, CONFIG["max_pos_score"]), sigs, ls, ls_block
 
 
 def calc_4h_confluence(candles_4h):
@@ -1183,70 +1219,89 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
                            ls_ratio, funding, chg_24h):
     """
     GC-3: "Linea Signature" — template pre-pump yang paling valid dari forensik.
-    
+
     LINEA (satu-satunya valid dari 8 alert) memiliki kombinasi:
     - OI 1h naik masif (+9.80%)   → posisi baru masuk cepat
     - OI 24h naik (+14.31%)       → akumulasi berlanjut, bukan distribusi
     - Harga turun (-3.53%)        → DIVERGENCE BULLISH (OI naik, harga turun)
     - RSI oversold (32.47)        → seller exhaustion, siap reversal
     - L/S < 1 (0.708)             → short masih dominan = fuel squeeze ada
-    - Futures flow inflow         → smart money baru masuk
-    
-    Semakin banyak komponen yang terpenuhi, semakin tinggi score.
+
+    v9.6 FIX: Pisah komponen OI-dependent vs OI-independent.
+    Sebelumnya: `if not oi_valid: return 0` → layer mati total di run pertama.
+    Sekarang: komponen RSI, L/S, price SELALU dihitung. OI component
+    hanya diaktifkan jika oi_valid=True.
+
     Score maksimal (full signature): 25 poin
     """
     score, sigs, components = 0, [], 0
 
-    if not oi_valid:
-        return 0, [], 0
+    # ── GRUP A: OI-INDEPENDENT (selalu aktif, tidak butuh snapshot history) ──
 
-    # Komponen 1: OI 1h naik signifikan
-    oi_1h_ok = oi_chg1h >= CONFIG["linea_oi_1h_min"]
-    if oi_chg1h >= 8.0:
-        score += 8; components += 1
-        sigs.append(f"✅ [Linea-1] OI 1h +{oi_chg1h:.1f}% — posisi baru masuk MASIF")
-    elif oi_chg1h >= 4.0:
-        score += 5; components += 1
-        sigs.append(f"✅ [Linea-1] OI 1h +{oi_chg1h:.1f}% — posisi baru masuk")
-    elif oi_1h_ok:
-        score += 3; components += 1
-
-    # Komponen 2: OI 24h naik (bukan distribusi)
-    oi_24h_ok = oi_chg24h >= CONFIG["linea_oi_24h_min"]
-    if oi_chg24h >= 10.0:
-        score += 6; components += 1
-        sigs.append(f"✅ [Linea-2] OI 24h +{oi_chg24h:.1f}% — akumulasi berlanjut")
-    elif oi_24h_ok:
-        score += 3; components += 1
-
-    # Komponen 3: Harga turun/flat saat OI naik = DIVERGENCE BULLISH KUAT
-    price_ok = chg_24h <= CONFIG["linea_price_max_chg"]
-    if oi_1h_ok and oi_24h_ok and chg_24h < 0:
-        score += 8; components += 1
-        sigs.append(f"✅ [Linea-3] OI naik + Harga {chg_24h:+.1f}% — DIVERGENCE BULLISH!")
-    elif oi_1h_ok and price_ok:
-        score += 4; components += 1
-        sigs.append(f"[Linea-3] OI naik + Harga flat — akumulasi tersembunyi")
-
-    # Komponen 4: RSI — oversold (butuh candles, dihitung di caller)
-    # Note: RSI dihitung dan dipass sebagai parameter terpisah
-    # (lihat penggunaan di master_score)
-
-    # Komponen 5: L/S ratio — short masih dominan
+    # Komponen L/S ratio — short masih dominan = squeeze fuel ada
     if ls_ratio is not None:
-        ls_ok = ls_ratio <= CONFIG["linea_ls_max"]
         if ls_ratio < 0.75:
             score += 6; components += 1
-            sigs.append(f"✅ [Linea-5] L/S {ls_ratio:.2f} — short sangat dominan = fuel besar")
-        elif ls_ok:
+            sigs.append(f"✅ [Linea-LS] L/S {ls_ratio:.2f} — short sangat dominan = fuel besar")
+        elif ls_ratio <= CONFIG["linea_ls_max"]:
+            score += 3; components += 1
+            sigs.append(f"[Linea-LS] L/S {ls_ratio:.2f} — short dominan")
+
+    # Komponen harga — harga flat/turun = belum pump, masih ada ruang
+    if chg_24h < -3:
+        score += 5; components += 1
+        sigs.append(f"✅ [Linea-P] Harga {chg_24h:+.1f}% — tertekan, siap reversal")
+    elif chg_24h <= CONFIG["linea_price_max_chg"]:
+        score += 2; components += 1
+
+    # Komponen CVD 6h — buying pressure tersembunyi
+    stcvd_sc, stcvd_sig = calc_short_term_cvd(candles_1h)
+    if stcvd_sc >= 8:
+        score += 5; components += 1
+        sigs.append(f"✅ [Linea-CVD] {stcvd_sig}")
+    elif stcvd_sc > 0:
+        score += 2
+
+    # ── GRUP B: OI-DEPENDENT (hanya aktif jika oi_valid=True) ────────────────
+    oi_1h_ok = False
+    oi_24h_ok = False
+    if oi_valid:
+        # Komponen OI 1h naik signifikan
+        oi_1h_ok = oi_chg1h >= CONFIG["linea_oi_1h_min"]
+        if oi_chg1h >= 8.0:
+            score += 8; components += 1
+            sigs.append(f"✅ [Linea-OI1h] OI 1h +{oi_chg1h:.1f}% — posisi baru masuk MASIF")
+        elif oi_chg1h >= 4.0:
+            score += 5; components += 1
+            sigs.append(f"✅ [Linea-OI1h] OI 1h +{oi_chg1h:.1f}% — posisi baru masuk")
+        elif oi_1h_ok:
             score += 3; components += 1
 
-    # Bonus: Full Linea Signature (4+ komponen terpenuhi)
+        # Komponen OI 24h naik
+        oi_24h_ok = oi_chg24h >= CONFIG["linea_oi_24h_min"]
+        if oi_chg24h >= 10.0:
+            score += 6; components += 1
+            sigs.append(f"✅ [Linea-OI24h] OI 24h +{oi_chg24h:.1f}% — akumulasi berlanjut")
+        elif oi_24h_ok:
+            score += 3; components += 1
+
+        # Komponen divergence: OI naik + harga turun = sinyal terkuat
+        if oi_1h_ok and oi_24h_ok and chg_24h < 0:
+            score += 8; components += 1
+            sigs.append(
+                f"⭐ [Linea-DIV] OI naik + Harga {chg_24h:+.1f}% — "
+                f"DIVERGENCE BULLISH! (pola LINEA)"
+            )
+        elif oi_1h_ok and chg_24h <= CONFIG["linea_price_max_chg"]:
+            score += 4; components += 1
+            sigs.append(f"[Linea-DIV] OI naik + Harga flat — akumulasi tersembunyi")
+
+    # ── BONUS: Full Linea Signature ────────────────────────────────────────
     if components >= 4:
         score += 5
-        sigs.append(f"⭐ FULL LINEA SIGNATURE ({components}/5 komponen) — pre-pump template!")
+        sigs.append(f"⭐ FULL LINEA SIGNATURE ({components} komponen) — pre-pump template!")
     elif components >= 3:
-        sigs.append(f"[Linea] {components}/5 komponen — setup berkembang")
+        sigs.append(f"[Linea] {components} komponen aktif — setup berkembang")
 
     return min(score, CONFIG["max_linea_score"]), sigs, components
 
@@ -1374,6 +1429,31 @@ def master_score(symbol, ticker, tickers_dict):
         log.info(f"  {symbol}: GATE funding ekstrem ({funding:.5f})")
         return None
 
+    # ── FIX-2 v9.7: VOLUME EXHAUSTION GATE ────────────────────────────
+    # MEME di v9.5: Volume 24h -73.72% lolos karena RVOL historis tinggi.
+    # Scanner tidak memeriksa apakah volume SEKARANG sedang collapse.
+    # Coin dengan volume collapse tidak akan pump — tidak ada yang beli.
+    #
+    # Logika: volume 24h sekarang vs rata-rata vol ticker dalam base pool
+    # Proxy: gunakan change volume dari ticker jika tersedia
+    try:
+        vol_change_24h = float(ticker.get("volChange24h", 0))  # Bitget field
+    except:
+        vol_change_24h = 0
+    # Fallback: estimasi dari candle jika field tidak tersedia
+    if vol_change_24h == 0 and len(c1h) >= 48:
+        vol_24h_now  = sum(c["volume_usd"] for c in c1h[-24:])
+        vol_24h_prev = sum(c["volume_usd"] for c in c1h[-48:-24])
+        if vol_24h_prev > 0:
+            vol_change_24h = (vol_24h_now - vol_24h_prev) / vol_24h_prev * 100
+
+    if vol_change_24h < -60:
+        log.info(f"  {symbol}: GATE volume exhaustion ({vol_change_24h:.0f}% 24h)")
+        return None
+    elif vol_change_24h < -45:
+        # Bukan block, tapi penalti besar akan diterapkan di scoring
+        log.info(f"  {symbol}: Volume turun {vol_change_24h:.0f}% — penalti aktif")
+
     if len(c1h) >= 6:
         pre6       = c1h[-6:]
         avg_vol_6h = sum(c["volume_usd"] for c in pre6) / 6
@@ -1431,7 +1511,11 @@ def master_score(symbol, ticker, tickers_dict):
         return None
 
     # Layer 4: Positioning
-    pos_sc, pos_sigs, ls_ratio = layer_positioning(symbol, funding, oi_chg1h)
+    pos_sc, pos_sigs, ls_ratio, ls_block = layer_positioning(symbol, funding, oi_chg1h)
+    # FIX-4: Hard block jika L/S > 3.0 (tidak ada squeeze potential sama sekali)
+    if ls_block:
+        log.info(f"  {symbol}: GATE L/S overcrowded kritis (L/S={ls_ratio:.2f})")
+        return None
     score += pos_sc;  sigs += pos_sigs;  bd["pos"] = pos_sc
 
     # Layer 5: Multi-TF 4H
@@ -1518,7 +1602,38 @@ def master_score(symbol, ticker, tickers_dict):
                 score += 8;  sigs.append(f"✅ Vol naik + OI naik — akumulasi kuat")
 
         else:
+            # ── FIX-3 v9.7: OI-INVALID FALLBACK PROTECTION ───────────────────
+            # BANANA v9.5: OI -15.44% lolos karena oi_valid=False → penalti 0
+            # Saat tidak ada OI history, scanner buta total terhadap distribusi.
+            # Fallback: estimasi kondisi OI dari sinyal proxy yang tersedia.
             sigs.append("ℹ️ OI history belum tersedia (run pertama)")
+
+            # Proxy 1: Volume 24h vs OI current
+            # Jika OI sangat rendah dibanding volume = posisi tidak dibuka = tidak pre-pump
+            if oi_value > 0 and vol_24h > 0:
+                oi_to_vol = oi_value / vol_24h
+                if oi_to_vol < 0.05:
+                    score -= 10
+                    sigs.append(f"⚠️ OI/Vol ratio sangat rendah ({oi_to_vol:.3f}) — posisi tidak dibangun")
+
+            # Proxy 2: Volume change dari candles (sudah dihitung sebelumnya)
+            if vol_change_24h < -40:
+                score -= 15
+                sigs.append(f"⚠️ Volume 24h {vol_change_24h:.0f}% + OI unknown — distribusi tidak dapat dikonfirmasi")
+            elif vol_change_24h < -25:
+                score -= 8
+                sigs.append(f"Volume 24h {vol_change_24h:.0f}% — interest menurun")
+
+            # Proxy 3: L/S ratio sebagai proxy OI bias
+            # Jika L/S > 1.3 saat OI unknown = longs dominan tanpa konfirmasi = high risk
+            if ls_ratio is not None and ls_ratio > 1.3:
+                score -= 8
+                sigs.append(f"⚠️ L/S {ls_ratio:.2f} + OI unknown — distribusi long tidak dapat dikonfirmasi")
+
+            # Proxy 4: Funding positif + OI unknown = longs masuk tapi arah tidak jelas
+            if funding > 0.0003:
+                score -= 5
+                sigs.append(f"Funding {funding:.5f} + OI unknown — longs dominan tanpa validasi OI")
 
         if len(c1h) >= 24:
             vol_24h_candles  = [c["volume_usd"] for c in c1h[-24:]]
@@ -1640,7 +1755,7 @@ def build_alert(r, rank=None):
                    f"Short ${r.get('short_liq',0)/1e3:.0f}K (30m)\n")
 
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.5</b>\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.7</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']}\n"
         f"<b>Composite :</b> {comp}/100  {bar}\n"
         f"<b>Layer Score:</b> {sc}/100\n"
@@ -1695,7 +1810,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v9.5 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v9.7 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp     = r.get("composite_score", r["score"])
         bar      = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -1950,7 +2065,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v9.5 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v9.7 — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
@@ -2015,9 +2130,15 @@ def run_scan():
     )
     log.info(f"Lolos threshold: {len(results)} coin")
 
+    # v9.6 FIX: qualified filter diperluas dengan 3 jalur lolos
+    # Sebelumnya PLTRUSDT (Prob=80%, C=53) dan MBOXUSDT (Prob=72%, C=57) miss
+    # karena W<15 dan C<62. Prob tinggi harus menjadi jalur lolos independen.
     qualified = [
         r for r in results
-        if r["ws"] >= CONFIG["min_whale_score"] or r["composite_score"] >= 62
+        if (r["ws"] >= CONFIG["min_whale_score"]        # jalur 1: whale kuat
+            or r["composite_score"] >= 62               # jalur 2: composite tinggi
+            or r["prob_score"] >= 0.75                  # jalur 3: prob Imminent Pump
+            or r.get("linea_components", 0) >= 3)       # jalur 4: Linea Signature kuat
     ]
 
     if not qualified:
@@ -2049,10 +2170,10 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v9.5                            ║")
-    log.info("║  GC-2: Liquidation Detector                       ║")
-    log.info("║  GC-3: Linea Signature Layer                      ║")
-    log.info("║  GC-4: Stratified Pre-Filter (3 Bucket)           ║")
+    log.info("║  PRE-PUMP SCANNER v9.7                            ║")
+    log.info("║  FIX-1+2: Stock blacklist + Vol Exhaustion Gate             ║")
+    log.info("║  FIX-3: OI-Invalid Fallback Protection            ║")
+    log.info("║  FIX-4: L/S Hard Block + penalti 2x       ║")
     log.info("╚═══════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
