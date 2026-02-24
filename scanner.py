@@ -1,18 +1,34 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v7.2 — FLOW-INTEGRATED & OI-AWARE                ║
+║  PRE-PUMP SCANNER v8.0 — PROBABILITY-BASED DETECTION                ║
 ║                                                                      ║
-║  Berdasarkan analisis forensik dan masukan terkait flow & OI.       ║
+║  Berdasarkan analisis forensik dan saran dari ChatGPT.              ║
+║  Menambahkan metrik akumulasi whale dan Pump Probability Score.     ║
 ║                                                                      ║
-║  PERUBAHAN UTAMA:                                                    ║
-║  ✅ OI snapshot untuk deteksi perubahan posisi                       ║
-║  ✅ Penalti OI turun, bonus OI naik + inflow                        ║
-║  ✅ Divergensi volume vs OI                                          ║
-║  ✅ Bobot whale score ditingkatkan (maks 20)                        ║
-║  ✅ L/S ratio penalti bertingkat hingga -20                         ║
-║  ✅ Order book 50 level + weighted imbalance                        ║
-║  ✅ Filter coin tidak relevan                                        ║
-║  ✅ Volume minimum 5k/hari (stealth)                                ║
+║  METRIK BARU:                                                        ║
+║  ✅ Volume Irregularity                                              ║
+║  ✅ Range Lock Score                                                 ║
+║  ✅ Efficiency Ratio (inverse)                                       ║
+║  ✅ Fake Break Count                                                 ║
+║  ✅ Buy Pressure Proxy                                               ║
+║  ✅ Volatility Drop Rate                                             ║
+║  ✅ Trend Stability                                                  ║
+║  ✅ Absorption Consistency                                           ║
+║                                                                      ║
+║  Semua metrik dinormalisasi dan digabung menjadi                     ║
+║  Pump Probability Score dengan bobot:                                ║
+║  - Compression 15%                                                   ║
+║  - Wick Absorption 15%                                               ║
+║  - Volume Irregularity 15%                                           ║
+║  - Range Lock 15%                                                    ║
+║  - Efficiency Ratio (inverse) 10%                                   ║
+║  - Fake Break Count 10%                                              ║
+║  - Buy Pressure 10%                                                  ║
+║  - Volatility Drop Rate 5%                                           ║
+║  - Trend Stability 5%                                                ║
+║                                                                      ║
+║  Output klasifikasi: Noise, Neutral, Accumulation, Pre-Pump,        ║
+║  Imminent Pump.                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
@@ -37,7 +53,7 @@ log = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════
-#  ⚙️  CONFIG — disesuaikan dengan temuan forensik
+#  ⚙️  CONFIG
 # ══════════════════════════════════════════════════════════════
 CONFIG = {
     # Alert thresholds
@@ -45,10 +61,10 @@ CONFIG = {
     "min_whale_score":          15,
     "max_alerts_per_run":        8,
 
-    # Volume 24h TOTAL (USD) — diturunkan drastis untuk tangkap STEEM
-    "min_vol_24h":           5_000,      # $5K/hari (STEEM ~7K/hari)
-    "max_vol_24h":        50_000_000,    # $50M/hari (exclude BTC/ETH besar)
-    "pre_filter_vol":        2_000,      # pre-filter cepat
+    # Volume 24h TOTAL (USD)
+    "min_vol_24h":           5_000,
+    "max_vol_24h":        50_000_000,
+    "pre_filter_vol":        2_000,
 
     # Gate price change
     "gate_chg_24h_max":         30.0,
@@ -57,11 +73,11 @@ CONFIG = {
     "gate_funding_extreme":    -0.002,
 
     # Candle limits
-    "candle_1h":               168,     # 7 hari
-    "candle_15m":               96,     # 24 jam
-    "candle_4h":                42,     # 7 hari
+    "candle_1h":               168,
+    "candle_15m":               96,
+    "candle_4h":                42,
 
-    # Entry/exit parameters
+    # Entry/exit
     "min_target_pct":            8.0,
     "max_sl_pct":               12.0,
     "atr_sl_mult":               1.5,
@@ -71,18 +87,17 @@ CONFIG = {
     "alert_cooldown_sec":       3600,
     "sleep_coins":               0.9,
     "sleep_error":               3.0,
-    "max_deep_scan":              80,    # max coin untuk deep analysis per run
+    "max_deep_scan":              80,
     "cooldown_file":    "/tmp/v7_cooldown.json",
     "oi_snapshot_file": "/tmp/oi_snapshots.json",
 
-    # Bonus thresholds (berdasarkan forensik)
-    "stealth_max_vol":       50_000,     # volume pre 6h < 50k
-    "stealth_min_coiling":        20,    # coiling > 20 jam
-    "stealth_max_range":         3.0,    # range 6h < 3%
-
-    "explosive_min_vol":     200_000,    # volume pre 6h > 200k
-    "explosive_min_range":       10.0,    # range 6h > 10%
-    "explosive_min_bbw":          5.0,    # BBW > 5%
+    # Bonus thresholds (stealth & explosive)
+    "stealth_max_vol":       50_000,
+    "stealth_min_coiling":        20,
+    "stealth_max_range":         3.0,
+    "explosive_min_vol":     200_000,
+    "explosive_min_range":       10.0,
+    "explosive_min_bbw":          5.0,
 }
 
 GRAN_MAP = {
@@ -93,9 +108,7 @@ GRAN_MAP = {
 }
 
 
-# ══════════════════════════════════════════════════════════════
-#  🗺️  SECTOR MAP
-# ══════════════════════════════════════════════════════════════
+# ==================== SECTOR MAP (same as before) ====================
 SECTOR_MAP = {
     "DEFI": [
         "SNXUSDT","ENSOUSDT","SIRENUSDT","CRVUSDT","CVXUSDT","COMPUSDT",
@@ -138,20 +151,14 @@ SECTOR_MAP = {
     ],
 }
 
-SECTOR_LOOKUP = {
-    coin: sector
-    for sector, coins in SECTOR_MAP.items()
-    for coin in coins
-}
+SECTOR_LOOKUP = {coin: sec for sec, coins in SECTOR_MAP.items() for coin in coins}
 
 BITGET_BASE    = "https://api.bitget.com"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 _cache         = {}
 
 
-# ══════════════════════════════════════════════════════════════
-#  💾  COOLDOWN & OI SNAPSHOT
-# ══════════════════════════════════════════════════════════════
+# ==================== COOLDOWN & OI (same as before) ====================
 def load_cooldown():
     try:
         p = CONFIG["cooldown_file"]
@@ -187,7 +194,6 @@ def save_oi_snapshot(symbol, oi_value):
     if symbol not in snapshots:
         snapshots[symbol] = []
     snapshots[symbol].append({"ts": now, "oi": oi_value})
-    # Simpan maks 100 data per symbol (sekitar 24 jam jika scan tiap 15 menit)
     snapshots[symbol] = sorted(snapshots[symbol], key=lambda x: x["ts"])[-100:]
     try:
         with open(CONFIG["oi_snapshot_file"], "w") as f:
@@ -196,16 +202,11 @@ def save_oi_snapshot(symbol, oi_value):
         pass
 
 def get_oi_changes(symbol, current_oi):
-    """
-    Hitung perubahan OI dalam 1 jam dan 24 jam terakhir.
-    Return (change_1h_pct, change_24h_pct)
-    """
     snapshots = load_oi_snapshots()
     if symbol not in snapshots:
         return 0, 0
     data = snapshots[symbol]
     now = time.time()
-    # Cari snapshot 1 jam yang lalu (toleransi 10 menit)
     one_hour_ago = now - 3600
     candidates_1h = [d for d in data if abs(d["ts"] - one_hour_ago) < 600]
     if not candidates_1h:
@@ -214,8 +215,6 @@ def get_oi_changes(symbol, current_oi):
         closest = min(candidates_1h, key=lambda d: abs(d["ts"] - one_hour_ago))
         old = closest["oi"]
         change_1h = (current_oi - old) / old * 100 if old else 0
-
-    # Cari snapshot 24 jam yang lalu (toleransi 1 jam)
     one_day_ago = now - 86400
     candidates_24h = [d for d in data if abs(d["ts"] - one_day_ago) < 3600]
     if not candidates_24h:
@@ -224,7 +223,6 @@ def get_oi_changes(symbol, current_oi):
         closest = min(candidates_24h, key=lambda d: abs(d["ts"] - one_day_ago))
         old = closest["oi"]
         change_24h = (current_oi - old) / old * 100 if old else 0
-
     return change_1h, change_24h
 
 _cooldown = load_cooldown()
@@ -238,9 +236,7 @@ def set_cooldown(sym):
     save_cooldown(_cooldown)
 
 
-# ══════════════════════════════════════════════════════════════
-#  🌐  HTTP UTILITIES
-# ══════════════════════════════════════════════════════════════
+# ==================== HTTP UTILITIES ====================
 def safe_get(url, params=None, timeout=12):
     for attempt in range(2):
         try:
@@ -274,9 +270,7 @@ def utc_now():  return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 def utc_hour(): return datetime.now(timezone.utc).hour
 
 
-# ══════════════════════════════════════════════════════════════
-#  📡  DATA FETCHERS
-# ══════════════════════════════════════════════════════════════
+# ==================== DATA FETCHERS ====================
 def get_all_tickers():
     data = safe_get(
         f"{BITGET_BASE}/api/v2/mix/market/tickers",
@@ -390,14 +384,8 @@ def get_orderbook(symbol, levels=50):
             book    = data["data"]
             bids = book.get("bids", [])
             asks = book.get("asks", [])
-            # Hitung weighted bid/ask volume hingga levels
-            bid_vol = 0
-            ask_vol = 0
-            for b in bids:
-                bid_vol += float(b[1])
-            for a in asks:
-                ask_vol += float(a[1])
-            # Hitung imbalance dengan volume (bukan USD)
+            bid_vol = sum(float(b[1]) for b in bids)
+            ask_vol = sum(float(a[1]) for a in asks)
             total = bid_vol + ask_vol
             ratio = bid_vol / total if total > 0 else 0.5
             return ratio, bid_vol, ask_vol
@@ -417,9 +405,7 @@ def get_cg_trending():
     return result
 
 
-# ══════════════════════════════════════════════════════════════
-#  📐  MATH HELPERS
-# ══════════════════════════════════════════════════════════════
+# ==================== MATH HELPERS (existing) ====================
 def bbw_percentile(candles, period=20):
     closes = [c["close"] for c in candles]
     if len(closes) < period + 10:
@@ -500,9 +486,7 @@ def find_swing_targets(candles, cur):
     return round(t1, 8), round(t2, 8)
 
 
-# ══════════════════════════════════════════════════════════════
-#  🆕  RVOL — RELATIVE VOLUME
-# ══════════════════════════════════════════════════════════════
+# ==================== RVOL, CVD, etc. (existing) ====================
 def calc_rvol(candles_1h):
     if len(candles_1h) < 25:
         return 1.0
@@ -518,10 +502,6 @@ def calc_rvol(candles_1h):
     avg = sum(same_hour_vols) / len(same_hour_vols)
     return last_vol / avg if avg > 0 else 1.0
 
-
-# ══════════════════════════════════════════════════════════════
-#  🆕  CVD — CUMULATIVE VOLUME DELTA (hidden accumulation)
-# ══════════════════════════════════════════════════════════════
 def calc_cvd_signal(candles_1h):
     if len(candles_1h) < 12:
         return 0, ""
@@ -546,7 +526,6 @@ def calc_cvd_signal(candles_1h):
     p_start   = window[0]["close"]
     p_end     = window[-1]["close"]
     price_chg = (p_end - p_start) / p_start * 100 if p_start > 0 else 0
-
     if cvd_rising and price_chg < 1.5:
         if price_chg < -1.5:
             return 15, f"🔍 CVD Divergence KUAT: harga {price_chg:+.1f}% tapi buy pressure dominan"
@@ -558,10 +537,6 @@ def calc_cvd_signal(candles_1h):
         return 5, f"CVD bullish, harga naik sehat ({price_chg:+.1f}%)"
     return 0, ""
 
-
-# ══════════════════════════════════════════════════════════════
-#  🆕  BREAKOUT PROXIMITY LAYER
-# ══════════════════════════════════════════════════════════════
 def detect_higher_lows(candles):
     if len(candles) < 6:
         return 0, ""
@@ -599,7 +574,6 @@ def volume_building_at_resistance(candles_1h, ticker):
         near_resistance  = high24h > 0 and (high24h - cur) / cur * 100 < 6
     except:
         near_resistance = False
-
     if vol_building and price_holding and near_resistance:
         return 8, "🧱 Volume building di resistance — wall buying aktif!"
     elif vol_building and price_holding and all_green:
@@ -622,7 +596,6 @@ def candle_quality_score(candles_1h):
     upper_wick  = (last["high"] - max(last["close"], last["open"])) / rng
     is_bullish  = last["close"] > last["open"]
     is_breakout = last["close"] > prev["high"]
-
     score = 0
     sig   = ""
     if is_bullish and body_ratio > 0.70 and upper_wick < 0.15:
@@ -652,10 +625,8 @@ def calc_breakout_proximity(candles_1h, ticker):
         lows_24  = [c["low"]  for c in candles_1h[-24:]] if len(candles_1h) >= 24 else [cur]
         high_24h = max(highs_24)
         low_24h  = min(lows_24)
-
     high_7d = max(c["high"] for c in candles_1h) if candles_1h else cur
     dist_24h = (high_24h - cur) / cur * 100 if cur > 0 else 99
-
     if dist_24h <= 0:
         score += 18
         sigs.append(f"⚡ Harga di HIGH 24h — breakout AKTIF!")
@@ -672,30 +643,20 @@ def calc_breakout_proximity(candles_1h, ticker):
         score += 6
     elif dist_24h > 20:
         score -= 5
-
-    hl_sc, hl_sig = detect_higher_lows(
-        candles_1h[-16:] if len(candles_1h) >= 16 else candles_1h
-    )
+    hl_sc, hl_sig = detect_higher_lows(candles_1h[-16:] if len(candles_1h) >= 16 else candles_1h)
     score += hl_sc
     if hl_sig:
         sigs.append(hl_sig)
-
     vb_sc, vb_sig = volume_building_at_resistance(candles_1h, ticker)
     score += vb_sc
     if vb_sig:
         sigs.append(vb_sig)
-
     cq_sc, cq_sig = candle_quality_score(candles_1h)
     score += cq_sc
     if cq_sig:
         sigs.append(cq_sig)
-
     return min(max(score, 0), 28), sigs
 
-
-# ══════════════════════════════════════════════════════════════
-#  🆕  4H MULTI-TIMEFRAME CONFLUENCE
-# ══════════════════════════════════════════════════════════════
 def calc_4h_confluence(candles_4h):
     if len(candles_4h) < 6:
         return 0, ""
@@ -714,9 +675,7 @@ def calc_4h_confluence(candles_4h):
     return 0, ""
 
 
-# ══════════════════════════════════════════════════════════════
-#  📊  SCORING LAYERS
-# ══════════════════════════════════════════════════════════════
+# ==================== LAYERS (existing, with modifications) ====================
 def layer_volume_intelligence(candles_1h):
     score = 0
     sigs  = []
@@ -737,19 +696,16 @@ def layer_volume_intelligence(candles_1h):
         score += 4
     elif rvol < 0.4:
         score -= 5
-
     cvd_s, cvd_sig = calc_cvd_signal(candles_1h)
     score += cvd_s
     if cvd_sig:
         sigs.append(cvd_sig)
-
     return min(score, 35), sigs, rvol
 
 def layer_structure(candles_1h):
     score = 0
     sigs  = []
     bbw_val, bbw_pct = bbw_percentile(candles_1h)
-
     if bbw_pct < 10:
         score += 12
         sigs.append(f"BBW Squeeze Ekstrem ({bbw_pct:.0f}%ile) — siap meledak")
@@ -762,7 +718,6 @@ def layer_structure(candles_1h):
     elif bbw_pct > 85:
         score -= 5
         sigs.append(f"⚠️ BBW Melebar ({bbw_pct:.0f}%ile) — volatilitas sudah terjadi")
-
     coiling = 0
     for c in reversed(candles_1h[-72:]):
         body = abs(c["close"] - c["open"]) / c["open"] * 100 if c["open"] else 99
@@ -770,7 +725,6 @@ def layer_structure(candles_1h):
             coiling += 1
         else:
             break
-
     if coiling >= 18:
         score += 5
         sigs.append(f"Coiling {coiling}h — energi terkumpul sangat lama")
@@ -779,7 +733,6 @@ def layer_structure(candles_1h):
         sigs.append(f"Coiling {coiling}h")
     elif coiling >= 5:
         score += 1
-
     return min(score, 15), sigs, bbw_val, bbw_pct, coiling
 
 def layer_positioning(symbol, funding):
@@ -795,7 +748,6 @@ def layer_positioning(symbol, funding):
     elif funding > 0.0003:
         score -= 5
         sigs.append(f"⚠️ Funding {funding:.5f} — long overcrowded")
-
     ls = get_long_short_ratio(symbol)
     ls_score = 0
     ls_ratio = None
@@ -821,7 +773,6 @@ def layer_positioning(symbol, funding):
         elif ls > 2.0:
             ls_score = -8
             sigs.append(f"L/S {ls:.2f} — long dominan")
-
     score = min(score + ls_score, 15)
     return score, sigs, ls_ratio
 
@@ -839,21 +790,18 @@ def layer_context(symbol, tickers_dict):
         except:
             continue
     pumped.sort(key=lambda x: x[1], reverse=True)
-
     sec_score = 0
     sec_sig   = ""
     if pumped:
         top = pumped[0]
         sec_score = 6 if top[1] > 20 else 4 if top[1] > 12 else 2
         sec_sig   = f"🔄 {sector}: {top[0]} +{top[1]:.0f}% — rotasi potensial"
-
     name = symbol.replace("USDT", "").replace("1000", "").upper()
     soc_score = 0
     soc_sig   = ""
     if name in get_cg_trending():
         soc_score = 4
         soc_sig   = f"🔥 {name} trending CoinGecko"
-
     sigs = [s for s in [sec_sig, soc_sig] if s]
     return min(sec_score + soc_score, 10), sigs, sector
 
@@ -865,28 +813,21 @@ def get_time_mult():
         return 0.80, "Low-prob window"
     return 1.0, ""
 
-
-# ══════════════════════════════════════════════════════════════
-#  🐋  WHALE DETECTION — ditingkatkan bobotnya
-# ══════════════════════════════════════════════════════════════
 def calc_whale(symbol, candles_15m, funding):
     ws  = 0
     ev  = []
     cur = candles_15m[-1]["close"] if candles_15m else 0
-
-    trades = get_trades(symbol, 500)  # limit 500
+    trades = get_trades(symbol, 500)
     if trades:
         buy_v = sum(t["size"] for t in trades if t["side"] == "buy")
         tot_v = sum(t["size"] for t in trades)
         tr    = buy_v / tot_v if tot_v > 0 else 0.5
-
         if tr > 0.70:
             ws += 30
             ev.append(f"✅ Taker Buy {tr:.0%} — pembeli sangat dominan")
         elif tr > 0.62:
             ws += 15
             ev.append(f"🔶 Taker Buy {tr:.0%} — bias beli")
-
         total_usd = sum(t["size"] * t["price"] for t in trades)
         avg_trade = total_usd / len(trades) if trades else 1
         thr       = max(avg_trade * 5, 3_000)
@@ -897,8 +838,6 @@ def calc_whale(symbol, candles_15m, funding):
         if total_usd > 0 and lbuy_usd / total_usd > 0.28:
             ws += 25
             ev.append(f"✅ Smart money {lbuy_usd/total_usd:.0%} vol (>${thr:,.0f}/trade)")
-
-        # Iceberg detection
         if cur > 0:
             tol = (0.15 if cur >= 10 else 0.30 if cur >= 1 else 0.50)
             at_level = [
@@ -912,7 +851,6 @@ def calc_whale(symbol, candles_15m, funding):
                 if len(at_level) >= 14 and avg_ice < thr * 0.25 and tot_ice > thr * 2.5:
                     ws += 20
                     ev.append(f"✅ Iceberg: {len(at_level)} tx kecil (${tot_ice:,.0f} total)")
-
     if candles_15m and len(candles_15m) >= 16:
         p4h  = candles_15m[-16]["close"]
         pchg = abs((cur - p4h) / p4h * 100) if p4h else 99
@@ -922,12 +860,9 @@ def calc_whale(symbol, candles_15m, funding):
         elif pchg < 3.0:
             ws += 7
             ev.append("🔶 Harga relatif flat 4h")
-
     if -0.0004 <= funding <= -0.00002:
         ws += 10
         ev.append(f"✅ Funding {funding:.5f} — short squeeze setup")
-
-    # Order book imbalance dengan 50 level
     ob_ratio, bid_vol, ask_vol = get_orderbook(symbol, 50)
     if ob_ratio > 0.65:
         ws += 15
@@ -938,50 +873,345 @@ def calc_whale(symbol, candles_15m, funding):
     elif ob_ratio < 0.35:
         ws -= 10
         ev.append(f"⚠️ OB Ask dominan — tekanan jual lebih besar")
-
     ws  = min(ws, 100)
-    # Bobot whale score sekarang linier: bonus = ws // 5 (maks 20)
     return ws, ws // 5, ev
 
 
-# ══════════════════════════════════════════════════════════════
-#  🎯  ENTRY ZONE CALCULATOR
-# ══════════════════════════════════════════════════════════════
+# ==================== NEW METRICS FOR PUMP PROBABILITY ====================
+def calculate_volume_irregularity(candles_1h):
+    """Koefisien variasi volume (std/mean) dari 24 jam terakhir."""
+    if len(candles_1h) < 24:
+        vols = [c["volume"] for c in candles_1h]
+    else:
+        vols = [c["volume"] for c in candles_1h[-24:]]
+    if not vols:
+        return 0
+    mean_vol = sum(vols) / len(vols)
+    if mean_vol == 0:
+        return 0
+    std_vol = math.sqrt(sum((v - mean_vol)**2 for v in vols) / len(vols))
+    return std_vol / mean_vol
+
+def calculate_range_lock_score(candles_1h):
+    """(high-low) / total volume selama 24 jam."""
+    if len(candles_1h) < 24:
+        candles = candles_1h
+    else:
+        candles = candles_1h[-24:]
+    high = max(c["high"] for c in candles)
+    low = min(c["low"] for c in candles)
+    total_vol = sum(c["volume"] for c in candles)
+    if total_vol == 0:
+        return 0
+    return (high - low) / total_vol
+
+def calculate_efficiency_ratio(candles_1h):
+    """Rata-rata |close-open| / volume per candle (24 jam)."""
+    if len(candles_1h) < 24:
+        candles = candles_1h
+    else:
+        candles = candles_1h[-24:]
+    ratios = []
+    for c in candles:
+        body = abs(c["close"] - c["open"])
+        if c["volume"] > 0:
+            ratios.append(body / c["volume"])
+    if not ratios:
+        return 0
+    return sum(ratios) / len(ratios)
+
+def calculate_fake_break_count(candles_1h, lookback=5):
+    """Jumlah breakout palsu dalam 24 jam terakhir."""
+    if len(candles_1h) < lookback + 2:
+        return 0
+    candles = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
+    false_breaks = 0
+    for i in range(lookback, len(candles)-1):
+        window = candles[i-lookback:i]
+        high_prev = max(c["high"] for c in window)
+        low_prev = min(c["low"] for c in window)
+        curr = candles[i]
+        next_c = candles[i+1]
+        if curr["high"] > high_prev and next_c["close"] < high_prev:
+            false_breaks += 1
+        if curr["low"] < low_prev and next_c["close"] > low_prev:
+            false_breaks += 1
+    return false_breaks
+
+def calculate_buy_pressure_proxy(candles_1h):
+    """Rata-rata (close - low) / (high - low) untuk 24 jam terakhir."""
+    if len(candles_1h) < 24:
+        candles = candles_1h
+    else:
+        candles = candles_1h[-24:]
+    pressures = []
+    for c in candles:
+        rng = c["high"] - c["low"]
+        if rng > 0:
+            pressures.append((c["close"] - c["low"]) / rng)
+    if not pressures:
+        return 0.5
+    return sum(pressures) / len(pressures)
+
+def calculate_volatility_drop_rate(candles_1h, period=14):
+    """Kecepatan penurunan volatilitas: slope ATR dalam 24 jam terakhir."""
+    if len(candles_1h) < period + 24:
+        return 0
+    # Hitung ATR untuk setiap jam selama 24 jam terakhir (butuh 14 candle sebelumnya)
+    atr_values = []
+    for i in range(len(candles_1h)-24, len(candles_1h)):
+        # Kita perlu subset untuk menghitung ATR pada titik i
+        start = max(0, i - period - 1)
+        sub = candles_1h[start:i+1]
+        if len(sub) < period + 1:
+            continue
+        atr = calc_atr(sub, period)
+        if atr:
+            atr_values.append(atr)
+    if len(atr_values) < 2:
+        return 0
+    # Hitung slope (regresi linear) dari atr_values
+    x = list(range(len(atr_values)))
+    y = atr_values
+    n = len(x)
+    sum_x = sum(x)
+    sum_y = sum(y)
+    sum_xy = sum(x[i]*y[i] for i in range(n))
+    sum_xx = sum(x[i]**2 for i in range(n))
+    denom = n*sum_xx - sum_x**2
+    if denom == 0:
+        return 0
+    slope = (n*sum_xy - sum_x*sum_y) / denom
+    # Slope negatif = penurunan volatilitas (baik). Kita ingin nilai positif untuk skor.
+    # Jadi kita gunakan -slope, dan batasi antara 0 dan 1.
+    drop_rate = -slope
+    return max(0, min(1, drop_rate / 0.01))  # asumsikan slope maks 0.01
+
+def calculate_trend_stability(candles_1h):
+    """Standar deviasi dari slope harga 6 jam bergulir."""
+    if len(candles_1h) < 12:
+        return 1.0  # stabil jika data sedikit?
+    slopes = []
+    for i in range(6, len(candles_1h)):
+        window = candles_1h[i-6:i]
+        closes = [c["close"] for c in window]
+        x = list(range(6))
+        y = closes
+        n = 6
+        sum_x = sum(x)
+        sum_y = sum(y)
+        sum_xy = sum(x[i]*y[i] for i in range(n))
+        sum_xx = sum(x[i]**2 for i in range(n))
+        denom = n*sum_xx - sum_x**2
+        if denom == 0:
+            slope = 0
+        else:
+            slope = (n*sum_xy - sum_x*sum_y) / denom
+        slopes.append(slope)
+    if len(slopes) < 2:
+        return 1.0
+    std_slope = np.std(slopes) if 'numpy' in dir() else math.sqrt(sum((s - sum(slopes)/len(slopes))**2 for s in slopes) / len(slopes))
+    # Semakin kecil std, semakin stabil. Kita balikkan: 1 / (1+std)
+    return 1 / (1 + std_slope)
+
+def calculate_absorption_consistency(candles_1h):
+    """Konsistensi wick absorption: koefisien variasi dari wick absorption per candle."""
+    if len(candles_1h) < 24:
+        candles = candles_1h
+    else:
+        candles = candles_1h[-24:]
+    absorptions = []
+    for c in candles:
+        if c["close"] > c["open"]:  # bullish
+            lower_wick = c["open"] - c["low"]
+            total_range = c["high"] - c["low"]
+            if total_range > 0:
+                absorptions.append(lower_wick / total_range)
+        else:  # bearish
+            upper_wick = c["high"] - c["open"]
+            total_range = c["high"] - c["low"]
+            if total_range > 0:
+                absorptions.append(upper_wick / total_range)
+    if not absorptions:
+        return 0
+    mean_abs = sum(absorptions) / len(absorptions)
+    if mean_abs == 0:
+        return 0
+    std_abs = math.sqrt(sum((a - mean_abs)**2 for a in absorptions) / len(absorptions))
+    cv = std_abs / mean_abs
+    # Semakin kecil cv, semakin konsisten. Kita balikkan: 1 / (1+cv)
+    return 1 / (1 + cv)
+
+
+# ==================== PUMP PROBABILITY SCORE ====================
+def normalize(value, min_val, max_val, inverse=False):
+    """Normalisasi linear ke [0,1], jika inverse=True maka nilai kecil jadi besar."""
+    if max_val == min_val:
+        return 0.5
+    norm = (value - min_val) / (max_val - min_val)
+    norm = max(0, min(1, norm))
+    if inverse:
+        return 1 - norm
+    return norm
+
+def compute_pump_probability(candles_1h):
+    """
+    Menghitung Pump Probability Score berdasarkan metrik yang sudah dinormalisasi.
+    Menggunakan bobot dari ChatGPT.
+    """
+    # Metrik yang sudah ada (dari layer lain, kita hitung ulang di sini agar konsisten)
+    # Compression phase (BBW percentile) - kita gunakan bbw_pct yang sudah dihitung di layer_structure
+    # Tapi kita perlu bbw_pct dari candles_1h. Kita akan hitung sendiri di sini.
+    _, bbw_pct = bbw_percentile(candles_1h)  # bbw_pct dalam 0-100
+    compression = bbw_pct / 100.0  # 0-1, nilai kecil bagus
+
+    # Wick absorption (kita hitung rata-rata dari 24 jam terakhir)
+    wick_abs = 0
+    if len(candles_1h) >= 24:
+        candles = candles_1h[-24:]
+    else:
+        candles = candles_1h
+    abs_list = []
+    for c in candles:
+        if c["close"] > c["open"]:
+            lower_wick = c["open"] - c["low"]
+            total_range = c["high"] - c["low"]
+            if total_range > 0:
+                abs_list.append(lower_wick / total_range)
+        else:
+            upper_wick = c["high"] - c["open"]
+            total_range = c["high"] - c["low"]
+            if total_range > 0:
+                abs_list.append(upper_wick / total_range)
+    wick_abs = sum(abs_list) / len(abs_list) if abs_list else 0.5
+
+    # Volume irregularity
+    vol_irr = calculate_volume_irregularity(candles_1h)
+    # Range lock score
+    range_lock = calculate_range_lock_score(candles_1h)
+    # Efficiency ratio
+    eff = calculate_efficiency_ratio(candles_1h)
+    # Fake break count
+    fake_break = calculate_fake_break_count(candles_1h)
+    # Buy pressure
+    buy_pressure = calculate_buy_pressure_proxy(candles_1h)
+    # Volatility drop rate
+    vol_drop = calculate_volatility_drop_rate(candles_1h)
+    # Trend stability
+    trend_stab = calculate_trend_stability(candles_1h)
+    # Absorption consistency
+    abs_cons = calculate_absorption_consistency(candles_1h)
+
+    # Normalisasi masing-masing ke 0-1 dengan batas yang ditentukan dari data forensik
+    # Batas bawah dan atas berdasarkan analisis (perkiraan)
+    n_comp = normalize(compression, 0, 1, inverse=False)  # compression kecil bagus, tapi kita ingin nilai kecil jadi skor besar? compression adalah persentil kecil bagus, jadi kita balikkan? Sebenarnya compression phase adalah bbw_pct, makin kecil makin compressed. Jadi kita ingin nilai kecil jadi skor tinggi. Maka inverse=True.
+    n_comp = 1 - n_comp  # karena compression kecil bagus, kita balikkan
+
+    n_wick = normalize(wick_abs, 0.1, 0.5, inverse=False)  # wick_abs sekitar 0.1-0.5, lebih tinggi bagus? Dari data pump lebih tinggi? Pump avg 0.214, non-pump 0.19, jadi sedikit lebih tinggi bagus. Jadi inverse=False.
+    n_vol_irr = normalize(vol_irr, 0.5, 3.0, inverse=False)  # lebih tinggi bagus? Pump avg 1.82, non 1.41, jadi tinggi bagus.
+    n_range_lock = normalize(range_lock, 1e-9, 1e-6, inverse=True)  # sangat kecil bagus, jadi inverse=True
+    n_eff = normalize(eff, 1e-7, 1e-4, inverse=True)  # kecil bagus, inverse
+    n_fake = normalize(fake_break, 0, 10, inverse=False)  # lebih banyak bagus? Pump avg 4.18, non 3.79, jadi sedikit lebih banyak bagus.
+    n_buy = normalize(buy_pressure, 0.4, 0.6, inverse=False)  # ideal 0.5-0.6, pump 0.467, non 0.46, hampir sama, tapi kita anggap >0.5 bagus.
+    n_vol_drop = normalize(vol_drop, 0, 1, inverse=False)  # sudah 0-1
+    n_trend_stab = normalize(trend_stab, 0.5, 1.0, inverse=False)  # semakin stabil bagus
+    n_abs_cons = normalize(abs_cons, 0, 1, inverse=False)  # konsisten bagus
+
+    # Bobot dari ChatGPT
+    weights = {
+        'comp': 0.15,
+        'wick': 0.15,
+        'vol_irr': 0.15,
+        'range': 0.15,
+        'eff': 0.10,
+        'fake': 0.10,
+        'buy': 0.10,
+        'vol_drop': 0.05,
+        'trend': 0.05,
+        'abs_cons': 0.00  # tidak termasuk dalam bobot asli, tapi kita bisa masukkan ke salah satu atau buat sendiri. Untuk sementara kita tidak pakai karena bobot sudah penuh.
+    }
+    # Kita gunakan abs_cons sebagai pengganti? Atau tambah dengan mengurangi bobot lain? Agar total 1, kita kurangi sedikit dari yang lain. Misal kita ambil 0.05 dari vol_drop dan trend? Tapi lebih baik kita ikuti bobot asli, dan abs_cons kita tampilkan sebagai info saja.
+    # Untuk sementara kita tidak masukkan abs_cons ke skor, hanya tampilkan.
+    total = (n_comp * weights['comp'] +
+             n_wick * weights['wick'] +
+             n_vol_irr * weights['vol_irr'] +
+             n_range_lock * weights['range'] +
+             n_eff * weights['eff'] +
+             n_fake * weights['fake'] +
+             n_buy * weights['buy'] +
+             n_vol_drop * weights['vol_drop'] +
+             n_trend_stab * weights['trend'])
+
+    # Klasifikasi
+    if total < 0.3:
+        classification = "Noise"
+    elif total < 0.5:
+        classification = "Neutral"
+    elif total < 0.7:
+        classification = "Accumulation"
+    elif total < 0.85:
+        classification = "Pre-Pump"
+    else:
+        classification = "Imminent Pump"
+
+    return {
+        'probability_score': total,
+        'classification': classification,
+        'metrics': {
+            'compression': compression,
+            'wick_absorption': wick_abs,
+            'volume_irregularity': vol_irr,
+            'range_lock_score': range_lock,
+            'efficiency_ratio': eff,
+            'fake_break_count': fake_break,
+            'buy_pressure': buy_pressure,
+            'volatility_drop_rate': vol_drop,
+            'trend_stability': trend_stab,
+            'absorption_consistency': abs_cons,
+        },
+        'normalized': {
+            'n_comp': n_comp,
+            'n_wick': n_wick,
+            'n_vol_irr': n_vol_irr,
+            'n_range_lock': n_range_lock,
+            'n_eff': n_eff,
+            'n_fake': n_fake,
+            'n_buy': n_buy,
+            'n_vol_drop': n_vol_drop,
+            'n_trend_stab': n_trend_stab,
+        }
+    }
+
+
+# ==================== ENTRY ZONE CALCULATOR (same) ====================
 def calc_entry(candles_1h):
     cur = candles_1h[-1]["close"]
     atr = calc_atr(candles_1h, 14) or cur * 0.02
-
     recent   = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
     vwap, z1 = calc_vwap_zone(recent)
     poc_src  = candles_1h[-48:] if len(candles_1h) >= 48 else candles_1h
     z2       = calc_poc(poc_src)
     if not z2 or z2 >= cur:
         z2 = cur * 0.97
-
     support = max(z1 or cur * 0.97, z2)
     if support >= cur:
         support = cur * 0.96
-
     max_dist = CONFIG["max_sl_pct"] / 100
     if (cur - support) / cur > max_dist:
         support = cur * (1 - max_dist + 0.02)
-
     entry = min(support * 1.002, cur * 0.998)
     sl    = max(entry - CONFIG["atr_sl_mult"] * atr, entry * 0.88)
-
     t1_sw, t2_sw = find_swing_targets(candles_1h, cur)
     t1_atr       = entry + CONFIG["atr_t1_mult"] * atr
     t1           = min(t1_sw, t1_atr) if t1_sw > cur * 1.06 else t1_atr
     if t1 <= cur * 1.05:
         t1 = cur * 1.10
     t2 = t2_sw if t2_sw > t1 * 1.02 else t1 * 1.08
-
     risk   = entry - sl
     reward = t1 - entry
     rr     = round(reward / risk, 1) if risk > 0 else 0
     t1_pct = round((t1 - cur) / cur * 100, 1)
     sl_pct = round((entry - sl) / entry * 100, 1)
-
     return {
         "cur":     cur,
         "atr":     round(atr, 8),
@@ -998,9 +1228,7 @@ def calc_entry(candles_1h):
     }
 
 
-# ══════════════════════════════════════════════════════════════
-#  🧠  MASTER SCORE — dengan bonus stealth, eksplosif, OI, L/S
-# ══════════════════════════════════════════════════════════════
+# ==================== MASTER SCORE ====================
 def master_score(symbol, ticker, tickers_dict):
     c1h  = get_candles(symbol, "1h",  CONFIG["candle_1h"])
     c15m = get_candles(symbol, "15m", CONFIG["candle_15m"])
@@ -1011,7 +1239,7 @@ def master_score(symbol, ticker, tickers_dict):
 
     funding = get_funding(symbol)
 
-    # ── GATES ──────────────────────────────────────────────────
+    # GATES
     try:
         p7d_ago = c1h[-168]["close"] if len(c1h) >= 168 else c1h[0]["close"]
         chg_7d  = (c1h[-1]["close"] - p7d_ago) / p7d_ago * 100 if p7d_ago > 0 else 0
@@ -1043,25 +1271,25 @@ def master_score(symbol, ticker, tickers_dict):
     sigs  = []
     bd    = {}
 
-    # ── Layer 1: Volume Intelligence ──────────────────────────
+    # Layer 1: Volume Intelligence
     v_sc, v_sigs, rvol = layer_volume_intelligence(c1h)
     score += v_sc
     sigs  += v_sigs
     bd["vol"] = v_sc
 
-    # ── Layer 2: Breakout Proximity ─────────────────────
+    # Layer 2: Breakout Proximity
     bp_sc, bp_sigs = calc_breakout_proximity(c1h, ticker)
     score += bp_sc
     sigs  += bp_sigs
     bd["bp"] = bp_sc
 
-    # ── Layer 3: Structure ────────────────────────────────────
+    # Layer 3: Structure
     st_sc, st_sigs, bbw_val, bbw_pct, coiling = layer_structure(c1h)
     score += st_sc
     sigs  += st_sigs
     bd["struct"] = st_sc
 
-    # ── Bonus Stealth ──────────────────────────────────
+    # Bonus Stealth
     stealth_bonus = 0
     if (avg_vol_pre < CONFIG["stealth_max_vol"] and
         coiling > CONFIG["stealth_min_coiling"] and
@@ -1071,7 +1299,7 @@ def master_score(symbol, ticker, tickers_dict):
     score += stealth_bonus
     bd["stealth"] = stealth_bonus
 
-    # ── Bonus Eksplosif ────────────────────────────────
+    # Bonus Eksplosif
     explosive_bonus = 0
     if (avg_vol_pre > CONFIG["explosive_min_vol"] and
         range_6h > CONFIG["explosive_min_range"] and
@@ -1081,13 +1309,13 @@ def master_score(symbol, ticker, tickers_dict):
     score += explosive_bonus
     bd["explosive"] = explosive_bonus
 
-    # ── Layer 4: Positioning ──────────────────────────────────
+    # Layer 4: Positioning
     pos_sc, pos_sigs, ls_ratio = layer_positioning(symbol, funding)
     score += pos_sc
     sigs  += pos_sigs
     bd["pos"] = pos_sc
 
-    # ── Layer 5: Multi-TF 4H Confluence ─────────────────
+    # Layer 5: Multi-TF 4H
     tf4h_sc = 0
     if c4h:
         tf4h_sc, tf4h_sig = calc_4h_confluence(c4h)
@@ -1096,53 +1324,53 @@ def master_score(symbol, ticker, tickers_dict):
     score += tf4h_sc
     bd["tf4h"] = tf4h_sc
 
-    # ── Layer 6: Context ──────────────────────────────────────
+    # Layer 6: Context
     ctx_sc, ctx_sigs, sector = layer_context(symbol, tickers_dict)
     score += ctx_sc
     sigs  += ctx_sigs
     bd["ctx"] = ctx_sc
 
-    # ── Whale & OI ───────────────────────────────────────────
+    # Whale & OI
     ws, whale_bonus, wev = calc_whale(symbol, c15m, funding)
     score += whale_bonus
     bd["whale"] = whale_bonus
     for ev in wev:
         sigs.append(ev)
 
-    # ── Open Interest Changes ────────────────────────────────
+    # Open Interest Changes
     oi_value = get_open_interest(symbol)
     if oi_value > 0:
         save_oi_snapshot(symbol, oi_value)
         oi_change_1h, oi_change_24h = get_oi_changes(symbol, oi_value)
-
-        # Penalti jika OI turun drastis
         if oi_change_24h < -20:
             score -= 15
             sigs.append(f"⚠️ OI 24h turun {oi_change_24h:.1f}% — distribusi besar")
         elif oi_change_24h < -10:
             score -= 7
             sigs.append(f"OI 24h turun {oi_change_24h:.1f}%")
-
         if oi_change_1h < -5:
             score -= 5
             sigs.append(f"OI 1h turun {oi_change_1h:.1f}% — tekanan jual jangka pendek")
         elif oi_change_1h > 5:
             score += 5
             sigs.append(f"✅ OI 1h naik {oi_change_1h:.1f}% — posisi baru masuk")
-
-        # Divergensi volume vs OI
         if rvol > 1.5 and oi_change_24h < -10:
             score -= 8
             sigs.append(f"⚠️ Volume naik tapi OI turun — distribusi terindikasi")
         elif rvol > 1.5 and oi_change_24h > 5:
             score += 8
             sigs.append(f"✅ Volume naik + OI naik — akumulasi kuat")
-
         bd["oi_change"] = round(oi_change_24h, 1)
     else:
         bd["oi_change"] = 0
 
-    # ── Time Multiplier ───────────────────────────────────────
+    # Pump Probability Score (BARU)
+    prob = compute_pump_probability(c1h)
+    # Tambahkan ke breakdown
+    bd["prob_score"] = round(prob['probability_score'] * 100, 1)  # dalam persen
+    bd["prob_class"] = prob['classification']
+
+    # Time Multiplier
     tmult, tsig = get_time_mult()
     score = int(score * tmult)
     if tsig:
@@ -1150,7 +1378,7 @@ def master_score(symbol, ticker, tickers_dict):
 
     score = min(score, 100)
 
-    # ── Entry Zones ───────────────────────────────────────────
+    # Entry Zones
     entry = calc_entry(c1h)
     if not entry or entry["liq_pct"] < CONFIG["min_target_pct"]:
         return None
@@ -1164,7 +1392,7 @@ def master_score(symbol, ticker, tickers_dict):
         chg_24h   = 0
         vol_24h   = 0
 
-    # Hitung range 24h untuk penalti (pengganti gate)
+    # Range 24h penalty
     if len(c1h) >= 24:
         high24 = max(c["high"] for c in c1h[-24:])
         low24  = min(c["low"] for c in c1h[-24:])
@@ -1195,12 +1423,12 @@ def master_score(symbol, ticker, tickers_dict):
         "coiling":  coiling,
         "bbw_val":  bbw_val,
         "oi_change_24h": bd.get("oi_change", 0),
+        "prob_score": prob['probability_score'],
+        "prob_class": prob['classification'],
     }
 
 
-# ══════════════════════════════════════════════════════════════
-#  📱  TELEGRAM FORMATTER
-# ══════════════════════════════════════════════════════════════
+# ==================== TELEGRAM FORMATTER (updated) ====================
 def build_alert(r, rank=None):
     sc  = r["score"]
     bar = "█" * int(sc / 5) + "░" * (20 - int(sc / 5))
@@ -1210,10 +1438,14 @@ def build_alert(r, rank=None):
            else f"${r['vol_24h']/1e3:.0f}K")
     ls  = f" | L/S:{r['ls_ratio']:.2f}" if r.get("ls_ratio") else ""
 
+    prob_score = r.get("prob_score", 0) * 100  # karena kita simpan dalam 0-1
+    prob_class = r.get("prob_class", "Unknown")
+
     msg = (
         f"🚨 <b>PRE-PUMP INTELLIGENCE {rk}</b>\n\n"
         f"<b>Symbol :</b> {r['symbol']}\n"
         f"<b>Score  :</b> {sc}/100  {bar}\n"
+        f"<b>Prob. Pump:</b> {prob_score:.1f}% ({prob_class})\n"
         f"<b>Sektor :</b> {r['sector']}\n"
         f"<b>Harga  :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h | {r['chg_7d']:+.1f}% 7d)\n"
         f"<b>Vol 24h:</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
@@ -1250,7 +1482,8 @@ def build_alert(r, rank=None):
         f"  Vol:{bd.get('vol',0)} BP:{bd.get('bp',0)} "
         f"Struct:{bd.get('struct',0)} Pos:{bd.get('pos',0)} "
         f"4H:{bd.get('tf4h',0)} Ctx:{bd.get('ctx',0)} "
-        f"Whale:{bd.get('whale',0)} Stealth:{bd.get('stealth',0)} Exp:{bd.get('explosive',0)}\n\n"
+        f"Whale:{bd.get('whale',0)} Stealth:{bd.get('stealth',0)} Exp:{bd.get('explosive',0)} "
+        f"Prob:{bd.get('prob_score',0)}%\n\n"
         f"📡 Funding:{r['funding']:.5f}  🕐 {utc_now()}\n"
         f"<i>Bukan financial advice. Manage risk.</i>"
     )
@@ -1263,16 +1496,15 @@ def build_summary(results):
         vol  = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                 else f"${r['vol_24h']/1e3:.0f}K")
         t1p  = r["entry"]["liq_pct"] if r.get("entry") else 0
+        prob = r.get("prob_score", 0) * 100
         msg += (
             f"{i}. <b>{r['symbol']}</b> [{r['score']}/100 {bar}]\n"
-            f"   🐋{r['ws']} | RVOL:{r['rvol']:.1f}x | {vol} | T1:+{t1p:.0f}%\n"
+            f"   🐋{r['ws']} | RVOL:{r['rvol']:.1f}x | {vol} | T1:+{t1p:.0f}% | Prob:{prob:.0f}%\n"
         )
     return msg
 
 
-# ══════════════════════════════════════════════════════════════
-#  🎯  SMART PRE-FILTER DARI TICKER (lebih longgar)
-# ══════════════════════════════════════════════════════════════
+# ==================== PRE-FILTER (same) ====================
 def pre_score_ticker(ticker):
     try:
         cur     = float(ticker.get("lastPr",       0))
@@ -1282,39 +1514,31 @@ def pre_score_ticker(ticker):
         chg24h  = float(ticker.get("change24h",    0)) * 100
     except:
         return 0
-
     if cur <= 0:
         return 0
-
     ps = 0
     dist = (high24h - cur) / cur * 100 if cur > 0 and high24h > cur else 0
     if dist <= 1.0:   ps += 6
     elif dist <= 3.0: ps += 4
     elif dist <= 6.0: ps += 2
     elif dist > 20:   ps -= 2
-
     if 0.5 <= chg24h <= 8:     ps += 3
     elif 8 < chg24h <= 15:     ps += 1
     elif -5 <= chg24h < 0:     ps += 2
     elif chg24h > 20:          ps -= 3
-
     if low24h > 0:
         range24 = (high24h - low24h) / low24h * 100
         if 3 <= range24 <= 15: ps += 2
         elif range24 > 40:     ps -= 2
-
     if   200_000 <= vol <= 3_000_000: ps += 2
     elif 100_000 <= vol <  200_000:   ps += 1
     elif vol >     20_000_000:        ps -= 1
-
     return ps
 
 
-# ══════════════════════════════════════════════════════════════
-#  🚀  MAIN SCAN — Dynamic Discovery + Smart Pre-filter
-# ══════════════════════════════════════════════════════════════
+# ==================== MAIN SCAN ====================
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v7.2 — FLOW-INTEGRATED — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v8.0 — PROBABILITY-BASED — {utc_now()} ===")
     log.info(f"Dynamic discovery: scan semua USDT-futures Bitget")
 
     tickers = get_all_tickers()
@@ -1324,7 +1548,6 @@ def run_scan():
 
     log.info(f"Total coin tersedia: {len(tickers)}")
 
-    # Filter coin tidak relevan
     excluded_keywords = ["XAU", "PAXG", "BTC", "ETH", "USDC", "DAI", "BUSD", "UST", "LUNC", "LUNA"]
     candidates = []
     for sym, t in tickers.items():
@@ -1334,19 +1557,16 @@ def run_scan():
             continue
         if is_cooldown(sym):
             continue
-
         try:
             vol   = float(t.get("quoteVolume", 0))
             chg   = float(t.get("change24h",   0)) * 100
             price = float(t.get("lastPr",       0))
         except:
             continue
-
         if vol   < CONFIG["pre_filter_vol"]:          continue
         if vol   > CONFIG["max_vol_24h"]:             continue
         if abs(chg) > CONFIG["gate_chg_24h_max"]:    continue
         if price <= 0:                                 continue
-
         ps = pre_score_ticker(t)
         candidates.append((sym, ps, vol))
 
@@ -1360,32 +1580,27 @@ def run_scan():
         t = tickers.get(sym)
         if not t:
             continue
-
         if vol < CONFIG["min_vol_24h"]:
             log.info(f"[{i+1}] {sym} — vol ${vol:,.0f} di bawah minimum")
             continue
-
         try:
             chg = abs(float(t.get("change24h", 0)) * 100)
             if chg > CONFIG["gate_chg_24h_max"]:
                 continue
         except:
             pass
-
         log.info(f"[{i+1}/{len(candidates)}] {sym} (vol ${vol/1e3:.0f}K, pre={ps})...")
-
         try:
             res = master_score(sym, t, tickers)
             if res:
                 log.info(
                     f"  Score={res['score']} Whale={res['ws']} "
-                    f"RVOL={res['rvol']:.1f}x T1=+{res['entry']['liq_pct']:.1f}%"
+                    f"RVOL={res['rvol']:.1f}x T1=+{res['entry']['liq_pct']:.1f}% Prob={res['prob_score']*100:.1f}%"
                 )
                 if res["score"] >= CONFIG["min_score_alert"]:
                     results.append(res)
         except Exception as ex:
             log.warning(f"  Error {sym}: {ex}")
-
         time.sleep(CONFIG["sleep_coins"])
 
     results.sort(key=lambda x: (x["score"], x["ws"]), reverse=True)
@@ -1410,7 +1625,7 @@ def run_scan():
         ok = send_telegram(build_alert(r, rank=rank))
         if ok:
             set_cooldown(r["symbol"])
-            log.info(f"✅ Alert #{rank}: {r['symbol']} S={r['score']} W={r['ws']}")
+            log.info(f"✅ Alert #{rank}: {r['symbol']} S={r['score']} W={r['ws']} Prob={r['prob_score']*100:.1f}%")
         time.sleep(2)
 
     log.info(f"=== SELESAI — {len(top)} alert terkirim ===")
@@ -1418,7 +1633,7 @@ def run_scan():
 
 if __name__ == "__main__":
     log.info("╔════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v7.2 — FLOW-INTEGRATED  ║")
+    log.info("║  PRE-PUMP SCANNER v8.0 — PROBABILITY-BASED║")
     log.info("║  Adaptive | Stealth | Explosive | OI      ║")
     log.info("╚════════════════════════════════════════════╝")
 
