@@ -1,48 +1,53 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.3 — OI DISTRIBUTION GATE + STOCK FILTER FIX   ║
+║  PRE-PUMP SCANNER v9.4 — 6 BUG FIX DARI AUDIT FORENSIK TRX+CHZ     ║
 ║                                                                      ║
-║  ANALISIS FORENSIK dari run v9.2 (2026-02-25, data CoinGlass):      ║
+║  AUDIT FORENSIK TRX & CHZ (data CoinGlass 2026-02-25):              ║
 ║                                                                      ║
-║  FUTU  $144.73 → Futu Holdings (NASDAQ stock!) — lolos alert ❌      ║
-║  MU    $432.2  → Micron Technology (NASDAQ stock!) — lolos alert ❌  ║
-║  CHZ   Score=82 → OI negatif DI SEMUA TF (24h+1h+15m+5m) ❌         ║
-║                    Futures outflow di 4h, 8h, 12h — distribusi aktif ║
-║  XDC   Comp=79 → Volume -39% 24h, futures outflow semua TF ❌        ║
-║  ALGO  Comp=66 → Funding negatif, vol +18%, inflow 1h/4h/8h ✅       ║
-║                   (SATU-SATUNYA signal valid dari 8 alert)           ║
+║  TRX lolos alert PADAHAL:                                            ║
+║    L/S=1.317 (longs dominan) → dapat 0 poin (gap 1.15–2.0)         ║
+║    Funding=+0.0093% (positif) → dapat +5 poin (salah range)         ║
+║    Futures outflow 5m/15m/30m/1h semua negatif → tidak terdeteksi   ║
+║  CHZ score=82 PADAHAL:                                               ║
+║    OI turun di SEMUA TF (-1.44% 24h, -1.19% 1h, -0.51% 15m)        ║
+║    → dapat 0 penalti karena OI snapshot belum ada (bug kritis!)      ║
+║    Funding=+0.0093% → dapat +5 (sama seperti TRX, salah)            ║
 ║                                                                      ║
-║  FIX v9.3-A (KRITIS): Tambah FUTU, MU + 15 stock lain               ║
-║    FUTU = Futu Holdings → CONFIRMED lolos alert ❌                   ║
-║    MU   = Micron Technology → CONFIRMED lolos alert ❌               ║
-║    +13 token saham baru (media, otomotif, energy)                    ║
-║    Total STOCK_TICKERS: 49 → 65 token                               ║
+║  BUG 1 [KRITIS] — Funding scoring range salah                        ║
+║    0 <= funding <= 0.0001 semua dapat +5 ("netral")                  ║
+║    Masalah: 0.0093% = 0.000093 itu LONGS DOMINAN, bukan netral!     ║
+║    True neutral = abs(funding) < 0.000010 (< 0.001%)               ║
+║    Fix: 5 tier baru — sangat negatif/negatif/netral/positif/tinggi   ║
 ║                                                                      ║
-║  FIX v9.3-B (KRITIS): OI Multi-Timeframe Distribution Gate          ║
-║    v9.2: OI 24h -1.44% + OI 1h -1.19% → tidak tertangkap           ║
-║           (threshold lama hanya penalti jika < -10%)                 ║
-║    v9.3: Jika OI 24h < -1% DAN OI 1h < -0.5% secara bersamaan      ║
-║           = distribusi berlanjut → penalti -12 poin                  ║
-║    Dampak: CHZ Score 82 → ~70, Comp 68 → ~62 (masih lolos tapi      ║
-║            peringatan distribusi aktif tampil di alert)               ║
+║  BUG 2 [KRITIS] — L/S ratio gap 1.15 sampai 2.0 = 0 poin           ║
+║    TRX L/S=1.317 → 0 poin (tidak ada penalty)                       ║
+║    Seharusnya negatif: longs sudah dominan = squeeze fuel HABIS      ║
+║    Fix: 1.15-1.5 = -3, 1.5-2.0 = -6                                 ║
 ║                                                                      ║
-║  FIX v9.3-C (KRITIS): Distribution Gate — Volume Spike + OI Drop    ║
-║    Pattern FUTU/MU: RVOL >4x tapi OI turun >20% = DISTRIBUSI MASIF  ║
-║    Ini bukan pre-pump — ini adalah likuidasi/distribusi paksa         ║
-║    v9.2: hanya penalti -8 (terlalu lemah)                            ║
-║    v9.3: RVOL>4 + OI<-20% → GATE (return None), coin dibuang        ║
-║           RVOL>1.5 + OI<-15% → penalti -18 (was -8)                ║
-║           RVOL>1.5 + OI<-10% → penalti -12 (was -8)                ║
+║  BUG 3 [KRITIS] — OI snapshot validity: silent zero bug              ║
+║    get_oi_changes() return (0,0) saat tidak ada history              ║
+║    Akibat: SEMUA penalti OI tidak aktif di run pertama/awal          ║
+║    CHZ OI -1.44%/-1.19% tidak tertangkap → 0 penalti                ║
+║    Fix: return (chg1h, chg24h, valid_flag) — skip scoring jika       ║
+║    belum ada minimal 2 snapshot                                       ║
 ║                                                                      ║
-║  FIX v9.3-D (MAJOR): Skor CHZ case — price >$1 harga tinggi         ║
-║    Scanner tidak punya data CoinGlass flow, tapi bisa deteksi        ║
-║    via pola candle: volume menurun + OI turun = distribusi           ║
-║    Tambah penalti jika avg_vol_6h < avg_vol_24h * 0.7               ║
-║    (volume 6 jam terakhir lebih rendah dari rata-rata = melambat)    ║
+║  BUG 4 [MAJOR] — CVD hanya reward akumulasi, tidak penalti distribusi║
+║    calc_cvd_signal() return 0 jika CVD turun (distribusi)            ║
+║    TRX futures outflow 5m-1h tidak tertangkap via CVD                ║
+║    Fix: tambah tier negatif — CVD turun = penalti -5 sampai -12      ║
+║    Tambah calc_short_term_cvd() — window 6 jam (lebih sensitif)      ║
 ║                                                                      ║
-║  SEMUA FIX SEBELUMNYA TETAP:                                         ║
-║  FIX 1-6: Stock filter, squeeze logic, prob model, flat accum, dll   ║
-║  FIX A-C: Composite score, prob gate, composite sort                 ║
+║  BUG 5 [MAJOR] — RVOL tidak di-cap, anomali 70x dapat skor masif    ║
+║    AVGOUSDT RVOL=70.6x → +16 poin layer + inflates prob model       ║
+║    Fix: cap RVOL di 30x di calc_rvol()                               ║
+║                                                                      ║
+║  BUG 6 [MINOR] — CVD window 24h terlalu lama, miss distribusi 1h    ║
+║    Akumulasi 4h-12h lalu mendominasi CVD, distribution 1h hilang     ║
+║    Fix: calc_short_term_cvd() membandingkan 6h terakhir vs 6h sebelum║
+║                                                                      ║
+║  SEMUA FIX v9.0-v9.3 TETAP:                                          ║
+║  Stock filter 65 token, composite score, prob gate, OI dist gate,    ║
+║  flat accumulation, squeeze logic, forensic prob model               ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
@@ -183,7 +188,7 @@ STOCK_TICKERS = {
     "RBLXUSDT",   # Roblox
     # E-commerce (v9.3)
     "SHOPUSDT",   # Shopify
-    "ETSY USDT",  # Etsy (placeholder — ada sebagai ETSY)
+    "ETSYUSDT",   # Etsy
 }
 
 # ── MANUAL EXCLUDE: crypto nyata tapi ingin di-skip ──────────────────
@@ -296,14 +301,23 @@ def save_oi_snapshot(symbol, oi_value):
         pass
 
 def get_oi_changes(symbol, current_oi):
+    """
+    v9.4 FIX BUG 3: Return 3-tuple (chg1h, chg24h, valid)
+    Sebelumnya return (0,0) saat tidak ada history → semua OI penalty
+    tidak aktif secara diam-diam. Sekarang 'valid' flag wajib dicek
+    sebelum menggunakan nilai OI change.
+    """
     snaps = load_oi_snapshots()
-    if symbol not in snaps:
-        return 0, 0
-    data = snaps[symbol]
-    now  = time.time()
+    hist  = snaps.get(symbol, [])
+
+    # Butuh minimal 2 data point untuk hitung perubahan
+    if len(hist) < 2:
+        return 0, 0, False   # (chg1h, chg24h, valid=False)
+
+    now = time.time()
 
     def nearest(target_ts):
-        cands = [d for d in data if abs(d["ts"] - target_ts) < 600]
+        cands = [d for d in hist if abs(d["ts"] - target_ts) < 600]
         if not cands:
             return None
         return min(cands, key=lambda d: abs(d["ts"] - target_ts))
@@ -312,7 +326,13 @@ def get_oi_changes(symbol, current_oi):
     old24h = nearest(now - 86400)
     chg1h  = (current_oi - old1h["oi"])  / old1h["oi"]  * 100 if old1h  and old1h["oi"]  else 0
     chg24h = (current_oi - old24h["oi"]) / old24h["oi"] * 100 if old24h and old24h["oi"] else 0
-    return chg1h, chg24h
+
+    # Valid jika kita punya data dalam 2 jam terakhir (1h reference) 
+    has_1h_ref  = old1h  is not None
+    has_24h_ref = old24h is not None
+    valid = has_1h_ref  # minimal bisa hitung 1h change
+
+    return chg1h, chg24h, valid
 
 _cooldown = load_cooldown()
 log.info(f"Cooldown aktif: {len(_cooldown)} coin")
@@ -583,7 +603,10 @@ def find_swing_targets(candles, cur):
 #  📊  INDIKATOR TAMBAHAN
 # ══════════════════════════════════════════════════════════════
 def calc_rvol(candles_1h):
-    """RVOL: volume jam ini vs rata-rata jam yang sama di hari-hari sebelumnya."""
+    """
+    RVOL: volume jam ini vs rata-rata jam yang sama di hari-hari sebelumnya.
+    v9.4: cap 30x untuk hindari anomali seperti AVGOUSDT 70.6x yang inflate skor.
+    """
     if len(candles_1h) < 25:
         return 1.0
     last_complete = candles_1h[-2]
@@ -596,7 +619,10 @@ def calc_rvol(candles_1h):
     if not same_hour_vols:
         return 1.0
     avg = sum(same_hour_vols) / len(same_hour_vols)
-    return last_vol / avg if avg > 0 else 1.0
+    if avg <= 0:
+        return 1.0
+    # Cap 30x — RVOL > 30x biasanya anomali data atau likuidasi, bukan pre-pump
+    return min(last_vol / avg, 30.0)
 
 def calc_volume_spike_ratio(candles_1h):
     """
@@ -659,7 +685,12 @@ def calc_price_slope(candles_1h):
     return (p_end - p_start) / p_start / len(window)
 
 def calc_cvd_signal(candles_1h):
-    """CVD divergence: beli tersembunyi saat harga flat."""
+    """
+    CVD divergence.
+    v9.4 FIX BUG 4: Tambah tier NEGATIF untuk distribusi.
+    Sebelumnya return 0 jika CVD turun — distribusi tidak terdeteksi sama sekali.
+    Sekarang: CVD turun saat harga flat/naik = distribusi aktif → penalti.
+    """
     if len(candles_1h) < 12:
         return 0, ""
     window    = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
@@ -679,6 +710,8 @@ def calc_cvd_signal(candles_1h):
     p_start    = window[0]["close"]
     p_end      = window[-1]["close"]
     price_chg  = (p_end - p_start) / p_start * 100 if p_start > 0 else 0
+
+    # ── Akumulasi (CVD naik) ──────────────────────────────────
     if cvd_rising and price_chg < 1.5:
         if price_chg < -1.5:
             return 15, f"🔍 CVD Divergence KUAT: harga {price_chg:+.1f}% tapi buy pressure dominan"
@@ -688,6 +721,63 @@ def calc_cvd_signal(candles_1h):
             return 8,  f"🔍 CVD naik, harga flat — hidden accumulation"
     elif cvd_rising and 1.5 <= price_chg <= 5.0:
         return 5, f"CVD bullish, harga naik sehat ({price_chg:+.1f}%)"
+
+    # ── Distribusi (CVD turun) — v9.4 NEW ────────────────────
+    # Sebelumnya tidak ada case ini → distribusi lolos tanpa penalti
+    if not cvd_rising and price_chg > 1.5:
+        # Harga naik tapi CVD turun = seller bersembunyi di balik kenaikan
+        return -12, f"⚠️ CVD turun saat harga naik {price_chg:+.1f}% — distribusi tersembunyi"
+    elif not cvd_rising and -1.5 <= price_chg <= 1.5:
+        # Harga flat tapi CVD turun = pressure jual lebih dominan
+        return -8, f"⚠️ CVD turun, harga flat — tekanan jual tersembunyi"
+    elif not cvd_rising and price_chg < -1.5:
+        # Harga turun + CVD turun = downtrend terkonfirmasi
+        return -5, f"⚠️ CVD turun saat harga {price_chg:+.1f}% — tren jual berlanjut"
+
+    return 0, ""
+
+
+def calc_short_term_cvd(candles_1h):
+    """
+    v9.4 NEW — FIX BUG 6: CVD window 6h terakhir vs 6h sebelumnya.
+    Lebih sensitif terhadap distribusi/akumulasi yang baru terjadi.
+    Menangkap pola seperti TRX: futures outflow 5m-1h yang tidak terdeteksi
+    oleh calc_cvd_signal() yang menggunakan window 24h.
+    """
+    if len(candles_1h) < 12:
+        return 0, ""
+
+    recent = candles_1h[-6:]    # 6h terakhir
+    prev   = candles_1h[-12:-6] # 6h sebelumnya
+
+    def cvd_delta(candles):
+        """CVD total untuk window candles (positif = buying dominan)."""
+        delta = 0.0
+        for c in candles:
+            rng = c["high"] - c["low"]
+            buy_ratio = (c["close"] - c["low"]) / rng if rng > 0 else 0.5
+            delta += (buy_ratio * 2 - 1) * c["volume_usd"]
+        return delta
+
+    recent_d = cvd_delta(recent)
+    prev_d   = cvd_delta(prev)
+
+    cur  = candles_1h[-1]["close"]
+    p6h  = candles_1h[-6]["close"] if len(candles_1h) >= 6 else cur
+    price_chg_6h = (cur - p6h) / p6h * 100 if p6h > 0 else 0
+
+    # Distribusi baru (recent lebih negatif dari sebelumnya)
+    if recent_d < 0 and recent_d < prev_d * 0.8:
+        if price_chg_6h > -2:
+            return -10, f"⚠️ CVD 6h memburuk — tekanan jual meningkat ({price_chg_6h:+.1f}% 6h)"
+        return -5, f"⚠️ CVD 6h negatif — distribusi aktif"
+
+    # Akumulasi baru (recent lebih positif dari sebelumnya)
+    if recent_d > 0 and recent_d > prev_d * 1.2:
+        if price_chg_6h < 2:
+            return 8, f"✅ CVD 6h membaik — akumulasi baru terdeteksi ({price_chg_6h:+.1f}% 6h)"
+        return 4, f"CVD 6h positif — buying momentum"
+
     return 0, ""
 
 def detect_higher_lows(candles):
@@ -944,22 +1034,44 @@ def layer_structure(candles_1h):
 
 # ── Layer 4: Positioning (Funding + L/S) ─────────────────────
 def layer_positioning(symbol, funding, oi_change_1h):
-    """FIX 2: Short squeeze = funding NEGATIF."""
+    """
+    FIX BUG 1: Funding scoring 5 tier presisi (was 4 tier dengan range salah).
+      True neutral = abs(funding) < 0.00001 (< 0.001%)
+      Sebelumnya 0 sampai 0.0001 semua dapat +5 → CHZ +0.0093% dapat +5 (salah!)
+      
+    FIX BUG 2: L/S gap 1.15-2.0 diisi dengan penalti bertingkat.
+      Sebelumnya 1.15 < ls <= 2.0 dapat 0 poin (tidak ada penalti)
+      TRX L/S=1.317 → dapat 0 padahal longs sudah dominan = squeeze fuel habis
+    """
     score = 0
     sigs  = []
 
-    if -0.0004 <= funding <= -0.00002:
+    # ── Funding scoring (v9.4: 5 tier, range diperbaiki) ─────
+    # Tier 1: Negatif kuat = short squeeze setup terbaik
+    if funding <= -0.0004:
         score += 8
-        sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup!")
-    elif 0 <= funding <= 0.0001:
-        score += 5
-        sigs.append(f"Funding netral ({funding:.5f})")
+        sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup KUAT!")
+    # Tier 2: Negatif ringan = short squeeze setup
+    elif -0.0004 < funding <= -0.00001:
+        score += 6
+        sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup")
+    # Tier 3: True neutral (< ±0.001%)
+    elif abs(funding) < 0.00001:
+        score += 4
+        sigs.append(f"Funding {funding:.5f} — benar-benar netral")
+    # Tier 4: Positif ringan (0.001% - 0.01%) = longs sedikit dominan
+    elif 0.00001 <= funding <= 0.0001:
+        score += 1   # was +5 → sekarang hanya +1 (longs mulai bayar)
+        # tidak ada sinyal, ini sudah kurang ideal
+    # Tier 5: Positif moderat (0.01% - 0.03%)
     elif 0.0001 < funding <= 0.0003:
-        score += 2
+        score += 0   # was +2 → netral, tidak ideal
+    # Tier 6: Positif tinggi (> 0.03%) = longs overcrowded
     elif funding > 0.0003:
         score -= 5
         sigs.append(f"⚠️ Funding {funding:.5f} — long overcrowded, risiko dump")
 
+    # Short squeeze bonus: funding NEGATIF + OI naik (tetap dari v9.0)
     if (funding <= CONFIG["squeeze_funding_max"]
             and oi_change_1h > CONFIG["squeeze_oi_change_min"]):
         score += 10
@@ -968,6 +1080,7 @@ def layer_positioning(symbol, funding, oi_change_1h):
             f"funding {funding:.5f} negatif, OI 1h +{oi_change_1h:.1f}%"
         )
 
+    # ── Long/Short Ratio (v9.4: gap 1.15-2.0 diisi) ──────────
     ls       = get_long_short_ratio(symbol)
     ls_score = 0
     if ls is not None:
@@ -981,7 +1094,15 @@ def layer_positioning(symbol, funding, oi_change_1h):
             ls_score = 5
             sigs.append(f"L/S {ls:.2f} — lebih banyak short")
         elif ls <= 1.15:
-            ls_score = 2
+            ls_score = 2   # hampir seimbang = netral
+        # ── v9.4 FIX BUG 2: gap 1.15-2.0 diisi penalti bertingkat ──
+        elif 1.15 < ls <= 1.5:
+            ls_score = -3
+            sigs.append(f"L/S {ls:.2f} — longs mulai dominan")
+        elif 1.5 < ls <= 2.0:
+            ls_score = -6
+            sigs.append(f"⚠️ L/S {ls:.2f} — longs dominan, squeeze fuel berkurang")
+        # ── Penalti berat (tetap) ──────────────────────────────
         elif ls > 3.0:
             ls_score = -15
             sigs.append(f"⚠️⚠️ L/S {ls:.2f} — long overcrowded ekstrem!")
@@ -1194,9 +1315,14 @@ def master_score(symbol, ticker, tickers_dict):
         chg_7d = 0
 
     if chg_7d > CONFIG["gate_chg_7d_max"]:
-        oi_value     = get_open_interest(symbol)
-        oi_chg_1h, _ = get_oi_changes(symbol, oi_value) if oi_value > 0 else (0, 0)
+        oi_value = get_open_interest(symbol)
+        if oi_value > 0:
+            oi_chg_1h, _, oi_valid = get_oi_changes(symbol, oi_value)
+        else:
+            oi_chg_1h, oi_valid = 0, False
+        # Squeeze hanya valid jika OI data tersedia dan funding negatif
         real_squeeze = (funding <= CONFIG["squeeze_funding_max"]
+                        and oi_valid
                         and oi_chg_1h > CONFIG["squeeze_oi_change_min"])
         if real_squeeze:
             log.info(f"  {symbol}: Overbought {chg_7d:.1f}% tapi squeeze negatif terindikasi, lanjut")
@@ -1231,6 +1357,13 @@ def master_score(symbol, ticker, tickers_dict):
     sigs  += v_sigs
     bd["vol"] = v_sc
 
+    # ── v9.4: Short-term CVD (6h) — deteksi distribusi baru ─────
+    stcvd_sc, stcvd_sig = calc_short_term_cvd(c1h)
+    score += stcvd_sc
+    if stcvd_sig:
+        sigs.append(stcvd_sig)
+    bd["stcvd"] = stcvd_sc
+
     # Layer 2: Flat Accumulation
     fa_sc, fa_sigs = layer_flat_accumulation(c1h)
     score += fa_sc
@@ -1256,12 +1389,16 @@ def master_score(symbol, ticker, tickers_dict):
     score += stealth_bonus
     bd["stealth"] = stealth_bonus
 
-    # OI
-    oi_value = get_open_interest(symbol)
-    oi_chg1h = oi_chg24h = 0
+    # OI — v9.4: simpan snapshot dan cek validity
+    oi_value    = get_open_interest(symbol)
+    oi_chg1h    = 0
+    oi_chg24h   = 0
+    oi_valid    = False   # v9.4: flag — True jika ada snapshot history
     if oi_value > 0:
         save_oi_snapshot(symbol, oi_value)
-        oi_chg1h, oi_chg24h = get_oi_changes(symbol, oi_value)
+        oi_chg1h, oi_chg24h, oi_valid = get_oi_changes(symbol, oi_value)
+        if not oi_valid:
+            log.debug(f"  {symbol}: OI snapshot belum cukup — OI scoring dilewati")
 
     # Layer 4: Positioning
     pos_sc, pos_sigs, ls_ratio = layer_positioning(symbol, funding, oi_chg1h)
@@ -1292,70 +1429,63 @@ def master_score(symbol, ticker, tickers_dict):
     # ── OI adjustments (v9.3: diperkuat) ─────────────────────
     if oi_value > 0:
         # ══════════════════════════════════════════════════════
-        #  v9.3 FIX C: Distribution Gate — RVOL spike + OI drop
-        #  Pattern FUTU/MU: volume spike besar tapi OI turun >20%
-        #  = LIKUIDASI MASIF, bukan akumulasi pre-pump
-        #  Gate keras: return None langsung (coin dibuang)
+        #  v9.4 FIX BUG 3: Semua OI scoring dibungkus `oi_valid`
+        #  Jika tidak ada snapshot history → SKIP semua OI scoring
+        #  Sebelumnya: (0,0) diam-diam dipakai → semua penalti = 0
+        #  Sekarang: log warning, lewati scoring, tidak ada false score
         # ══════════════════════════════════════════════════════
-        if rvol > 4.0 and oi_chg24h < -20:
-            log.info(
-                f"  {symbol}: GATE distribusi ekstrem "
-                f"(RVOL {rvol:.1f}x, OI 24h {oi_chg24h:.1f}%) — bukan pre-pump"
-            )
-            return None
+        if oi_valid:
+            # Gate distribusi ekstrem: RVOL>4 + OI<-20% (v9.3)
+            if rvol > 4.0 and oi_chg24h < -20:
+                log.info(
+                    f"  {symbol}: GATE distribusi ekstrem "
+                    f"(RVOL {rvol:.1f}x, OI 24h {oi_chg24h:.1f}%) — bukan pre-pump"
+                )
+                return None
 
-        # OI 24h besar-besaran turun
-        if oi_chg24h < -20:
-            score -= 15
-            sigs.append(f"⚠️ OI 24h turun {oi_chg24h:.1f}% — distribusi besar")
-        elif oi_chg24h < -10:
-            score -= 7
-            sigs.append(f"OI 24h turun {oi_chg24h:.1f}%")
+            # OI 24h besar-besaran turun
+            if oi_chg24h < -20:
+                score -= 15
+                sigs.append(f"⚠️ OI 24h turun {oi_chg24h:.1f}% — distribusi besar")
+            elif oi_chg24h < -10:
+                score -= 7
+                sigs.append(f"OI 24h turun {oi_chg24h:.1f}%")
 
-        # OI 1h
-        if oi_chg1h < -5:
-            score -= 5
-            sigs.append(f"OI 1h turun {oi_chg1h:.1f}% — tekanan jual jangka pendek")
-        elif oi_chg1h > 5:
-            score += 5
-            sigs.append(f"✅ OI 1h naik {oi_chg1h:.1f}% — posisi baru masuk")
+            # OI 1h
+            if oi_chg1h < -5:
+                score -= 5
+                sigs.append(f"OI 1h turun {oi_chg1h:.1f}% — tekanan jual jangka pendek")
+            elif oi_chg1h > 5:
+                score += 5
+                sigs.append(f"✅ OI 1h naik {oi_chg1h:.1f}% — posisi baru masuk")
 
-        # ══════════════════════════════════════════════════════
-        #  v9.3 FIX B: Multi-TF OI decline = distribusi aktif
-        #  CHZ case: OI 24h -1.44% + OI 1h -1.19% → keduanya
-        #  negatif tapi tidak tertangkap threshold lama (<-10%)
-        #  Jika KEDUANYA negatif = tren distribusi berlanjut
-        # ══════════════════════════════════════════════════════
-        if oi_chg24h < -1.0 and oi_chg1h < -0.5:
-            score -= 12
-            sigs.append(
-                f"⚠️ OI turun di semua TF "
-                f"(24h:{oi_chg24h:.1f}% 1h:{oi_chg1h:.1f}%) — distribusi berlanjut"
-            )
+            # Multi-TF OI decline gate (v9.3: CHZ case)
+            if oi_chg24h < -1.0 and oi_chg1h < -0.5:
+                score -= 12
+                sigs.append(
+                    f"⚠️ OI turun di semua TF "
+                    f"(24h:{oi_chg24h:.1f}% 1h:{oi_chg1h:.1f}%) — distribusi berlanjut"
+                )
 
-        # ══════════════════════════════════════════════════════
-        #  v9.3 FIX C lanjutan: Penalti lebih keras
-        #  Volume spike + OI decline = distribusi (skala baru)
-        #  v9.2: hanya -8 poin (tidak cukup)
-        #  v9.3: -18 untuk drop besar, -12 untuk drop sedang
-        # ══════════════════════════════════════════════════════
-        if rvol > 1.5 and oi_chg24h < -15:
-            score -= 18   # was -8
-            sigs.append(f"🚨 Volume spike ({rvol:.1f}x) + OI turun {oi_chg24h:.1f}% — distribusi kuat")
-        elif rvol > 1.5 and oi_chg24h < -10:
-            score -= 12   # was -8
-            sigs.append(f"⚠️ Volume naik tapi OI turun {oi_chg24h:.1f}% — distribusi terindikasi")
-        elif rvol > 1.5 and oi_chg24h > 5:
-            score += 8
-            sigs.append(f"✅ Volume naik + OI naik — akumulasi kuat")
+            # Volume spike + OI drop (v9.3: penalti diperkuat)
+            if rvol > 1.5 and oi_chg24h < -15:
+                score -= 18
+                sigs.append(f"🚨 Volume spike ({rvol:.1f}x) + OI turun {oi_chg24h:.1f}% — distribusi kuat")
+            elif rvol > 1.5 and oi_chg24h < -10:
+                score -= 12
+                sigs.append(f"⚠️ Volume naik tapi OI turun {oi_chg24h:.1f}% — distribusi terindikasi")
+            elif rvol > 1.5 and oi_chg24h > 5:
+                score += 8
+                sigs.append(f"✅ Volume naik + OI naik — akumulasi kuat")
 
-        # ══════════════════════════════════════════════════════
-        #  v9.3 FIX D: Volume 6h menurun vs baseline 24h
-        #  Jika volume 6 jam terakhir < 70% rata-rata 24h
-        #  = momentum volume sedang melemah (CHZ/XDC pattern)
-        # ══════════════════════════════════════════════════════
+        else:
+            # OI data tidak tersedia: tidak ada penalti maupun bonus OI
+            # Tidak ada false score dari data 0 yang terlihat seperti "stabil"
+            sigs.append(f"ℹ️ OI history belum tersedia (run pertama/awal)")
+
+        # Volume momentum vs baseline 24h (v9.3: tidak butuh OI valid)
         if len(c1h) >= 24:
-            vol_24h_candles = [c["volume_usd"] for c in c1h[-24:]]
+            vol_24h_candles  = [c["volume_usd"] for c in c1h[-24:]]
             avg_vol_24h_base = sum(vol_24h_candles) / len(vol_24h_candles) if vol_24h_candles else 0
             if avg_vol_24h_base > 0 and avg_vol_6h > 0:
                 vol_momentum = avg_vol_6h / avg_vol_24h_base
@@ -1369,11 +1499,13 @@ def master_score(symbol, ticker, tickers_dict):
                     score -= 5
                     sigs.append(f"Volume 6h menurun ({vol_momentum:.0%} avg 24h)")
 
-        bd["oi_change"] = round(oi_chg24h, 1)
+        bd["oi_change"]    = round(oi_chg24h, 1)
         bd["oi_change_1h"] = round(oi_chg1h, 1)
+        bd["oi_valid"]     = oi_valid
     else:
-        bd["oi_change"] = 0
+        bd["oi_change"]    = 0
         bd["oi_change_1h"] = 0
+        bd["oi_valid"]     = False
 
     if chg_7d > CONFIG["gate_chg_7d_max"]:
         score -= 15
@@ -1482,7 +1614,7 @@ def build_alert(r, rank=None):
     pm        = r.get("prob_metrics", {})
 
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.3</b>\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.4</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']}\n"
         f"<b>Composite :</b> {comp}/100  {bar}\n"
         f"<b>Layer Score:</b> {sc}/100\n"
@@ -1520,11 +1652,12 @@ def build_alert(r, rank=None):
     bd  = r.get("bd", {})
     msg += (
         f"\n📐 <b>BREAKDOWN</b>\n"
-        f"  Vol:{bd.get('vol',0)} Flat:{bd.get('flat',0)} "
+        f"  Vol:{bd.get('vol',0)} StCVD:{bd.get('stcvd',0)} Flat:{bd.get('flat',0)} "
         f"Struct:{bd.get('struct',0)} Pos:{bd.get('pos',0)} "
         f"4H:{bd.get('tf4h',0)} Ctx:{bd.get('ctx',0)} "
         f"Whale:{bd.get('whale',0)} Stealth:{bd.get('stealth',0)}\n"
-        f"  [Prob] MVS:{pm.get('max_vol_spike','?')}x "
+        f"  OI valid:{bd.get('oi_valid','?')} "
+        f"[Prob] MVS:{pm.get('max_vol_spike','?')}x "
         f"Irr:{pm.get('vol_irregularity','?')} "
         f"ATR:{pm.get('norm_atr_pct','?')}%\n\n"
         f"📡 Funding:{r['funding']:.5f}  🕐 {utc_now()}\n"
@@ -1533,7 +1666,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v9.3 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v9.4 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp = r.get("composite_score", r["score"])
         bar  = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -1612,7 +1745,7 @@ def pre_score_ticker(ticker):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v9.3 — OI DISTRIBUTION GATE — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v9.4 — 6 BUG FIX — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
@@ -1760,7 +1893,7 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v9.3 — OI DISTRIBUTION GATE    ║")
+    log.info("║  PRE-PUMP SCANNER v9.4 — 6 BUG FIX              ║")
     log.info("╚═══════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
