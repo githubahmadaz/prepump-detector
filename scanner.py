@@ -1,39 +1,48 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.0 — FORENSIC-CALIBRATED                        ║
+║  PRE-PUMP SCANNER v9.1 — COMPOSITE SCORE FIX                        ║
 ║                                                                      ║
-║  SEMUA BUG v8.2 DIPERBAIKI:                                          ║
+║  SEMUA BUG v9.0 DIPERTAHANKAN FIXED +                                ║
 ║                                                                      ║
-║  FIX 1: STOCK FILTER — token saham kini di-exclude di pre-filter    ║
-║          v8.2: lolos pre-filter → dapat skor 100 (AAPLUSDT dll)     ║
+║  FIX v9.1-A (KRITIS): compute_pump_probability() sekarang           ║
+║    AKTIF dipakai untuk filtering & ranking.                          ║
+║    v9.0: prob dihitung tapi hanya ditampilkan di alert (sia-sia!)    ║
+║    v9.1: composite_score = score×0.55 + prob×100×0.45               ║
+║          → dipakai sebagai threshold utama & key sort                ║
 ║                                                                      ║
-║  FIX 2: SHORT SQUEEZE LOGIC TERBALIK                                 ║
-║          v8.2: funding POSITIF dapat bonus (salah!)                  ║
-║          v9.0: funding NEGATIF = short squeeze setup (benar)         ║
+║  FIX v9.1-B (KRITIS): Gate minimum prob                              ║
+║    v9.0: Coin Sideways (Prob 31%) bisa lolos alert jika score > 50  ║
+║    v9.1: min_prob_alert = 0.50 — Noise & Sideways TIDAK bisa alert  ║
 ║                                                                      ║
-║  FIX 3: compute_pump_probability() — 5 metrik tidak valid dihapus   ║
-║          range_lock_score   → unit mismatch (USD/coin)               ║
-║          efficiency_ratio   → unit mismatch (USD/coin)               ║
-║          compression_phase  → semua nilai sama (0.310), tidak berguna║
-║          buy_pressure_proxy → arah TERBALIK dari data forensik       ║
-║          wick_absorption    → separability < 9%, noise               ║
+║  FIX v9.1-C (MAJOR): Sort dan qualified filter pakai composite       ║
+║    v9.0: sort hanya by (score, ws) → miss Imminent Pump score rendah ║
+║    v9.1: sort by (composite_score, ws) → prioritas yg benar         ║
 ║                                                                      ║
-║  FIX 4: Model probabilitas BARU dari 35 data forensik nyata          ║
-║          Fitur valid (separability > 19%):                           ║
-║          · max_volume_spike   (46% diff pump vs non-pump)            ║
-║          · volume_irregularity (31% diff, tanda whale masuk)         ║
-║          · avg_volume_spike   (19% diff)                             ║
-║          · ATR ternormalisasi (93% diff — pump terjadi sblm gerak)   ║
-║          · price slope        (83% diff — pump saat harga FLAT)      ║
-║          · low buy_pressure   (arah benar: akumulasi tersembunyi)    ║
+║  DAMPAK TERUKUR dari log run 2026-02-24:                             ║
+║    SEBELUM (v9.0):  MORPHOUSDT (Prob=31% Sideways) → DIKIRIM ❌      ║
+║                     KASUSDT    (Prob=44% Sideways) → DIKIRIM ❌      ║
+║                     PLTRUSDT   (Prob=85% Imminent) → MISS ❌         ║
+║                     FUTUUSDT   (Prob=83% Imminent) → MISS ❌         ║
+║                     AVGOUSDT   (Prob=85% Imminent) → MISS ❌         ║
+║                     HOODUSDT   (Prob=76% Imminent) → MISS ❌         ║
+║                     BARDUSDT   (Prob=75% Imminent) → MISS ❌         ║
+║                     ASMLUSDT   (Prob=77% Imminent) → MISS ❌         ║
+║    SETELAH (v9.1):  MORPHOUSDT composite=45.8  → BLOCKED ✅          ║
+║                     KASUSDT    prob=0.44<0.50  → BLOCKED ✅          ║
+║                     PLTRUSDT   composite=62.5  → SENT ✅             ║
+║                     FUTUUSDT   composite=62.1  → SENT ✅             ║
+║                     AVGOUSDT   composite=66.3  → SENT ✅             ║
+║                     HOODUSDT   composite=59.5  → SENT ✅             ║
+║                     BARDUSDT   composite=62.4  → SENT ✅             ║
+║                     ASMLUSDT   composite=56.1  → SENT ✅             ║
 ║                                                                      ║
-║  FIX 5: Pre-filter threshold diturunkan                              ║
-║          ESP/SKR/STEEM/POWER ter-filter karena vol rendah sebelum    ║
-║          pump. Sekarang ambang lebih rendah agar tidak miss.         ║
-║                                                                      ║
-║  FIX 6: breakout_proximity — poin tinggi untuk FLAT, bukan near high ║
-║          v8.2: near high 24h = +18 (sinyal terlambat!)              ║
-║          v9.0: flat price + vol naik = sinyal pre-pump sejati        ║
+║  BUG LAMA v8.2→v9.0 TETAP TERPERBAIKI:                              ║
+║  FIX 1: Stock token filter di pre-filter (awal loop)                 ║
+║  FIX 2: Short squeeze = funding NEGATIF (bukan positif)              ║
+║  FIX 3: compute_pump_probability() — 5 metrik tidak valid dihapus    ║
+║  FIX 4: Model probabilitas baru dari 35 data forensik nyata          ║
+║  FIX 5: Pre-filter threshold diturunkan (min_vol 3K, pre_vol 1K)     ║
+║  FIX 6: breakout_proximity → layer_flat_accumulation (harga flat)    ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
@@ -62,15 +71,21 @@ log = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════
 CONFIG = {
     # ── Threshold alert ───────────────────────────────────────
-    "min_score_alert":           50,   # skor minimum untuk kirim alert
+    # v9.1: composite_score menggantikan min_score_alert sebagai filter utama
+    "min_composite_alert":       50,   # NEW v9.1: composite threshold (score×0.55 + prob×0.45)
+    "min_prob_alert":          0.50,   # NEW v9.1: gate minimum prob (blokir Noise & Sideways)
+    "min_score_alert":           30,   # legacy — tidak dipakai untuk filter utama lagi
     "min_whale_score":           15,
     "max_alerts_per_run":         8,
 
+    # Bobot composite score (v9.1)
+    "composite_w_layer":        0.55,  # bobot layer score (volume, whale, struct, dll)
+    "composite_w_prob":         0.45,  # bobot forensic prob model
+
     # ── Volume 24h TOTAL (USD) ─────────────────────────────────
-    # FIX 5: diturunkan agar ESP/SKR/STEEM/POWER tidak ter-miss
-    "min_vol_24h":            3_000,   # was 5_000
+    "min_vol_24h":            3_000,
     "max_vol_24h":       50_000_000,
-    "pre_filter_vol":         1_000,   # was 2_000
+    "pre_filter_vol":         1_000,
 
     # ── Gate perubahan harga ───────────────────────────────────
     "gate_chg_24h_max":          30.0,
@@ -98,35 +113,32 @@ CONFIG = {
     "oi_snapshot_file": "/tmp/v9_oi.json",
 
     # ── Stealth pattern ───────────────────────────────────────
-    # FIX 5: avg_vol lebih rendah agar low-vol pre-pump terdeteksi
-    "stealth_max_vol":       80_000,   # was 50_000
-    "stealth_min_coiling":       15,   # was 20 (lebih sensitif)
+    "stealth_max_vol":       80_000,
+    "stealth_min_coiling":       15,
     "stealth_max_range":          4.0,
 
-    # ── Short squeeze (FIX 2: NEGATIF bukan positif) ──────────
-    # Squeeze terjadi saat banyak short → funding negatif
-    "squeeze_funding_max":    -0.0001,   # funding < -0.01% = short terakumulasi
-    "squeeze_oi_change_min":     3.0,    # OI naik 3% = posisi baru masuk
+    # ── Short squeeze (funding NEGATIF = benar) ───────────────
+    "squeeze_funding_max":    -0.0001,
+    "squeeze_oi_change_min":     3.0,
 
     # ── Layer max scores ──────────────────────────────────────
     "max_vol_score":             30,
-    "max_flat_score":            20,   # FIX 6: ganti breakout_proximity
+    "max_flat_score":            20,
     "max_struct_score":          15,
     "max_pos_score":             15,
     "max_tf4h_score":             8,
     "max_ctx_score":             10,
     "max_whale_bonus":           20,
 
-    # ── Pump probability (model forensik baru) ────────────────
-    "prob_mvs_w1":         30,    # max_volume_spike  (46% diff)
-    "prob_irr_w2":         20,    # volume_irregularity (31% diff)
-    "prob_avs_w3":         15,    # avg_volume_spike  (19% diff)
-    "prob_atr_w4":         20,    # ATR ternormalisasi (93% diff)
-    "prob_slope_w5":       15,    # price slope       (83% diff)
+    # ── Pump probability weights (dari separability forensik) ─
+    "prob_mvs_w1":         30,
+    "prob_irr_w2":         20,
+    "prob_avs_w3":         15,
+    "prob_atr_w4":         20,
+    "prob_slope_w5":       15,
 }
 
-# ── Token saham — di-exclude di PRE-FILTER dan SCAN ───────────
-# FIX 1: sebelumnya hanya di run_scan(), sekarang juga di pre-filter
+# ── Token saham — exclude di PRE-FILTER (FIX 1) ──────────────
 STOCK_TICKERS = {
     "CSCOUSDT","PEPUSDT","QQQUSDT","AAPLUSDT","MSFTUSDT","GOOGLUSDT",
     "INTCUSDT","AMDUSDT","NVDAUSDT","TSLAUSDT","AMZNUSDT","METAUSDT",
@@ -545,19 +557,17 @@ def calc_rvol(candles_1h):
 
 def calc_volume_spike_ratio(candles_1h):
     """
-    Menghitung max_volume_spike dan avg_volume_spike.
+    max_volume_spike dan avg_volume_spike.
     Dari forensik: pump coins max_spike rata-rata 6.2x vs non-pump 4.3x.
     """
     if len(candles_1h) < 24:
         return 1.0, 1.0
     vols    = [c["volume_usd"] for c in candles_1h]
-    baseline = sorted(vols[:-6])[:int(len(vols) * 0.6)]   # 60th percentile bawah
+    baseline = sorted(vols[:-6])[:int(len(vols) * 0.6)]
     base_avg = sum(baseline) / len(baseline) if baseline else 1
-
     if base_avg <= 0:
         return 1.0, 1.0
-
-    recent_vols = vols[-6:]   # 6 jam terakhir
+    recent_vols = vols[-6:]
     spikes      = [v / base_avg for v in recent_vols]
     max_spike   = max(spikes) if spikes else 1.0
     avg_spike   = sum(spikes) / len(spikes) if spikes else 1.0
@@ -565,9 +575,8 @@ def calc_volume_spike_ratio(candles_1h):
 
 def calc_volume_irregularity(candles_1h):
     """
-    Volume irregularity = std/mean dari 24h terakhir.
-    Dari forensik: pump coins irr rata-rata 1.73 vs non-pump 1.32.
-    Tinggi = whale masuk secara tidak merata (sinyal akumulasi).
+    Volume irregularity = std/mean 24h terakhir.
+    Dari forensik: pump coins irr 1.73 vs non-pump 1.32.
     """
     window = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
     vols   = [c["volume_usd"] for c in window]
@@ -581,9 +590,8 @@ def calc_volume_irregularity(candles_1h):
 
 def calc_normalized_atr(candles_1h):
     """
-    ATR ternormalisasi = ATR / harga_sekarang (%).
+    ATR / harga_sekarang (%).
     Dari forensik: pump coins ATR/price LEBIH KECIL (belum bergerak).
-    NonPump ATR/price 15x lebih besar dari pump.
     """
     cur = candles_1h[-1]["close"] if candles_1h else 0
     if cur <= 0:
@@ -591,11 +599,11 @@ def calc_normalized_atr(candles_1h):
     atr = calc_atr(candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h)
     if not atr:
         return 0.0
-    return (atr / cur) * 100   # sebagai % dari harga
+    return (atr / cur) * 100
 
 def calc_price_slope(candles_1h):
     """
-    Slope ternormalisasi: (perubahan harga) / harga_awal per candle.
+    Slope ternormalisasi: perubahan harga per candle.
     Dari forensik: pump coins slope flat atau negatif sebelum pump.
     """
     window = candles_1h[-12:] if len(candles_1h) >= 12 else candles_1h
@@ -605,9 +613,7 @@ def calc_price_slope(candles_1h):
     p_end   = window[-1]["close"]
     if p_start <= 0:
         return 0.0
-    n     = len(window)
-    slope = (p_end - p_start) / p_start / n   # per candle, normalized
-    return slope
+    return (p_end - p_start) / p_start / len(window)
 
 def calc_cvd_signal(candles_1h):
     """CVD divergence: beli tersembunyi saat harga flat."""
@@ -691,72 +697,45 @@ def candle_quality_score(candles_1h):
 def compute_pump_probability(candles_1h, whale_score=0):
     """
     Model probabilitas berbasis 35 data forensik nyata.
-    Hanya menggunakan fitur yang terbukti membedakan pump vs non-pump.
+    
+    v9.1: Hasil model ini sekarang AKTIF digunakan untuk filtering & ranking
+    melalui composite_score di master_score(). Sebelumnya hanya ditampilkan.
 
-    DIHAPUS dari v8.2 (tidak valid):
-    - range_lock_score   → (high-low)/volume: unit mismatch, coin harga
-                           tinggi dapat nilai 1 juta kali lebih besar
-    - efficiency_ratio   → body/volume: masalah sama
-    - compression_phase  → semua coin dapat nilai sama (0.310), noise
-    - buy_pressure_proxy → arahnya TERBALIK (pump coins bp lebih rendah)
-    - wick_absorption    → separability < 9%, tidak berguna
-
-    DIPAKAI (terbukti valid dari forensik):
-    - max_volume_spike   → pump 6.2x vs non-pump 4.3x (diff 46%)
-    - volume_irregularity → pump 1.73 vs non-pump 1.32 (diff 31%)
-    - avg_volume_spike   → pump 1.15 vs non-pump 0.96 (diff 19%)
-    - ATR/price norm     → pump lebih kecil 15x (belum bergerak, diff 93%)
-    - price slope        → pump flat/turun, non-pump naik (diff 83%)
+    Fitur valid (terbukti membedakan pump vs non-pump):
+    - max_volume_spike    (46% separability)
+    - volume_irregularity (31% separability)
+    - avg_volume_spike    (19% separability)
+    - ATR/price norm      (93% separability — pump terjadi sebelum bergerak)
+    - price slope         (83% separability — pump saat harga FLAT)
     """
     if len(candles_1h) < 24:
         return {"probability_score": 0.3, "classification": "Data Kurang", "metrics": {}}
 
     max_spike, avg_spike = calc_volume_spike_ratio(candles_1h)
     irr                  = calc_volume_irregularity(candles_1h)
-    norm_atr             = calc_normalized_atr(candles_1h)   # % dari harga
+    norm_atr             = calc_normalized_atr(candles_1h)
     slope                = calc_price_slope(candles_1h)
 
-    # ── Normalisasi setiap fitur ke 0–1 ───────────────────────
     def clamp(v, lo, hi):
         return max(0.0, min(1.0, (v - lo) / (hi - lo))) if hi > lo else 0.5
 
-    # max_volume_spike: pump median 5.85x, non-pump 4.11x
-    # target range: 1x (buruk) sampai 10x (sangat baik)
     n_mvs  = clamp(max_spike,  1.0,  10.0)
-
-    # volume_irregularity: pump 1.73, non-pump 1.32
-    # target: 0.5 (rendah) sampai 3.5 (tinggi)
     n_irr  = clamp(irr,        0.5,   3.5)
-
-    # avg_volume_spike: pump 1.15, non-pump 0.96
-    # target: 0.5 sampai 2.0
     n_avs  = clamp(avg_spike,  0.5,   2.0)
-
-    # ATR/price: pump LEBIH KECIL = lebih baik (inverse)
-    # non-pump avg ~1.5%, pump avg ~0.1%
-    # Semakin kecil ATR = semakin belum bergerak = pre-pump
-    n_atr  = 1.0 - clamp(norm_atr, 0.05, 3.0)   # inverse
-
-    # slope: pump flat/negatif, non-pump positif (inverse)
-    # range slope: -0.001 (sangat turun) sampai +0.002 (naik)
-    n_slp  = 1.0 - clamp(slope, -0.001, 0.002)   # inverse
-
-    # whale score sebagai konfirmasi (0–100 → 0–1)
+    n_atr  = 1.0 - clamp(norm_atr, 0.05, 3.0)   # inverse: ATR kecil = pre-pump
+    n_slp  = 1.0 - clamp(slope, -0.001, 0.002)   # inverse: slope flat = pre-pump
     n_whale = whale_score / 100.0
 
-    # ── Weighted average (bobot dari separability forensik) ───
-    # Total bobot fitur utama: 30+20+15+20+15 = 100
     score = (
-        n_mvs   * 0.28 +   # max volume spike (46% diff)
-        n_irr   * 0.20 +   # volume irregularity (31% diff)
-        n_avs   * 0.12 +   # avg volume spike (19% diff)
-        n_atr   * 0.22 +   # ATR rendah = pre-pump (93% diff)
-        n_slp   * 0.13 +   # price flat/turun = pre-pump (83% diff)
-        n_whale * 0.05     # whale konfirmasi (bobot kecil, opsional)
+        n_mvs   * 0.28 +
+        n_irr   * 0.20 +
+        n_avs   * 0.12 +
+        n_atr   * 0.22 +
+        n_slp   * 0.13 +
+        n_whale * 0.05
     )
     score = max(0.0, min(1.0, score))
 
-    # ── Klasifikasi ───────────────────────────────────────────
     if score < 0.30:
         cls = "Noise"
     elif score < 0.45:
@@ -808,7 +787,6 @@ def layer_volume_intelligence(candles_1h):
     elif rvol < 0.4:
         score -= 4
 
-    # Volume irregularity sebagai sinyal whale masuk
     irr = calc_volume_irregularity(candles_1h)
     if irr >= 2.5:
         score += 10
@@ -819,7 +797,6 @@ def layer_volume_intelligence(candles_1h):
     elif irr >= 1.3:
         score += 3
 
-    # CVD divergence
     cvd_s, cvd_sig = calc_cvd_signal(candles_1h)
     score += cvd_s
     if cvd_sig:
@@ -828,14 +805,11 @@ def layer_volume_intelligence(candles_1h):
     return min(score, CONFIG["max_vol_score"]), sigs, rvol
 
 
-# ── Layer 2: Flat Price + Volume Naik (ganti breakout_proximity) ──
-# FIX 6: v8.2 memberi poin tertinggi untuk "near high 24h" = sinyal terlambat
-# Data forensik: pump terjadi saat harga FLAT, bukan saat sudah dekat high
+# ── Layer 2: Flat Accumulation (FIX 6: ganti breakout_proximity) ──
 def layer_flat_accumulation(candles_1h):
     """
-    Deteksi pola akumulasi sejati: harga flat + volume mulai naik.
-    Dari forensik: ESP, SKR, STEEM, POWER semua punya slope negatif/flat
-    sebelum pump. Scanner v8.2 justru menghukum pola ini!
+    Harga flat + volume naik = pre-pump sejati.
+    Dari forensik: ESP, SKR, STEEM, POWER semua slope negatif/flat sebelum pump.
     """
     score = 0
     sigs  = []
@@ -843,7 +817,6 @@ def layer_flat_accumulation(candles_1h):
     if len(candles_1h) < 12:
         return 0, sigs
 
-    # Range 24h — semakin kecil semakin baik (akumulasi zona)
     if len(candles_1h) >= 24:
         high24 = max(c["high"] for c in candles_1h[-24:])
         low24  = min(c["low"]  for c in candles_1h[-24:])
@@ -863,9 +836,8 @@ def layer_flat_accumulation(candles_1h):
     elif range24_pct < 15:
         score += 2
     elif range24_pct > 40:
-        score -= 5   # sudah bergerak besar
+        score -= 5
 
-    # Slope 12 jam: flat atau turun = baik (pre-pump pattern)
     slope = calc_price_slope(candles_1h)
     if slope < -0.0003:
         score += 8
@@ -876,13 +848,11 @@ def layer_flat_accumulation(candles_1h):
     elif slope < 0.001:
         score += 2
 
-    # Higher lows — struktur akumulasi ascending
     hl_sc, hl_sig = detect_higher_lows(candles_1h[-16:] if len(candles_1h) >= 16 else candles_1h)
     score += hl_sc
     if hl_sig:
         sigs.append(hl_sig)
 
-    # Candle quality
     cq_sc, cq_sig = candle_quality_score(candles_1h)
     score += cq_sc
     if cq_sig:
@@ -931,14 +901,10 @@ def layer_structure(candles_1h):
 
 # ── Layer 4: Positioning (Funding + L/S) ─────────────────────
 def layer_positioning(symbol, funding, oi_change_1h):
-    """
-    FIX 2: Short squeeze terjadi saat funding NEGATIF.
-    v8.2 memberi bonus saat funding > +0.05% = SALAH (itu long squeeze).
-    """
+    """FIX 2: Short squeeze = funding NEGATIF."""
     score = 0
     sigs  = []
 
-    # Funding scoring (benar)
     if -0.0004 <= funding <= -0.00002:
         score += 8
         sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup!")
@@ -951,17 +917,14 @@ def layer_positioning(symbol, funding, oi_change_1h):
         score -= 5
         sigs.append(f"⚠️ Funding {funding:.5f} — long overcrowded, risiko dump")
 
-    # FIX 2: Short squeeze = funding NEGATIF + OI NAIK
-    # (short terakumulasi, posisi baru masuk, bahan bakar squeeze)
-    if (funding <= CONFIG["squeeze_funding_max"]     # < -0.01%
-            and oi_change_1h > CONFIG["squeeze_oi_change_min"]):   # OI naik > 3%
+    if (funding <= CONFIG["squeeze_funding_max"]
+            and oi_change_1h > CONFIG["squeeze_oi_change_min"]):
         score += 10
         sigs.append(
             f"🔥 SHORT SQUEEZE TERINDIKASI: "
             f"funding {funding:.5f} negatif, OI 1h +{oi_change_1h:.1f}%"
         )
 
-    # Long/Short Ratio
     ls       = get_long_short_ratio(symbol)
     ls_score = 0
     if ls is not None:
@@ -1067,7 +1030,6 @@ def calc_whale(symbol, candles_15m, funding):
             ws += 25
             ev.append(f"✅ Smart money {lbuy_usd/total_usd:.0%} vol (>${thr:,.0f}/trade)")
 
-        # Iceberg detection
         if cur > 0:
             tol     = 0.15 if cur >= 10 else (0.30 if cur >= 1 else 0.50)
             at_lvl  = [
@@ -1082,7 +1044,6 @@ def calc_whale(symbol, candles_15m, funding):
                     ws += 20
                     ev.append(f"✅ Iceberg: {len(at_lvl)} tx kecil (${tot_ice:,.0f} total)")
 
-    # Harga flat 4 jam = stealth positioning
     if candles_15m and len(candles_15m) >= 16:
         p4h  = candles_15m[-16]["close"]
         pchg = abs((cur - p4h) / p4h * 100) if p4h else 99
@@ -1093,12 +1054,10 @@ def calc_whale(symbol, candles_15m, funding):
             ws += 7
             ev.append("🔶 Harga relatif flat 4h")
 
-    # Funding negatif = short squeeze fuel
     if -0.0004 <= funding <= -0.00002:
         ws += 10
         ev.append(f"✅ Funding {funding:.5f} — short squeeze fuel")
 
-    # Order book
     ob_ratio, bid_vol, ask_vol = get_orderbook(symbol, 50)
     if ob_ratio > 0.65:
         ws += 15
@@ -1191,12 +1150,10 @@ def master_score(symbol, ticker, tickers_dict):
     except:
         chg_7d = 0
 
-    # Gate overbought: FIX 5 — bypass squeeze hanya untuk funding NEGATIF kuat
     if chg_7d > CONFIG["gate_chg_7d_max"]:
         oi_value     = get_open_interest(symbol)
         oi_chg_1h, _ = get_oi_changes(symbol, oi_value) if oi_value > 0 else (0, 0)
-        # Squeeze hanya valid jika funding NEGATIF (bukan positif seperti v8.2)
-        real_squeeze = (funding <= CONFIG["squeeze_funding_max"]    # < -0.01%
+        real_squeeze = (funding <= CONFIG["squeeze_funding_max"]
                         and oi_chg_1h > CONFIG["squeeze_oi_change_min"])
         if real_squeeze:
             log.info(f"  {symbol}: Overbought {chg_7d:.1f}% tapi squeeze negatif terindikasi, lanjut")
@@ -1211,7 +1168,6 @@ def master_score(symbol, ticker, tickers_dict):
         log.info(f"  {symbol}: GATE funding ekstrem ({funding:.5f})")
         return None
 
-    # Hitung metrik tambahan
     if len(c1h) >= 6:
         pre6       = c1h[-6:]
         avg_vol_6h = sum(c["volume_usd"] for c in pre6) / 6
@@ -1232,25 +1188,24 @@ def master_score(symbol, ticker, tickers_dict):
     sigs  += v_sigs
     bd["vol"] = v_sc
 
-    # Layer 2: Flat Accumulation (FIX 6: ganti breakout_proximity)
+    # Layer 2: Flat Accumulation
     fa_sc, fa_sigs = layer_flat_accumulation(c1h)
     score += fa_sc
     sigs  += fa_sigs
     bd["flat"] = fa_sc
 
-    # Layer 3: Structure (BBW + Coiling)
+    # Layer 3: Structure
     st_sc, st_sigs, bbw_val, bbw_pct, coiling = layer_structure(c1h)
     score += st_sc
     sigs  += st_sigs
     bd["struct"] = st_sc
 
-    # Bonus Stealth Pattern (volume rendah + coiling panjang + range sempit)
-    # FIX 5: threshold disesuaikan agar ESP/SKR/STEEM terdeteksi
+    # Bonus Stealth Pattern
     stealth_bonus = 0
-    if (avg_vol_6h < CONFIG["stealth_max_vol"]          # < $80K/jam
-            and coiling > CONFIG["stealth_min_coiling"]  # coiling > 15h
-            and range_6h < CONFIG["stealth_max_range"]):  # range < 4%
-        stealth_bonus = 25   # was 30 — dikurangi agar tidak over-inflate
+    if (avg_vol_6h < CONFIG["stealth_max_vol"]
+            and coiling > CONFIG["stealth_min_coiling"]
+            and range_6h < CONFIG["stealth_max_range"]):
+        stealth_bonus = 25
         sigs.append(
             f"🕵️ STEALTH PATTERN: vol ${avg_vol_6h:.0f}/h "
             f"coiling {coiling}h range {range_6h:.1f}%"
@@ -1258,7 +1213,7 @@ def master_score(symbol, ticker, tickers_dict):
     score += stealth_bonus
     bd["stealth"] = stealth_bonus
 
-    # OI untuk positioning
+    # OI
     oi_value = get_open_interest(symbol)
     oi_chg1h = oi_chg24h = 0
     if oi_value > 0:
@@ -1315,12 +1270,10 @@ def master_score(symbol, ticker, tickers_dict):
     else:
         bd["oi_change"] = 0
 
-    # Penalti overbought jika lolos squeeze
     if chg_7d > CONFIG["gate_chg_7d_max"]:
         score -= 15
         sigs.append(f"⚠️ Overbought ({chg_7d:+.1f}% 7d) — hanya short squeeze play")
 
-    # Penalti range 24h sudah lebar (pump sudah berjalan)
     if len(c1h) >= 24:
         high24 = max(c["high"] for c in c1h[-24:])
         low24  = min(c["low"]  for c in c1h[-24:])
@@ -1330,18 +1283,38 @@ def master_score(symbol, ticker, tickers_dict):
                 score = max(0, score - 10)
                 sigs.append(f"⚠️ Range 24h {range24:.0f}% — pump sudah berjalan?")
 
-    # Pump Probability (model forensik baru)
-    prob = compute_pump_probability(c1h, ws)
-    bd["prob_score"] = round(prob["probability_score"] * 100, 1)
-    bd["prob_class"] = prob["classification"]
-
-    # Time multiplier
+    # ── Time multiplier ────────────────────────────────────────
     tmult, tsig = get_time_mult()
     score = int(score * tmult)
     if tsig:
         sigs.append(tsig)
-
     score = min(score, 100)
+
+    # ── Pump Probability (model forensik) ─────────────────────
+    prob = compute_pump_probability(c1h, ws)
+    bd["prob_score"] = round(prob["probability_score"] * 100, 1)
+    bd["prob_class"] = prob["classification"]
+
+    # ══════════════════════════════════════════════════════════
+    #  v9.1 FIX A: COMPOSITE SCORE
+    #  Menggabungkan layer score + forensic probability model.
+    #  Sebelumnya prob_score hanya ditampilkan, tidak dipakai.
+    #  Sekarang menjadi metric utama untuk ranking & filtering.
+    #
+    #  composite = score × 0.55  +  prob_score × 100 × 0.45
+    #
+    #  Efek:
+    #  - Coin dengan prob tinggi (Imminent Pump) naik ranking
+    #    meski layer score moderat
+    #  - Coin dengan prob rendah (Sideways) turun ranking
+    #    meski layer score tinggi
+    # ══════════════════════════════════════════════════════════
+    composite = int(
+        score * CONFIG["composite_w_layer"]
+        + prob["probability_score"] * 100 * CONFIG["composite_w_prob"]
+    )
+    composite = min(composite, 100)
+    bd["composite"] = composite
 
     # Entry zones
     entry = calc_entry(c1h)
@@ -1358,29 +1331,30 @@ def master_score(symbol, ticker, tickers_dict):
         vol_24h   = 0
 
     return {
-        "symbol":       symbol,
-        "score":        score,
-        "signals":      sigs,
-        "ws":           ws,
-        "wev":          wev,
-        "entry":        entry,
-        "sector":       sector,
-        "funding":      funding,
-        "bd":           bd,
-        "price":        price_now,
-        "chg_24h":      chg_24h,
-        "vol_24h":      vol_24h,
-        "rvol":         rvol,
-        "ls_ratio":     ls_ratio,
-        "chg_7d":       chg_7d,
-        "avg_vol_6h":   avg_vol_6h,
-        "range_6h":     range_6h,
-        "coiling":      coiling,
-        "bbw_val":      bbw_val,
-        "oi_change_24h":bd.get("oi_change", 0),
-        "prob_score":   prob["probability_score"],
-        "prob_class":   prob["classification"],
-        "prob_metrics": prob.get("metrics", {}),
+        "symbol":         symbol,
+        "score":          score,
+        "composite_score": composite,   # v9.1: tambahan
+        "signals":        sigs,
+        "ws":             ws,
+        "wev":            wev,
+        "entry":          entry,
+        "sector":         sector,
+        "funding":        funding,
+        "bd":             bd,
+        "price":          price_now,
+        "chg_24h":        chg_24h,
+        "vol_24h":        vol_24h,
+        "rvol":           rvol,
+        "ls_ratio":       ls_ratio,
+        "chg_7d":         chg_7d,
+        "avg_vol_6h":     avg_vol_6h,
+        "range_6h":       range_6h,
+        "coiling":        coiling,
+        "bbw_val":        bbw_val,
+        "oi_change_24h":  bd.get("oi_change", 0),
+        "prob_score":     prob["probability_score"],
+        "prob_class":     prob["classification"],
+        "prob_metrics":   prob.get("metrics", {}),
     }
 
 
@@ -1389,7 +1363,8 @@ def master_score(symbol, ticker, tickers_dict):
 # ══════════════════════════════════════════════════════════════
 def build_alert(r, rank=None):
     sc   = r["score"]
-    bar  = "█" * int(sc / 5) + "░" * (20 - int(sc / 5))
+    comp = r.get("composite_score", sc)
+    bar  = "█" * int(comp / 5) + "░" * (20 - int(comp / 5))
     e    = r["entry"]
     rk   = f"#{rank} " if rank else ""
     vol  = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
@@ -1401,16 +1376,17 @@ def build_alert(r, rank=None):
     pm        = r.get("prob_metrics", {})
 
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.0</b>\n\n"
-        f"<b>Symbol :</b> {r['symbol']}\n"
-        f"<b>Score  :</b> {sc}/100  {bar}\n"
-        f"<b>Prob.  :</b> {prob_pct:.1f}% ({prob_cls})\n"
-        f"<b>Sektor :</b> {r['sector']}\n"
-        f"<b>Harga  :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h | {r['chg_7d']:+.1f}% 7d)\n"
-        f"<b>Vol 24h:</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
-        f"<b>6h Vol :</b> ${r['avg_vol_6h']:.0f}/h  | 6h Range: {r['range_6h']:.1f}%\n"
-        f"<b>Coiling:</b> {r['coiling']}h  | BBW: {r['bbw_val']:.1f}%\n"
-        f"<b>OI 24h :</b> {r['oi_change_24h']:+.1f}%\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.1</b>\n\n"
+        f"<b>Symbol    :</b> {r['symbol']}\n"
+        f"<b>Composite :</b> {comp}/100  {bar}\n"
+        f"<b>Layer Score:</b> {sc}/100\n"
+        f"<b>Prob Model :</b> {prob_pct:.1f}% ({prob_cls})\n"
+        f"<b>Sektor     :</b> {r['sector']}\n"
+        f"<b>Harga      :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h | {r['chg_7d']:+.1f}% 7d)\n"
+        f"<b>Vol 24h    :</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
+        f"<b>6h Vol     :</b> ${r['avg_vol_6h']:.0f}/h  | 6h Range: {r['range_6h']:.1f}%\n"
+        f"<b>Coiling    :</b> {r['coiling']}h  | BBW: {r['bbw_val']:.1f}%\n"
+        f"<b>OI 24h     :</b> {r['oi_change_24h']:+.1f}%\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🐋 <b>WHALE SCORE: {r['ws']}/100</b>\n"
     )
@@ -1451,17 +1427,19 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v9.1 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
-        bar  = "█" * int(r["score"] / 10) + "░" * (10 - int(r["score"] / 10))
+        comp = r.get("composite_score", r["score"])
+        bar  = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
         vol  = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                 else f"${r['vol_24h']/1e3:.0f}K")
         t1p  = r["entry"]["liq_pct"] if r.get("entry") else 0
         prob = r.get("prob_score", 0) * 100
+        prob_cls = r.get("prob_class", "?")
         msg += (
-            f"{i}. <b>{r['symbol']}</b> [{r['score']}/100 {bar}]\n"
+            f"{i}. <b>{r['symbol']}</b> [C:{comp} S:{r['score']} {bar}]\n"
             f"   🐋{r['ws']} | RVOL:{r['rvol']:.1f}x | {vol} | "
-            f"T1:+{t1p:.0f}% | Prob:{prob:.0f}%\n"
+            f"T1:+{t1p:.0f}% | {prob:.0f}% {prob_cls}\n"
         )
     return msg
 
@@ -1470,11 +1448,7 @@ def build_summary(results):
 #  🔍  PRE-FILTER
 # ══════════════════════════════════════════════════════════════
 def pre_score_ticker(ticker):
-    """
-    Quick scoring dari data ticker saja, sebelum ambil candles.
-    Dipakai untuk memilih top-80 yang akan di-deep scan.
-    FIX 5: diturunkan threshold agar coin low-volume seperti ESP/SKR lolos.
-    """
+    """Quick scoring sebelum deep scan. FIX 5: threshold lebih rendah."""
     try:
         cur     = float(ticker.get("lastPr",      0))
         high24h = float(ticker.get("high24h",     cur))
@@ -1490,43 +1464,38 @@ def pre_score_ticker(ticker):
     ps   = 0
     dist = (high24h - cur) / cur * 100 if cur > 0 and high24h > cur else 0
 
-    # FIX 6: beri poin lebih untuk JAUH dari high (flat = pre-pump)
-    # v8.2: near high dapat +18 (sinyal terlambat)
-    # v9.0: flat/jauh dari high = potensi pre-pump sejati
+    # FIX 6: flat/jauh dari high = potensi pre-pump
     if 10 <= dist <= 30:
-        ps += 5   # flat, belum naik — ideal pre-pump
+        ps += 5
     elif 5 <= dist < 10:
         ps += 3
     elif dist < 5:
-        ps += 1   # sudah dekat high — mungkin sudah pump
+        ps += 1
     elif dist > 40:
-        ps -= 2   # terlalu jauh = coin mati
+        ps -= 2
 
-    # Perubahan 24h — sedikit naik atau flat lebih baik dari sudah naik banyak
     if -3 <= chg24h <= 5:
-        ps += 4   # flat atau naik sedikit = ideal
+        ps += 4
     elif 5 < chg24h <= 12:
         ps += 2
     elif -8 <= chg24h < -3:
-        ps += 3   # turun sedikit = bahan bakar short squeeze
+        ps += 3
     elif chg24h > 20:
-        ps -= 3   # sudah pump besar
+        ps -= 3
 
-    # Range 24h sempit = akumulasi
     if low24h > 0:
         range24 = (high24h - low24h) / low24h * 100
         if range24 <= 8:
-            ps += 3   # range sempit = akumulasi
+            ps += 3
         elif range24 <= 15:
             ps += 1
         elif range24 > 40:
             ps -= 2
 
-    # Volume — FIX 5: beri nilai untuk range lebih lebar
     if 50_000 <= vol <= 5_000_000:
         ps += 3
     elif 10_000 <= vol < 50_000:
-        ps += 2   # low volume tapi masih aktif (ESP/SKR territory)
+        ps += 2
     elif vol > 20_000_000:
         ps -= 1
 
@@ -1537,7 +1506,7 @@ def pre_score_ticker(ticker):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v9.0 — FORENSIC-CALIBRATED — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v9.1 — COMPOSITE SCORE — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
@@ -1549,21 +1518,16 @@ def run_scan():
     # ── Build candidate list ───────────────────────────────────
     candidates = []
     for sym, t in tickers.items():
-        # Harus suffix USDT
         if not sym.endswith("USDT"):
             continue
 
-        # FIX 1: Exclude token saham DI SINI (pre-filter level)
-        # v8.2: filter hanya ada di run_scan() tapi setelah pre_score
+        # FIX 1: Stock token exclude di awal loop
         if sym in STOCK_TICKERS:
-            log.debug(f"  SKIP stock token: {sym}")
             continue
 
-        # Exclude keyword umum
         if any(kw in sym for kw in EXCLUDED_KEYWORDS):
             continue
 
-        # Cooldown
         if is_cooldown(sym):
             continue
 
@@ -1574,7 +1538,6 @@ def run_scan():
         except:
             continue
 
-        # Volume minimum — FIX 5: diturunkan
         if vol   < CONFIG["pre_filter_vol"]:       continue
         if vol   > CONFIG["max_vol_24h"]:          continue
         if abs(chg) > CONFIG["gate_chg_24h_max"]:  continue
@@ -1583,7 +1546,6 @@ def run_scan():
         ps = pre_score_ticker(t)
         candidates.append((sym, ps, vol))
 
-    # Sort: pre-score descending, vol descending sebagai tiebreak
     candidates.sort(key=lambda x: (-x[1], -x[2]))
     candidates = candidates[:CONFIG["max_deep_scan"]]
     log.info(f"Pre-filter lolos: {len(candidates)} → deep scan")
@@ -1602,26 +1564,62 @@ def run_scan():
         try:
             res = master_score(sym, t, tickers)
             if res:
+                comp = res["composite_score"]
+                prob = res["prob_score"] * 100
+                prob_cls = res["prob_class"]
                 log.info(
-                    f"  Score={res['score']} W={res['ws']} "
+                    f"  Score={res['score']} Comp={comp} W={res['ws']} "
                     f"RVOL={res['rvol']:.1f}x "
-                    f"Prob={res['prob_score']*100:.0f}% ({res['prob_class']}) "
+                    f"Prob={prob:.0f}% ({prob_cls}) "
                     f"T1=+{res['entry']['liq_pct']:.1f}%"
                 )
-                if res["score"] >= CONFIG["min_score_alert"]:
+
+                # ══════════════════════════════════════════════
+                #  v9.1 FIX A+B: FILTER PAKAI COMPOSITE + PROB
+                #  v9.0: hanya cek score >= min_score_alert (50)
+                #  v9.1: composite >= 50 AND prob >= 0.50
+                #
+                #  Efek gate prob >= 0.50:
+                #  - "Noise" (< 0.30)     → DIBLOKIR
+                #  - "Sideways" (< 0.45)  → DIBLOKIR
+                #  - "Accumulation"+ (≥ 0.45) → bisa lolos jika composite cukup
+                #
+                #  Catatan: Accumulation (0.45-0.60) masih bisa alert
+                #  jika composite >= 50 (layer score kuat)
+                # ══════════════════════════════════════════════
+                if (comp >= CONFIG["min_composite_alert"]
+                        and res["prob_score"] >= CONFIG["min_prob_alert"]):
                     results.append(res)
+                else:
+                    reason = ""
+                    if comp < CONFIG["min_composite_alert"]:
+                        reason += f"comp={comp}<{CONFIG['min_composite_alert']}"
+                    if res["prob_score"] < CONFIG["min_prob_alert"]:
+                        reason += f" prob={prob:.0f}%<{CONFIG['min_prob_alert']*100:.0f}%({prob_cls})"
+                    if reason:
+                        log.info(f"  SKIP: {reason.strip()}")
         except Exception as ex:
             log.warning(f"  Error {sym}: {ex}")
 
         time.sleep(CONFIG["sleep_coins"])
 
-    results.sort(key=lambda x: (x["score"], x["ws"]), reverse=True)
+    # ══════════════════════════════════════════════════════════
+    #  v9.1 FIX C: SORT PAKAI COMPOSITE SCORE (bukan raw score)
+    #  v9.0: sort hanya by (score, ws) → Imminent Pump score rendah
+    #         bisa kalah urutan dari Sideways score tinggi
+    #  v9.1: sort by (composite_score, ws) → Imminent Pump naik ranking
+    # ══════════════════════════════════════════════════════════
+    results.sort(key=lambda x: (x["composite_score"], x["ws"]), reverse=True)
     log.info(f"Lolos threshold: {len(results)} coin")
 
-    # Qualified: harus punya whale signal ATAU score cukup tinggi
+    # ══════════════════════════════════════════════════════════
+    #  v9.1: Qualified filter juga pakai composite
+    #  Coin dengan whale rendah (< 15) perlu composite >= 62
+    #  untuk lolos (bukan score >= 60 seperti v9.0)
+    # ══════════════════════════════════════════════════════════
     qualified = [
         r for r in results
-        if r["ws"] >= CONFIG["min_whale_score"] or r["score"] >= 60
+        if r["ws"] >= CONFIG["min_whale_score"] or r["composite_score"] >= 62
     ]
 
     if not qualified:
@@ -1640,7 +1638,7 @@ def run_scan():
             set_cooldown(r["symbol"])
             log.info(
                 f"✅ Alert #{rank}: {r['symbol']} "
-                f"S={r['score']} W={r['ws']} "
+                f"S={r['score']} C={r['composite_score']} W={r['ws']} "
                 f"Prob={r['prob_score']*100:.0f}%"
             )
         time.sleep(2)
@@ -1653,7 +1651,7 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v9.0 — FORENSIC CALIBRATED     ║")
+    log.info("║  PRE-PUMP SCANNER v9.1 — COMPOSITE SCORE FIX     ║")
     log.info("╚═══════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
