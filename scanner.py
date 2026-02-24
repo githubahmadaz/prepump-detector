@@ -1,34 +1,12 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v8.0 — PROBABILITY-BASED DETECTION                ║
+║  PRE-PUMP SCANNER v8.1 — SHORT SQUEEZE AWARE                        ║
 ║                                                                      ║
-║  Berdasarkan analisis forensik dan saran dari ChatGPT.              ║
-║  Menambahkan metrik akumulasi whale dan Pump Probability Score.     ║
-║                                                                      ║
-║  METRIK BARU:                                                        ║
-║  ✅ Volume Irregularity                                              ║
-║  ✅ Range Lock Score                                                 ║
-║  ✅ Efficiency Ratio (inverse)                                       ║
-║  ✅ Fake Break Count                                                 ║
-║  ✅ Buy Pressure Proxy                                               ║
-║  ✅ Volatility Drop Rate                                             ║
-║  ✅ Trend Stability                                                  ║
-║  ✅ Absorption Consistency                                           ║
-║                                                                      ║
-║  Semua metrik dinormalisasi dan digabung menjadi                     ║
-║  Pump Probability Score dengan bobot:                                ║
-║  - Compression 15%                                                   ║
-║  - Wick Absorption 15%                                               ║
-║  - Volume Irregularity 15%                                           ║
-║  - Range Lock 15%                                                    ║
-║  - Efficiency Ratio (inverse) 10%                                   ║
-║  - Fake Break Count 10%                                              ║
-║  - Buy Pressure 10%                                                  ║
-║  - Volatility Drop Rate 5%                                           ║
-║  - Trend Stability 5%                                                ║
-║                                                                      ║
-║  Output klasifikasi: Noise, Neutral, Accumulation, Pre-Pump,        ║
-║  Imminent Pump.                                                      ║
+║  Berdasarkan kasus POWER yang pump >30% setelah overbought          ║
+║  Menambahkan deteksi short squeeze:                                  ║
+║  ✅ Gate overbought menjadi penalti jika funding tinggi & OI naik   ║
+║  ✅ Bonus squeeze untuk funding >0.05% + OI naik >2%                ║
+║  ✅ Semua fitur v8.0 dipertahankan                                   ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
@@ -66,7 +44,7 @@ CONFIG = {
     "max_vol_24h":        50_000_000,
     "pre_filter_vol":        2_000,
 
-    # Gate price change
+    # Gate price change (dilonggarkan, dengan pengecualian squeeze)
     "gate_chg_24h_max":         30.0,
     "gate_chg_7d_max":          35.0,
     "gate_chg_7d_min":         -35.0,
@@ -98,6 +76,10 @@ CONFIG = {
     "explosive_min_vol":     200_000,
     "explosive_min_range":       10.0,
     "explosive_min_bbw":          5.0,
+
+    # Short squeeze thresholds
+    "squeeze_funding_min":     0.0005,    # 0.05%
+    "squeeze_oi_change_min":    2.0,       # 2% naik dalam 1 jam
 }
 
 GRAN_MAP = {
@@ -108,7 +90,7 @@ GRAN_MAP = {
 }
 
 
-# ==================== SECTOR MAP (same as before) ====================
+# ==================== SECTOR MAP ====================
 SECTOR_MAP = {
     "DEFI": [
         "SNXUSDT","ENSOUSDT","SIRENUSDT","CRVUSDT","CVXUSDT","COMPUSDT",
@@ -158,7 +140,7 @@ COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 _cache         = {}
 
 
-# ==================== COOLDOWN & OI (same as before) ====================
+# ==================== COOLDOWN & OI ====================
 def load_cooldown():
     try:
         p = CONFIG["cooldown_file"]
@@ -405,7 +387,7 @@ def get_cg_trending():
     return result
 
 
-# ==================== MATH HELPERS (existing) ====================
+# ==================== MATH HELPERS ====================
 def bbw_percentile(candles, period=20):
     closes = [c["close"] for c in candles]
     if len(closes) < period + 10:
@@ -486,7 +468,7 @@ def find_swing_targets(candles, cur):
     return round(t1, 8), round(t2, 8)
 
 
-# ==================== RVOL, CVD, etc. (existing) ====================
+# ==================== RVOL, CVD, etc. ====================
 def calc_rvol(candles_1h):
     if len(candles_1h) < 25:
         return 1.0
@@ -675,7 +657,7 @@ def calc_4h_confluence(candles_4h):
     return 0, ""
 
 
-# ==================== LAYERS (existing, with modifications) ====================
+# ==================== LAYERS (existing) ====================
 def layer_volume_intelligence(candles_1h):
     score = 0
     sigs  = []
@@ -735,7 +717,7 @@ def layer_structure(candles_1h):
         score += 1
     return min(score, 15), sigs, bbw_val, bbw_pct, coiling
 
-def layer_positioning(symbol, funding):
+def layer_positioning(symbol, funding, oi_change_1h):
     score = 0
     sigs  = []
     if -0.0004 <= funding <= -0.00002:
@@ -748,6 +730,13 @@ def layer_positioning(symbol, funding):
     elif funding > 0.0003:
         score -= 5
         sigs.append(f"⚠️ Funding {funding:.5f} — long overcrowded")
+
+    # Short squeeze bonus (baru)
+    if funding > CONFIG["squeeze_funding_min"] and oi_change_1h > CONFIG["squeeze_oi_change_min"]:
+        squeeze_bonus = 15
+        sigs.append(f"🔥 SHORT SQUEEZE TERINDIKASI: funding {funding:.5f}%, OI naik {oi_change_1h:.1f}%")
+        score += squeeze_bonus
+
     ls = get_long_short_ratio(symbol)
     ls_score = 0
     ls_ratio = None
@@ -773,6 +762,7 @@ def layer_positioning(symbol, funding):
         elif ls > 2.0:
             ls_score = -8
             sigs.append(f"L/S {ls:.2f} — long dominan")
+
     score = min(score + ls_score, 15)
     return score, sigs, ls_ratio
 
@@ -879,7 +869,6 @@ def calc_whale(symbol, candles_15m, funding):
 
 # ==================== NEW METRICS FOR PUMP PROBABILITY ====================
 def calculate_volume_irregularity(candles_1h):
-    """Koefisien variasi volume (std/mean) dari 24 jam terakhir."""
     if len(candles_1h) < 24:
         vols = [c["volume"] for c in candles_1h]
     else:
@@ -893,7 +882,6 @@ def calculate_volume_irregularity(candles_1h):
     return std_vol / mean_vol
 
 def calculate_range_lock_score(candles_1h):
-    """(high-low) / total volume selama 24 jam."""
     if len(candles_1h) < 24:
         candles = candles_1h
     else:
@@ -906,7 +894,6 @@ def calculate_range_lock_score(candles_1h):
     return (high - low) / total_vol
 
 def calculate_efficiency_ratio(candles_1h):
-    """Rata-rata |close-open| / volume per candle (24 jam)."""
     if len(candles_1h) < 24:
         candles = candles_1h
     else:
@@ -921,7 +908,6 @@ def calculate_efficiency_ratio(candles_1h):
     return sum(ratios) / len(ratios)
 
 def calculate_fake_break_count(candles_1h, lookback=5):
-    """Jumlah breakout palsu dalam 24 jam terakhir."""
     if len(candles_1h) < lookback + 2:
         return 0
     candles = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
@@ -939,7 +925,6 @@ def calculate_fake_break_count(candles_1h, lookback=5):
     return false_breaks
 
 def calculate_buy_pressure_proxy(candles_1h):
-    """Rata-rata (close - low) / (high - low) untuk 24 jam terakhir."""
     if len(candles_1h) < 24:
         candles = candles_1h
     else:
@@ -954,13 +939,10 @@ def calculate_buy_pressure_proxy(candles_1h):
     return sum(pressures) / len(pressures)
 
 def calculate_volatility_drop_rate(candles_1h, period=14):
-    """Kecepatan penurunan volatilitas: slope ATR dalam 24 jam terakhir."""
     if len(candles_1h) < period + 24:
         return 0
-    # Hitung ATR untuk setiap jam selama 24 jam terakhir (butuh 14 candle sebelumnya)
     atr_values = []
     for i in range(len(candles_1h)-24, len(candles_1h)):
-        # Kita perlu subset untuk menghitung ATR pada titik i
         start = max(0, i - period - 1)
         sub = candles_1h[start:i+1]
         if len(sub) < period + 1:
@@ -970,7 +952,6 @@ def calculate_volatility_drop_rate(candles_1h, period=14):
             atr_values.append(atr)
     if len(atr_values) < 2:
         return 0
-    # Hitung slope (regresi linear) dari atr_values
     x = list(range(len(atr_values)))
     y = atr_values
     n = len(x)
@@ -982,15 +963,12 @@ def calculate_volatility_drop_rate(candles_1h, period=14):
     if denom == 0:
         return 0
     slope = (n*sum_xy - sum_x*sum_y) / denom
-    # Slope negatif = penurunan volatilitas (baik). Kita ingin nilai positif untuk skor.
-    # Jadi kita gunakan -slope, dan batasi antara 0 dan 1.
     drop_rate = -slope
-    return max(0, min(1, drop_rate / 0.01))  # asumsikan slope maks 0.01
+    return max(0, min(1, drop_rate / 0.01))
 
 def calculate_trend_stability(candles_1h):
-    """Standar deviasi dari slope harga 6 jam bergulir."""
     if len(candles_1h) < 12:
-        return 1.0  # stabil jika data sedikit?
+        return 1.0
     slopes = []
     for i in range(6, len(candles_1h)):
         window = candles_1h[i-6:i]
@@ -1010,24 +988,24 @@ def calculate_trend_stability(candles_1h):
         slopes.append(slope)
     if len(slopes) < 2:
         return 1.0
-    std_slope = np.std(slopes) if 'numpy' in dir() else math.sqrt(sum((s - sum(slopes)/len(slopes))**2 for s in slopes) / len(slopes))
-    # Semakin kecil std, semakin stabil. Kita balikkan: 1 / (1+std)
+    mean_slope = sum(slopes) / len(slopes)
+    variance = sum((s - mean_slope)**2 for s in slopes) / len(slopes)
+    std_slope = math.sqrt(variance)
     return 1 / (1 + std_slope)
 
 def calculate_absorption_consistency(candles_1h):
-    """Konsistensi wick absorption: koefisien variasi dari wick absorption per candle."""
     if len(candles_1h) < 24:
         candles = candles_1h
     else:
         candles = candles_1h[-24:]
     absorptions = []
     for c in candles:
-        if c["close"] > c["open"]:  # bullish
+        if c["close"] > c["open"]:
             lower_wick = c["open"] - c["low"]
             total_range = c["high"] - c["low"]
             if total_range > 0:
                 absorptions.append(lower_wick / total_range)
-        else:  # bearish
+        else:
             upper_wick = c["high"] - c["open"]
             total_range = c["high"] - c["low"]
             if total_range > 0:
@@ -1039,13 +1017,11 @@ def calculate_absorption_consistency(candles_1h):
         return 0
     std_abs = math.sqrt(sum((a - mean_abs)**2 for a in absorptions) / len(absorptions))
     cv = std_abs / mean_abs
-    # Semakin kecil cv, semakin konsisten. Kita balikkan: 1 / (1+cv)
     return 1 / (1 + cv)
 
 
 # ==================== PUMP PROBABILITY SCORE ====================
 def normalize(value, min_val, max_val, inverse=False):
-    """Normalisasi linear ke [0,1], jika inverse=True maka nilai kecil jadi besar."""
     if max_val == min_val:
         return 0.5
     norm = (value - min_val) / (max_val - min_val)
@@ -1055,18 +1031,10 @@ def normalize(value, min_val, max_val, inverse=False):
     return norm
 
 def compute_pump_probability(candles_1h):
-    """
-    Menghitung Pump Probability Score berdasarkan metrik yang sudah dinormalisasi.
-    Menggunakan bobot dari ChatGPT.
-    """
-    # Metrik yang sudah ada (dari layer lain, kita hitung ulang di sini agar konsisten)
-    # Compression phase (BBW percentile) - kita gunakan bbw_pct yang sudah dihitung di layer_structure
-    # Tapi kita perlu bbw_pct dari candles_1h. Kita akan hitung sendiri di sini.
-    _, bbw_pct = bbw_percentile(candles_1h)  # bbw_pct dalam 0-100
-    compression = bbw_pct / 100.0  # 0-1, nilai kecil bagus
+    _, bbw_pct = bbw_percentile(candles_1h)
+    compression = bbw_pct / 100.0
 
-    # Wick absorption (kita hitung rata-rata dari 24 jam terakhir)
-    wick_abs = 0
+    # Wick absorption
     if len(candles_1h) >= 24:
         candles = candles_1h[-24:]
     else:
@@ -1085,39 +1053,26 @@ def compute_pump_probability(candles_1h):
                 abs_list.append(upper_wick / total_range)
     wick_abs = sum(abs_list) / len(abs_list) if abs_list else 0.5
 
-    # Volume irregularity
     vol_irr = calculate_volume_irregularity(candles_1h)
-    # Range lock score
     range_lock = calculate_range_lock_score(candles_1h)
-    # Efficiency ratio
     eff = calculate_efficiency_ratio(candles_1h)
-    # Fake break count
     fake_break = calculate_fake_break_count(candles_1h)
-    # Buy pressure
     buy_pressure = calculate_buy_pressure_proxy(candles_1h)
-    # Volatility drop rate
     vol_drop = calculate_volatility_drop_rate(candles_1h)
-    # Trend stability
     trend_stab = calculate_trend_stability(candles_1h)
-    # Absorption consistency
     abs_cons = calculate_absorption_consistency(candles_1h)
 
-    # Normalisasi masing-masing ke 0-1 dengan batas yang ditentukan dari data forensik
-    # Batas bawah dan atas berdasarkan analisis (perkiraan)
-    n_comp = normalize(compression, 0, 1, inverse=False)  # compression kecil bagus, tapi kita ingin nilai kecil jadi skor besar? compression adalah persentil kecil bagus, jadi kita balikkan? Sebenarnya compression phase adalah bbw_pct, makin kecil makin compressed. Jadi kita ingin nilai kecil jadi skor tinggi. Maka inverse=True.
-    n_comp = 1 - n_comp  # karena compression kecil bagus, kita balikkan
+    # Normalisasi
+    n_comp = 1 - normalize(compression, 0, 1, inverse=False)  # compression kecil bagus
+    n_wick = normalize(wick_abs, 0.1, 0.5, inverse=False)
+    n_vol_irr = normalize(vol_irr, 0.5, 3.0, inverse=False)
+    n_range_lock = normalize(range_lock, 1e-9, 1e-6, inverse=True)
+    n_eff = normalize(eff, 1e-7, 1e-4, inverse=True)
+    n_fake = normalize(fake_break, 0, 10, inverse=False)
+    n_buy = normalize(buy_pressure, 0.4, 0.6, inverse=False)
+    n_vol_drop = normalize(vol_drop, 0, 1, inverse=False)
+    n_trend_stab = normalize(trend_stab, 0.5, 1.0, inverse=False)
 
-    n_wick = normalize(wick_abs, 0.1, 0.5, inverse=False)  # wick_abs sekitar 0.1-0.5, lebih tinggi bagus? Dari data pump lebih tinggi? Pump avg 0.214, non-pump 0.19, jadi sedikit lebih tinggi bagus. Jadi inverse=False.
-    n_vol_irr = normalize(vol_irr, 0.5, 3.0, inverse=False)  # lebih tinggi bagus? Pump avg 1.82, non 1.41, jadi tinggi bagus.
-    n_range_lock = normalize(range_lock, 1e-9, 1e-6, inverse=True)  # sangat kecil bagus, jadi inverse=True
-    n_eff = normalize(eff, 1e-7, 1e-4, inverse=True)  # kecil bagus, inverse
-    n_fake = normalize(fake_break, 0, 10, inverse=False)  # lebih banyak bagus? Pump avg 4.18, non 3.79, jadi sedikit lebih banyak bagus.
-    n_buy = normalize(buy_pressure, 0.4, 0.6, inverse=False)  # ideal 0.5-0.6, pump 0.467, non 0.46, hampir sama, tapi kita anggap >0.5 bagus.
-    n_vol_drop = normalize(vol_drop, 0, 1, inverse=False)  # sudah 0-1
-    n_trend_stab = normalize(trend_stab, 0.5, 1.0, inverse=False)  # semakin stabil bagus
-    n_abs_cons = normalize(abs_cons, 0, 1, inverse=False)  # konsisten bagus
-
-    # Bobot dari ChatGPT
     weights = {
         'comp': 0.15,
         'wick': 0.15,
@@ -1128,10 +1083,8 @@ def compute_pump_probability(candles_1h):
         'buy': 0.10,
         'vol_drop': 0.05,
         'trend': 0.05,
-        'abs_cons': 0.00  # tidak termasuk dalam bobot asli, tapi kita bisa masukkan ke salah satu atau buat sendiri. Untuk sementara kita tidak pakai karena bobot sudah penuh.
     }
-    # Kita gunakan abs_cons sebagai pengganti? Atau tambah dengan mengurangi bobot lain? Agar total 1, kita kurangi sedikit dari yang lain. Misal kita ambil 0.05 dari vol_drop dan trend? Tapi lebih baik kita ikuti bobot asli, dan abs_cons kita tampilkan sebagai info saja.
-    # Untuk sementara kita tidak masukkan abs_cons ke skor, hanya tampilkan.
+
     total = (n_comp * weights['comp'] +
              n_wick * weights['wick'] +
              n_vol_irr * weights['vol_irr'] +
@@ -1142,7 +1095,6 @@ def compute_pump_probability(candles_1h):
              n_vol_drop * weights['vol_drop'] +
              n_trend_stab * weights['trend'])
 
-    # Klasifikasi
     if total < 0.3:
         classification = "Noise"
     elif total < 0.5:
@@ -1183,7 +1135,7 @@ def compute_pump_probability(candles_1h):
     }
 
 
-# ==================== ENTRY ZONE CALCULATOR (same) ====================
+# ==================== ENTRY ZONE ====================
 def calc_entry(candles_1h):
     cur = candles_1h[-1]["close"]
     atr = calc_atr(candles_1h, 14) or cur * 0.02
@@ -1239,16 +1191,25 @@ def master_score(symbol, ticker, tickers_dict):
 
     funding = get_funding(symbol)
 
-    # GATES
+    # ── GATES (dimodifikasi untuk squeeze) ─────────────────────────
     try:
         p7d_ago = c1h[-168]["close"] if len(c1h) >= 168 else c1h[0]["close"]
         chg_7d  = (c1h[-1]["close"] - p7d_ago) / p7d_ago * 100 if p7d_ago > 0 else 0
     except:
         chg_7d = 0
 
+    # Gate 7d dengan pengecualian squeeze
     if chg_7d > CONFIG["gate_chg_7d_max"]:
-        log.info(f"  {symbol}: GATE 7d overbought (+{chg_7d:.1f}%)")
-        return None
+        # Cek apakah ini short squeeze
+        oi_value = get_open_interest(symbol)
+        oi_change_1h, _ = get_oi_changes(symbol, oi_value) if oi_value > 0 else (0,0)
+        if funding > CONFIG["squeeze_funding_min"] and oi_change_1h > CONFIG["squeeze_oi_change_min"]:
+            log.info(f"  {symbol}: Overbought {chg_7d:.1f}% tapi funding tinggi & OI naik, diberi penalti -15 (tidak direject)")
+            # penalti akan diberikan nanti, kita lanjutkan
+        else:
+            log.info(f"  {symbol}: GATE 7d overbought ({chg_7d:.1f}%) tanpa squeeze, reject")
+            return None
+
     if chg_7d < CONFIG["gate_chg_7d_min"]:
         log.info(f"  {symbol}: GATE 7d downtrend ({chg_7d:.1f}%)")
         return None
@@ -1309,8 +1270,15 @@ def master_score(symbol, ticker, tickers_dict):
     score += explosive_bonus
     bd["explosive"] = explosive_bonus
 
-    # Layer 4: Positioning
-    pos_sc, pos_sigs, ls_ratio = layer_positioning(symbol, funding)
+    # OI untuk digunakan di layer positioning
+    oi_value = get_open_interest(symbol)
+    oi_change_1h, oi_change_24h = 0, 0
+    if oi_value > 0:
+        save_oi_snapshot(symbol, oi_value)
+        oi_change_1h, oi_change_24h = get_oi_changes(symbol, oi_value)
+
+    # Layer 4: Positioning (sekarang dengan oi_change_1h)
+    pos_sc, pos_sigs, ls_ratio = layer_positioning(symbol, funding, oi_change_1h)
     score += pos_sc
     sigs  += pos_sigs
     bd["pos"] = pos_sc
@@ -1330,18 +1298,15 @@ def master_score(symbol, ticker, tickers_dict):
     sigs  += ctx_sigs
     bd["ctx"] = ctx_sc
 
-    # Whale & OI
+    # Whale
     ws, whale_bonus, wev = calc_whale(symbol, c15m, funding)
     score += whale_bonus
     bd["whale"] = whale_bonus
     for ev in wev:
         sigs.append(ev)
 
-    # Open Interest Changes
-    oi_value = get_open_interest(symbol)
+    # Open Interest Changes (penalti/bonus)
     if oi_value > 0:
-        save_oi_snapshot(symbol, oi_value)
-        oi_change_1h, oi_change_24h = get_oi_changes(symbol, oi_value)
         if oi_change_24h < -20:
             score -= 15
             sigs.append(f"⚠️ OI 24h turun {oi_change_24h:.1f}% — distribusi besar")
@@ -1364,10 +1329,15 @@ def master_score(symbol, ticker, tickers_dict):
     else:
         bd["oi_change"] = 0
 
-    # Pump Probability Score (BARU)
+    # Penalti overbought jika tidak diselamatkan squeeze
+    if chg_7d > CONFIG["gate_chg_7d_max"]:
+        # sudah dicek di gate, berarti ini squeeze case, beri penalti ringan
+        score -= 15
+        sigs.append(f"⚠️ Overbought ekstrem ({chg_7d:+.1f}% 7d) tapi funding tinggi — short squeeze aktif, tetap waspada")
+
+    # Pump Probability Score
     prob = compute_pump_probability(c1h)
-    # Tambahkan ke breakdown
-    bd["prob_score"] = round(prob['probability_score'] * 100, 1)  # dalam persen
+    bd["prob_score"] = round(prob['probability_score'] * 100, 1)
     bd["prob_class"] = prob['classification']
 
     # Time Multiplier
@@ -1428,7 +1398,7 @@ def master_score(symbol, ticker, tickers_dict):
     }
 
 
-# ==================== TELEGRAM FORMATTER (updated) ====================
+# ==================== TELEGRAM FORMATTER ====================
 def build_alert(r, rank=None):
     sc  = r["score"]
     bar = "█" * int(sc / 5) + "░" * (20 - int(sc / 5))
@@ -1438,7 +1408,7 @@ def build_alert(r, rank=None):
            else f"${r['vol_24h']/1e3:.0f}K")
     ls  = f" | L/S:{r['ls_ratio']:.2f}" if r.get("ls_ratio") else ""
 
-    prob_score = r.get("prob_score", 0) * 100  # karena kita simpan dalam 0-1
+    prob_score = r.get("prob_score", 0) * 100
     prob_class = r.get("prob_class", "Unknown")
 
     msg = (
@@ -1504,7 +1474,7 @@ def build_summary(results):
     return msg
 
 
-# ==================== PRE-FILTER (same) ====================
+# ==================== PRE-FILTER ====================
 def pre_score_ticker(ticker):
     try:
         cur     = float(ticker.get("lastPr",       0))
@@ -1538,7 +1508,7 @@ def pre_score_ticker(ticker):
 
 # ==================== MAIN SCAN ====================
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v8.0 — PROBABILITY-BASED — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v8.1 — SHORT SQUEEZE AWARE — {utc_now()} ===")
     log.info(f"Dynamic discovery: scan semua USDT-futures Bitget")
 
     tickers = get_all_tickers()
@@ -1633,8 +1603,7 @@ def run_scan():
 
 if __name__ == "__main__":
     log.info("╔════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v8.0 — PROBABILITY-BASED║")
-    log.info("║  Adaptive | Stealth | Explosive | OI      ║")
+    log.info("║  PRE-PUMP SCANNER v8.1 — SQUEEZE AWARE    ║")
     log.info("╚════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
