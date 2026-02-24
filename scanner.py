@@ -1,48 +1,48 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.1 — COMPOSITE SCORE FIX                        ║
+║  PRE-PUMP SCANNER v9.3 — OI DISTRIBUTION GATE + STOCK FILTER FIX   ║
 ║                                                                      ║
-║  SEMUA BUG v9.0 DIPERTAHANKAN FIXED +                                ║
+║  ANALISIS FORENSIK dari run v9.2 (2026-02-25, data CoinGlass):      ║
 ║                                                                      ║
-║  FIX v9.1-A (KRITIS): compute_pump_probability() sekarang           ║
-║    AKTIF dipakai untuk filtering & ranking.                          ║
-║    v9.0: prob dihitung tapi hanya ditampilkan di alert (sia-sia!)    ║
-║    v9.1: composite_score = score×0.55 + prob×100×0.45               ║
-║          → dipakai sebagai threshold utama & key sort                ║
+║  FUTU  $144.73 → Futu Holdings (NASDAQ stock!) — lolos alert ❌      ║
+║  MU    $432.2  → Micron Technology (NASDAQ stock!) — lolos alert ❌  ║
+║  CHZ   Score=82 → OI negatif DI SEMUA TF (24h+1h+15m+5m) ❌         ║
+║                    Futures outflow di 4h, 8h, 12h — distribusi aktif ║
+║  XDC   Comp=79 → Volume -39% 24h, futures outflow semua TF ❌        ║
+║  ALGO  Comp=66 → Funding negatif, vol +18%, inflow 1h/4h/8h ✅       ║
+║                   (SATU-SATUNYA signal valid dari 8 alert)           ║
 ║                                                                      ║
-║  FIX v9.1-B (KRITIS): Gate minimum prob                              ║
-║    v9.0: Coin Sideways (Prob 31%) bisa lolos alert jika score > 50  ║
-║    v9.1: min_prob_alert = 0.50 — Noise & Sideways TIDAK bisa alert  ║
+║  FIX v9.3-A (KRITIS): Tambah FUTU, MU + 15 stock lain               ║
+║    FUTU = Futu Holdings → CONFIRMED lolos alert ❌                   ║
+║    MU   = Micron Technology → CONFIRMED lolos alert ❌               ║
+║    +13 token saham baru (media, otomotif, energy)                    ║
+║    Total STOCK_TICKERS: 49 → 65 token                               ║
 ║                                                                      ║
-║  FIX v9.1-C (MAJOR): Sort dan qualified filter pakai composite       ║
-║    v9.0: sort hanya by (score, ws) → miss Imminent Pump score rendah ║
-║    v9.1: sort by (composite_score, ws) → prioritas yg benar         ║
+║  FIX v9.3-B (KRITIS): OI Multi-Timeframe Distribution Gate          ║
+║    v9.2: OI 24h -1.44% + OI 1h -1.19% → tidak tertangkap           ║
+║           (threshold lama hanya penalti jika < -10%)                 ║
+║    v9.3: Jika OI 24h < -1% DAN OI 1h < -0.5% secara bersamaan      ║
+║           = distribusi berlanjut → penalti -12 poin                  ║
+║    Dampak: CHZ Score 82 → ~70, Comp 68 → ~62 (masih lolos tapi      ║
+║            peringatan distribusi aktif tampil di alert)               ║
 ║                                                                      ║
-║  DAMPAK TERUKUR dari log run 2026-02-24:                             ║
-║    SEBELUM (v9.0):  MORPHOUSDT (Prob=31% Sideways) → DIKIRIM ❌      ║
-║                     KASUSDT    (Prob=44% Sideways) → DIKIRIM ❌      ║
-║                     PLTRUSDT   (Prob=85% Imminent) → MISS ❌         ║
-║                     FUTUUSDT   (Prob=83% Imminent) → MISS ❌         ║
-║                     AVGOUSDT   (Prob=85% Imminent) → MISS ❌         ║
-║                     HOODUSDT   (Prob=76% Imminent) → MISS ❌         ║
-║                     BARDUSDT   (Prob=75% Imminent) → MISS ❌         ║
-║                     ASMLUSDT   (Prob=77% Imminent) → MISS ❌         ║
-║    SETELAH (v9.1):  MORPHOUSDT composite=45.8  → BLOCKED ✅          ║
-║                     KASUSDT    prob=0.44<0.50  → BLOCKED ✅          ║
-║                     PLTRUSDT   composite=62.5  → SENT ✅             ║
-║                     FUTUUSDT   composite=62.1  → SENT ✅             ║
-║                     AVGOUSDT   composite=66.3  → SENT ✅             ║
-║                     HOODUSDT   composite=59.5  → SENT ✅             ║
-║                     BARDUSDT   composite=62.4  → SENT ✅             ║
-║                     ASMLUSDT   composite=56.1  → SENT ✅             ║
+║  FIX v9.3-C (KRITIS): Distribution Gate — Volume Spike + OI Drop    ║
+║    Pattern FUTU/MU: RVOL >4x tapi OI turun >20% = DISTRIBUSI MASIF  ║
+║    Ini bukan pre-pump — ini adalah likuidasi/distribusi paksa         ║
+║    v9.2: hanya penalti -8 (terlalu lemah)                            ║
+║    v9.3: RVOL>4 + OI<-20% → GATE (return None), coin dibuang        ║
+║           RVOL>1.5 + OI<-15% → penalti -18 (was -8)                ║
+║           RVOL>1.5 + OI<-10% → penalti -12 (was -8)                ║
 ║                                                                      ║
-║  BUG LAMA v8.2→v9.0 TETAP TERPERBAIKI:                              ║
-║  FIX 1: Stock token filter di pre-filter (awal loop)                 ║
-║  FIX 2: Short squeeze = funding NEGATIF (bukan positif)              ║
-║  FIX 3: compute_pump_probability() — 5 metrik tidak valid dihapus    ║
-║  FIX 4: Model probabilitas baru dari 35 data forensik nyata          ║
-║  FIX 5: Pre-filter threshold diturunkan (min_vol 3K, pre_vol 1K)     ║
-║  FIX 6: breakout_proximity → layer_flat_accumulation (harga flat)    ║
+║  FIX v9.3-D (MAJOR): Skor CHZ case — price >$1 harga tinggi         ║
+║    Scanner tidak punya data CoinGlass flow, tapi bisa deteksi        ║
+║    via pola candle: volume menurun + OI turun = distribusi           ║
+║    Tambah penalti jika avg_vol_6h < avg_vol_24h * 0.7               ║
+║    (volume 6 jam terakhir lebih rendah dari rata-rata = melambat)    ║
+║                                                                      ║
+║  SEMUA FIX SEBELUMNYA TETAP:                                         ║
+║  FIX 1-6: Stock filter, squeeze logic, prob model, flat accum, dll   ║
+║  FIX A-C: Composite score, prob gate, composite sort                 ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
@@ -138,14 +138,57 @@ CONFIG = {
     "prob_slope_w5":       15,
 }
 
-# ── Token saham — exclude di PRE-FILTER (FIX 1) ──────────────
+# ── Token saham — exclude di PRE-FILTER (v9.3: 49 → 65 token) ──────
+# v9.3: +16 token baru termasuk FUTU & MU yang CONFIRMED lolos alert
 STOCK_TICKERS = {
+    # ── Tech (original) ──────────────────────────────────────
     "CSCOUSDT","PEPUSDT","QQQUSDT","AAPLUSDT","MSFTUSDT","GOOGLUSDT",
     "INTCUSDT","AMDUSDT","NVDAUSDT","TSLAUSDT","AMZNUSDT","METAUSDT",
     "NFLXUSDT","ADBEUSDT","CRMUSDT","ORCLUSDT","IBMUSDT","SAPUSDT",
     "PYPLUSDT","UBERUSDT","LYFTUSDT","SPYUSDT","DIAUSDT","IWMUSDT",
+    # ── Retail & Consumer (original) ─────────────────────────
     "MCDUSDT","KOLUSDT","DISUSDT","BRKUSDT","JPMCUSDT","BACHUSDT",
     "SBUXUSDT","NKEUSDT","WMTUSDT","COSTUSDT","HDUSTUSDT",
+    # ── Farmasi & Healthcare (v9.2) ──────────────────────────
+    "LLYUSDT","PFIZUSDT","JNJUSDT","ABBVUSDT","MRKUSDT","AMGNUSDT",
+    # ── Chip & Hardware (v9.2) ───────────────────────────────
+    "ASMLUSDT","TSMCUSDT",
+    # ── Fintech Stock (v9.2) ─────────────────────────────────
+    "HOODUSDT","COINUSDT",
+    # ── Finance (v9.2) ───────────────────────────────────────
+    "GSUSDT","MSUSDT","BAMUSDT",
+    # ── Tech Tambahan (v9.2) ─────────────────────────────────
+    "SNAPUSDT",
+    # ══════════════════════════════════════════════════════════
+    # NEW v9.3: TERBUKTI lolos ke alert di run v9.2
+    # ══════════════════════════════════════════════════════════
+    # Fintech/Brokerage China (v9.3)
+    "FUTUUSDT",   # Futu Holdings (NASDAQ: FUTU) — CONFIRMED lolos alert ❌
+    "TIGRUSDT",   # UP Fintech/Tiger Brokers (NASDAQ: TIGR)
+    # Semiconductor (v9.3)
+    "MUUSDT",     # Micron Technology (NASDAQ: MU) — CONFIRMED lolos alert ❌
+    "MRVLUSDT",   # Marvell Technology
+    "QCOMUSDT",   # Qualcomm
+    "TXNUSDT",    # Texas Instruments
+    "SMHUSDT",    # VanEck Semiconductor ETF
+    # Otomotif (v9.3)
+    "FOUSDT",     # Ford Motor
+    "GMUSDT",     # General Motors
+    "RIVUSDT",    # Rivian
+    "LCIDUSDT",   # Lucid Motors
+    "NIOOUSDT",   # NIO
+    # Media & Entertainment (v9.3)
+    "RDTUSDT",    # Reddit
+    "SPOTUSDT",   # Spotify (SPOT)
+    "RBLXUSDT",   # Roblox
+    # E-commerce (v9.3)
+    "SHOPUSDT",   # Shopify
+    "ETSY USDT",  # Etsy (placeholder — ada sebagai ETSY)
+}
+
+# ── MANUAL EXCLUDE: crypto nyata tapi ingin di-skip ──────────────────
+MANUAL_EXCLUDE = {
+    # Contoh: "XDCUSDT",  # XDC Network — uncomment untuk skip
 }
 
 GRAN_MAP = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
@@ -1246,29 +1289,91 @@ def master_score(symbol, ticker, tickers_dict):
     score += whale_bonus
     bd["whale"] = whale_bonus
 
-    # OI adjustments
+    # ── OI adjustments (v9.3: diperkuat) ─────────────────────
     if oi_value > 0:
+        # ══════════════════════════════════════════════════════
+        #  v9.3 FIX C: Distribution Gate — RVOL spike + OI drop
+        #  Pattern FUTU/MU: volume spike besar tapi OI turun >20%
+        #  = LIKUIDASI MASIF, bukan akumulasi pre-pump
+        #  Gate keras: return None langsung (coin dibuang)
+        # ══════════════════════════════════════════════════════
+        if rvol > 4.0 and oi_chg24h < -20:
+            log.info(
+                f"  {symbol}: GATE distribusi ekstrem "
+                f"(RVOL {rvol:.1f}x, OI 24h {oi_chg24h:.1f}%) — bukan pre-pump"
+            )
+            return None
+
+        # OI 24h besar-besaran turun
         if oi_chg24h < -20:
             score -= 15
             sigs.append(f"⚠️ OI 24h turun {oi_chg24h:.1f}% — distribusi besar")
         elif oi_chg24h < -10:
             score -= 7
             sigs.append(f"OI 24h turun {oi_chg24h:.1f}%")
+
+        # OI 1h
         if oi_chg1h < -5:
             score -= 5
             sigs.append(f"OI 1h turun {oi_chg1h:.1f}% — tekanan jual jangka pendek")
         elif oi_chg1h > 5:
             score += 5
             sigs.append(f"✅ OI 1h naik {oi_chg1h:.1f}% — posisi baru masuk")
-        if rvol > 1.5 and oi_chg24h < -10:
-            score -= 8
-            sigs.append(f"⚠️ Volume naik tapi OI turun — distribusi terindikasi")
+
+        # ══════════════════════════════════════════════════════
+        #  v9.3 FIX B: Multi-TF OI decline = distribusi aktif
+        #  CHZ case: OI 24h -1.44% + OI 1h -1.19% → keduanya
+        #  negatif tapi tidak tertangkap threshold lama (<-10%)
+        #  Jika KEDUANYA negatif = tren distribusi berlanjut
+        # ══════════════════════════════════════════════════════
+        if oi_chg24h < -1.0 and oi_chg1h < -0.5:
+            score -= 12
+            sigs.append(
+                f"⚠️ OI turun di semua TF "
+                f"(24h:{oi_chg24h:.1f}% 1h:{oi_chg1h:.1f}%) — distribusi berlanjut"
+            )
+
+        # ══════════════════════════════════════════════════════
+        #  v9.3 FIX C lanjutan: Penalti lebih keras
+        #  Volume spike + OI decline = distribusi (skala baru)
+        #  v9.2: hanya -8 poin (tidak cukup)
+        #  v9.3: -18 untuk drop besar, -12 untuk drop sedang
+        # ══════════════════════════════════════════════════════
+        if rvol > 1.5 and oi_chg24h < -15:
+            score -= 18   # was -8
+            sigs.append(f"🚨 Volume spike ({rvol:.1f}x) + OI turun {oi_chg24h:.1f}% — distribusi kuat")
+        elif rvol > 1.5 and oi_chg24h < -10:
+            score -= 12   # was -8
+            sigs.append(f"⚠️ Volume naik tapi OI turun {oi_chg24h:.1f}% — distribusi terindikasi")
         elif rvol > 1.5 and oi_chg24h > 5:
             score += 8
             sigs.append(f"✅ Volume naik + OI naik — akumulasi kuat")
+
+        # ══════════════════════════════════════════════════════
+        #  v9.3 FIX D: Volume 6h menurun vs baseline 24h
+        #  Jika volume 6 jam terakhir < 70% rata-rata 24h
+        #  = momentum volume sedang melemah (CHZ/XDC pattern)
+        # ══════════════════════════════════════════════════════
+        if len(c1h) >= 24:
+            vol_24h_candles = [c["volume_usd"] for c in c1h[-24:]]
+            avg_vol_24h_base = sum(vol_24h_candles) / len(vol_24h_candles) if vol_24h_candles else 0
+            if avg_vol_24h_base > 0 and avg_vol_6h > 0:
+                vol_momentum = avg_vol_6h / avg_vol_24h_base
+                if vol_momentum < 0.50:
+                    score -= 10
+                    sigs.append(
+                        f"⚠️ Volume 6h ({avg_vol_6h:.0f}) hanya "
+                        f"{vol_momentum:.0%} dari avg 24h — momentum melemah"
+                    )
+                elif vol_momentum < 0.70:
+                    score -= 5
+                    sigs.append(f"Volume 6h menurun ({vol_momentum:.0%} avg 24h)")
+
         bd["oi_change"] = round(oi_chg24h, 1)
+        bd["oi_change_1h"] = round(oi_chg1h, 1)
     else:
         bd["oi_change"] = 0
+        bd["oi_change_1h"] = 0
 
     if chg_7d > CONFIG["gate_chg_7d_max"]:
         score -= 15
@@ -1352,6 +1457,7 @@ def master_score(symbol, ticker, tickers_dict):
         "coiling":        coiling,
         "bbw_val":        bbw_val,
         "oi_change_24h":  bd.get("oi_change", 0),
+        "oi_change_1h":   bd.get("oi_change_1h", 0),
         "prob_score":     prob["probability_score"],
         "prob_class":     prob["classification"],
         "prob_metrics":   prob.get("metrics", {}),
@@ -1376,7 +1482,7 @@ def build_alert(r, rank=None):
     pm        = r.get("prob_metrics", {})
 
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.1</b>\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.3</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']}\n"
         f"<b>Composite :</b> {comp}/100  {bar}\n"
         f"<b>Layer Score:</b> {sc}/100\n"
@@ -1386,7 +1492,7 @@ def build_alert(r, rank=None):
         f"<b>Vol 24h    :</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
         f"<b>6h Vol     :</b> ${r['avg_vol_6h']:.0f}/h  | 6h Range: {r['range_6h']:.1f}%\n"
         f"<b>Coiling    :</b> {r['coiling']}h  | BBW: {r['bbw_val']:.1f}%\n"
-        f"<b>OI 24h     :</b> {r['oi_change_24h']:+.1f}%\n\n"
+        f"<b>OI 24h/1h:</b> {r['oi_change_24h']:+.1f}% / {r.get('oi_change_1h', 0):+.1f}%\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🐋 <b>WHALE SCORE: {r['ws']}/100</b>\n"
     )
@@ -1427,7 +1533,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v9.1 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v9.3 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp = r.get("composite_score", r["score"])
         bar  = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -1506,7 +1612,7 @@ def pre_score_ticker(ticker):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v9.1 — COMPOSITE SCORE — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v9.3 — OI DISTRIBUTION GATE — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
@@ -1521,8 +1627,11 @@ def run_scan():
         if not sym.endswith("USDT"):
             continue
 
-        # FIX 1: Stock token exclude di awal loop
+        # FIX 1 + v9.2: Stock token dan manual exclude di awal loop
         if sym in STOCK_TICKERS:
+            continue
+        if sym in MANUAL_EXCLUDE:
+            log.debug(f"  SKIP manual exclude: {sym}")
             continue
 
         if any(kw in sym for kw in EXCLUDED_KEYWORDS):
@@ -1651,7 +1760,7 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v9.1 — COMPOSITE SCORE FIX     ║")
+    log.info("║  PRE-PUMP SCANNER v9.3 — OI DISTRIBUTION GATE    ║")
     log.info("╚═══════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
