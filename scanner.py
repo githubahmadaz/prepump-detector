@@ -1,26 +1,36 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.8                                                   ║
+║  PRE-PUMP SCANNER v9.10                                                  ║
 ║                                                                          ║
-║  v9.8 — WHITELIST + MICRO-CAP OI ACCELERATION DETECTOR                  ║
+║  v9.10 — GC-6: MULTI-TIMEFRAME NET FLOW LAYER                          ║
 ║                                                                          ║
-║  PERUBAHAN ARSITEKTUR #1: COIN WHITELIST                                 ║
-║    Ganti dynamic scan 474 coin → 324 coin pilihan user                  ║
-║    Keunggulan: lebih fokus, lebih cepat, tidak ada coin sampah          ║
-║    Pre-filter tetap berjalan di dalam whitelist untuk kecepatan         ║
-║    COIN: Scan hanya USDT-futures yang ada di WHITELIST_SYMBOLS          ║
+║  MOTIVASI:                                                               ║
+║    Banyak alert v9.9 punya score bagus tapi Net Flow negatif            ║
+║    (distribusi aktif). CVD yang ada hanya estimasi kasar dari candle.   ║
+║    Scanner perlu melihat "uang masuk atau keluar" secara eksplisit      ║
+║    dalam USD — bukan hanya persentase atau taker ratio.                 ║
 ║                                                                          ║
-║  PERUBAHAN ARSITEKTUR #2: GC-5 MICRO-CAP OI ACCELERATION (HOLO FIX)   ║
-║    Forensik HOLO: pump 30% tidak terdeteksi karena semua layer blind    ║
-║    terhadap "quiet accumulation" pada coin dormant (vol < $500K)        ║
-║    Fix: Layer baru khusus micro-cap yang deteksi:                       ║
-║    • OI growth rate acceleration (naik cepat dari baseline nol)         ║
-║    • OI momentum: seberapa cepat OI tumbuh vs historisnya              ║
-║    • Divergence: OI naik drastis tapi harga BELUM ikut                  ║
-║    • Dormant awakening: coin yg biasa tidur tiba-tiba ada OI growth    ║
-║    Score: max 30 poin, hanya aktif jika OI < $3M & harga flat <5%     ║
+║  GC-6: NET FLOW MULTI-TF (3 sumber data, 4 window waktu)               ║
+║    Sumber 1: Candle 1h → window 72h, 24h, 6h                           ║
+║    Sumber 2: Candle 15m → window 3h (lebih granular)                   ║
+║    Sumber 3: Trade ticks → window 15 menit real-time                   ║
 ║                                                                          ║
-║  (Semua fix v9.8 dipertahankan)                                         ║
+║    Formula per candle: buy_ratio = (close-low)/(high-low)              ║
+║    net_flow = (buy_ratio*2 - 1) * volume_usd  → [-vol, +vol]           ║
+║    net_pct  = net_usd / total_vol * 100       → [-100%, +100%]         ║
+║                                                                          ║
+║  WHALE ACCUMULATION PATTERN (paling kuat):                             ║
+║    72h: sedikit negatif (whale suppress harga sambil akumulasi)        ║
+║    24h: mulai positif (akumulasi fase tengah)                           ║
+║     6h: positif kuat (whale hampir selesai, siap pump)                 ║
+║    → Pola "funnel" ini adalah sinyal pre-pump terkuat                  ║
+║                                                                          ║
+║  GATE + SCORING ("keduanya"):                                           ║
+║    Hard block: 72h < -12% AND 24h < -8% AND 6h < -5% → distribusi     ║
+║    sistematis di semua TF → tidak mungkin pump segera                  ║
+║    Scoring: gradasi berdasarkan alignment multi-TF (max 25 poin)       ║
+║                                                                          ║
+║  (Semua fix v9.9 dipertahankan)                                         ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -38,17 +48,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 
 # ── Logging: console + file (v9.8) ───────────────────────────────────────
-# Log ke file /tmp/scanner_v9.log agar tidak hilang saat terminal ditutup
-# Cara baca log: tail -f /tmp/scanner_v9.log
 import logging.handlers as _lh
 _log_fmt    = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 _log_root   = logging.getLogger()
 _log_root.setLevel(logging.INFO)
-# Console handler
 _ch = logging.StreamHandler()
 _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
-# File handler dengan rotasi 10MB
 _fh = _lh.RotatingFileHandler(
     "/tmp/scanner_v9.log", maxBytes=10*1024*1024, backupCount=3
 )
@@ -90,7 +96,7 @@ CONFIG = {
     "candle_4h":                 42,
 
     # ── Entry/exit ────────────────────────────────────────────
-    "min_target_pct":             5.0,    # turun dari 8% agar T1 tidak selalu fallback
+    "min_target_pct":             5.0,
     "max_sl_pct":                12.0,
     "atr_sl_mult":                1.5,
     "atr_t1_mult":                2.5,
@@ -101,13 +107,12 @@ CONFIG = {
     "sleep_error":               3.0,
     "cooldown_file":    "/tmp/v9_cooldown.json",
     "oi_snapshot_file": "/tmp/v9_oi.json",
-    "wildcard_seed_file": "/tmp/v9_wildcard.json",  # GC-4: rotasi wildcard
+    "wildcard_seed_file": "/tmp/v9_wildcard.json",
 
     # ── GC-4: Stratified Pre-filter Buckets ───────────────────
-    "bucket_spike":              30,     # coin volume-anomaly
-    "bucket_quality":            35,     # top pre-score
-    "bucket_wildcard":           25,     # rotasi random
-    # total = 90 kandidat deep scan
+    "bucket_spike":              30,
+    "bucket_quality":            35,
+    "bucket_wildcard":           25,
 
     # ── Stealth pattern ───────────────────────────────────────
     "stealth_max_vol":       80_000,
@@ -126,7 +131,7 @@ CONFIG = {
     "max_tf4h_score":             8,
     "max_ctx_score":             10,
     "max_whale_bonus":           20,
-    "max_linea_score":           25,     # GC-3: layer baru
+    "max_linea_score":           25,
 
     # ── Pump probability weights ──────────────────────────────
     "prob_mvs_w1":         30,
@@ -136,41 +141,60 @@ CONFIG = {
     "prob_slope_w5":       15,
 
     # ── GC-2: Liquidation Detector ────────────────────────────
-    "liq_window_min":            30,     # window cek liquidasi (menit)
-    "liq_long_block_usd":    100_000,    # long liq > $100K dalam 30m → waspada
-    "liq_short_bonus_usd":   150_000,   # short liq > $150K = squeeze signal
+    "liq_window_min":            30,
+    "liq_long_block_usd":    100_000,
+    "liq_short_bonus_usd":   150_000,
 
     # ── GC-3: Linea Signature thresholds ─────────────────────
-    "linea_oi_1h_min":            2.0,   # OI 1h naik minimal 2%
-    "linea_oi_24h_min":           3.0,   # OI 24h naik minimal 3%
-    "linea_rsi_max":             48.0,   # RSI di bawah 48 (oversold/netral rendah)
-    "linea_ls_max":               1.1,   # L/S < 1.1 (short atau hampir seimbang)
-    "linea_price_max_chg":        5.0,   # Harga belum naik > 5%
+    "linea_oi_1h_min":            2.0,
+    "linea_oi_24h_min":           3.0,
+    "linea_rsi_max":             48.0,
+    "linea_ls_max":               1.1,
+    "linea_price_max_chg":        5.0,
 
-    # ── GC-5: Micro-cap OI Acceleration (v9.8 — HOLO Fix) ────
-    # Mendeteksi "quiet accumulation" pada coin dormant:
-    # OI tumbuh cepat dari baseline rendah SEMENTARA harga masih flat.
-    # Forensik HOLO: OI +138% dalam 24h, flow +8998% dalam 8h, harga flat.
-    "max_oi_accel_score":        30,    # max score layer ini
-    "oi_accel_micro_thresh": 3_000_000, # OI < $3M = micro-cap, amplifier aktif
-    "oi_accel_dormant_vol":    500_000, # Vol < $500K = coin dormant/tidur
-    # Threshold OI acceleration (pertumbuhan rate antar snapshot):
-    "oi_accel_weak":             15.0,  # OI naik >15% dalam window = lemah
-    "oi_accel_medium":           35.0,  # OI naik >35% = medium
-    "oi_accel_strong":           70.0,  # OI naik >70% = kuat (HOLO level)
-    "oi_accel_extreme":         120.0,  # OI naik >120% = ekstrem
-    # Divergence: OI naik cepat tapi harga masih flat
-    "oi_accel_div_price_max":     5.0,  # Harga belum naik > 5% = divergence valid
-    # Dormant awakening: coin dari tidur panjang mulai ada OI
-    "oi_dormant_baseline_mult":   3.0,  # OI sekarang > 3x rata-rata historis = awakening
+    # ── GC-5: Micro-cap OI Acceleration ──────────────────────
+    "max_oi_accel_score":        30,
+    "oi_accel_micro_thresh": 3_000_000,
+    "oi_accel_dormant_vol":    500_000,
+    "oi_accel_weak":             15.0,
+    "oi_accel_medium":           35.0,
+    "oi_accel_strong":           70.0,
+    "oi_accel_extreme":         120.0,
+    "oi_accel_div_price_max":     5.0,
+    "oi_dormant_baseline_mult":   3.0,
+
+    # ── v9.9 BUG #2: Dead Activity Gate ──────────────────────
+    # Jika volume candle terakhir < threshold% dari avg 6 candle sebelumnya
+    # → coin sudah mati / tidak ada aktivitas nyata
+    "dead_activity_threshold":   0.10,   # 10% dari avg vol 6h
+
+    # ── GC-6: Multi-TF Net Flow (v9.10) ───────────────────────
+    # Net flow = buy_usd - sell_usd per window waktu
+    # Formula: buy_ratio = (close-low)/(high-low), net = (ratio*2-1)*vol_usd
+    # net_pct = net_usd / total_vol * 100  → range [-100%, +100%]
+    "max_netflow_score":         25,     # max score layer ini
+    # Threshold klasifikasi net_pct per TF:
+    "nf_strong_buy":             12.0,   # > +12% = strong buy pressure
+    "nf_buy":                     5.0,   # > +5%  = buy dominant
+    "nf_neutral_max":             5.0,   # |pct| < 5% = balanced/neutral
+    "nf_sell":                   -5.0,   # < -5%  = sell dominant
+    "nf_strong_sell":           -15.0,   # < -15% = strong selling
+    # Gate: semua TF negatif → distribusi sistematis → block
+    "nf_gate_72h":              -12.0,   # 72h < -12%
+    "nf_gate_24h":               -8.0,   # 24h < -8%
+    "nf_gate_6h":                -5.0,   # 6h  < -5%
+    # Whale accumulation pattern: 72h netral/negatif tipis TAPI 24h & 6h positif
+    "nf_whale_72h_max":           3.0,   # 72h <= +3% (tidak naik kencang)
+    "nf_whale_72h_min":         -15.0,   # 72h >= -15% (tidak terlalu jual)
+    "nf_whale_24h_min":           3.0,   # 24h > +3% (akumulasi mulai)
+    "nf_whale_6h_min":            5.0,   # 6h  > +5% (akselerasi beli)
 
     # ── Log file (v9.8) ───────────────────────────────────────
-    # Log ke file supaya tidak hilang saat terminal ditutup
     "log_file": "/tmp/scanner_v9.log",
-    "log_max_mb": 10,  # rotasi setelah 10MB
+    "log_max_mb": 10,
 }
 
-# ── STOCK_TICKERS — v9.5: +7 token dari audit BUG-A ─────────────────────
+# ── STOCK_TICKERS ─────────────────────────────────────────────────────────
 STOCK_TICKERS = {
     "CSCOUSDT","PEPUSDT","QQQUSDT","AAPLUSDT","MSFTUSDT","GOOGLUSDT",
     "INTCUSDT","AMDUSDT","NVDAUSDT","TSLAUSDT","AMZNUSDT","METAUSDT",
@@ -183,42 +207,18 @@ STOCK_TICKERS = {
     "HOODUSDT","COINUSDT",
     "GSUSDT","MSUSDT","BAMUSDT",
     "SNAPUSDT",
-    # v9.3
     "FUTUUSDT","TIGRUSDT","MUUSDT","MRVLUSDT","QCOMUSDT","TXNUSDT",
     "SMHUSDT","FOUSDT","GMUSDT","RIVUSDT","LCIDUSDT","NIOOUSDT",
     "RDTUSDT","SPOTUSDT","RBLXUSDT","SHOPUSDT","ETSYUSDT",
-    # v9.5 BUG-A FIX — CONFIRMED lolos alert v9.4
-    "BABAUSDT",     # Alibaba
-    "AVGOUSDT",     # Avago/Broadcom
-    "BRKBUSDT",     # Berkshire Hathaway B
-    "VISAUSDT",     # Visa Inc
-    "MAUSDT",       # Mastercard
-    "ABNBUSDT",     # Airbnb
-    "AIRBNBUSDT",   # alias
-    # ════════════════════════════════════════════════════
-    # v9.8 FIX-1: CONFIRMED lolos alert v9.5
-    # ════════════════════════════════════════════════════
-    "RDDTUSDT",     # Reddit Inc (NYSE: RDDT) — lolos alert v9.5 ❌
-    "RDDUSDT",      # alias Reddit
-    "PLTRUSDT",     # Palantir Technologies (NYSE: PLTR)
-    "MSTRUSDT",     # MicroStrategy (NASDAQ: MSTR)
-    "SOFIUSDT",     # SoFi Technologies
-    "NUSDT",        # Nu Holdings (NYSE: NU)
-    "AFRMUSDT",     # Affirm Holdings
-    "UPSTUSDT",     # Upstart Holdings
-    "CARVAUSDT",    # Carvana
-    "IONQUSDT",     # IonQ (quantum computing stock)
-    "ARQITUSDT",    # Arqit Quantum
-    "ROBHUSDT",     # Robinhood (already HOODUSDT but alias)
+    "BABAUSDT","AVGOUSDT","BRKBUSDT","VISAUSDT","MAUSDT","ABNBUSDT","AIRBNBUSDT",
+    "RDDTUSDT","RDDUSDT","PLTRUSDT","MSTRUSDT","SOFIUSDT","NUSDT",
+    "AFRMUSDT","UPSTUSDT","CARVAUSDT","IONQUSDT","ARQITUSDT","ROBHUSDT",
 }
 
 MANUAL_EXCLUDE = set()
 
 # ══════════════════════════════════════════════════════════════
 #  📋  WHITELIST — 324 coin pilihan (v9.8)
-#  Gantikan dynamic scan dari 474 coin.
-#  Hanya coin di list ini yang akan di-deep-scan.
-#  Update via MANUAL_EXCLUDE untuk exclude sementara tanpa edit whitelist.
 # ══════════════════════════════════════════════════════════════
 WHITELIST_SYMBOLS = {
     "DOGEUSDT", "BCHUSDT", "ADAUSDT", "HYPEUSDT", "XMRUSDT", "LINKUSDT", "XLMUSDT", "HBARUSDT",
@@ -359,23 +359,89 @@ def save_oi_snapshot(symbol, oi_value):
     except:
         pass
 
+
+# ══════════════════════════════════════════════════════════════
+#  🔴 v9.9 BUG #1 FIX: get_oi_changes() — OI-valid Gate
+# ══════════════════════════════════════════════════════════════
 def get_oi_changes(symbol, current_oi):
-    """Return (chg1h, chg24h, valid) — valid=False jika belum ada 2 snapshot."""
+    """
+    v9.9 FIX BUG #1: OI-valid Gate diperbaiki.
+
+    MASALAH v9.8:
+    ─────────────
+    oi_valid = False jika tidak ada snapshot ±600s dari tepat 1 jam lalu.
+    Artinya: run ke-2 (10 menit setelah run ke-1) = oi_valid TETAP False.
+    Semua penalti OI dimatikan sampai ada snapshot yang benar-benar ~1 jam.
+
+    Akibat: IOTA OI 24h -9.59% → lolos tanpa penalti. ALGO OI 1h -3.68% → lolos.
+
+    FIX v9.9:
+    ─────────
+    1. oi_valid = True jika ada >= 2 snapshot (ANY interval, bukan harus 1 jam).
+       Run ke-2 (10 menit) → valid. Penalti OI aktif mulai run ke-2.
+
+    2. nearest() toleransi diperlebar: 600s → 1800s (30 menit).
+       Snapshot dari 45 menit lalu bisa jadi referensi "1h".
+
+    3. Fallback chg_ref: jika tidak ada snapshot dalam ±1800s dari 1h lalu,
+       gunakan snapshot TERTUA yang tersedia (bisa 10-15 menit).
+       → chg1h = perubahan OI sejak snapshot tertua.
+       → Nilai ini lebih sensitif (10 menit), bukan kurang akurat.
+       → OI turun -2% dalam 10 menit = lebih serius dari -2% dalam 1 jam.
+
+    4. Return backward-compatible: (chg1h, chg24h, oi_valid).
+       Caller yang unpack 3 nilai tidak perlu diubah.
+
+    CATATAN window chg1h:
+    ─────────────────────
+    Saat fallback aktif, chg1h sebenarnya adalah "chg_since_last_snapshot".
+    Penalti yang menggunakan chg1h tetap benar secara arah (naik/turun).
+    Threshold numerik (e.g., < -2%) mungkin lebih mudah tercapai untuk
+    window pendek, yang justru LEBIH KETAT (lebih banyak false positive
+    tersaring) — ini perilaku yang diinginkan.
+    """
     snaps = load_oi_snapshots()
     hist  = snaps.get(symbol, [])
+
+    # Butuh minimal 2 snapshot untuk menghitung perubahan
     if len(hist) < 2:
         return 0, 0, False
+
     now = time.time()
 
-    def nearest(target_ts):
-        cands = [d for d in hist if abs(d["ts"] - target_ts) < 600]
+    def nearest(target_ts, tolerance=1800):
+        """
+        v9.9: Toleransi diperlebar dari 600s → 1800s (30 menit).
+        Snapshot dari 30-90 menit lalu diterima sebagai referensi "1 jam".
+        """
+        cands = [d for d in hist if abs(d["ts"] - target_ts) < tolerance]
         return min(cands, key=lambda d: abs(d["ts"] - target_ts)) if cands else None
 
     old1h  = nearest(now - 3600)
-    old24h = nearest(now - 86400)
+    old24h = nearest(now - 86400, tolerance=7200)
+
+    # ── v9.9: Fallback jika tidak ada snapshot dalam ±30min dari 1h lalu ──
+    # Gunakan snapshot tertua yang tersedia (exclude snapshot <60s = current run)
+    if not old1h:
+        older_snaps = [d for d in hist if d["ts"] < now - 60]
+        if older_snaps:
+            old1h = min(older_snaps, key=lambda d: d["ts"])  # snapshot paling lama
+            age_min = (now - old1h["ts"]) / 60
+            log.debug(
+                f"  [OI-v9.9] {symbol}: fallback ref = snapshot {age_min:.0f}min lalu "
+                f"(tidak ada snapshot ~1h)"
+            )
+
     chg1h  = (current_oi - old1h["oi"])  / old1h["oi"]  * 100 if old1h  and old1h["oi"]  else 0
     chg24h = (current_oi - old24h["oi"]) / old24h["oi"] * 100 if old24h and old24h["oi"] else 0
-    return chg1h, chg24h, (old1h is not None)
+
+    # ── v9.9: oi_valid = True jika old1h berhasil didapat (dari nearest ATAU fallback) ──
+    # Sebelumnya: hanya True jika nearest() dalam ±600s berhasil.
+    # Sekarang: True jika ada referensi snapshot apapun (run ke-2 dan seterusnya).
+    oi_valid = (old1h is not None)
+
+    return chg1h, chg24h, oi_valid
+
 
 _cooldown = load_cooldown()
 log.info(f"Cooldown aktif: {len(_cooldown)} coin")
@@ -518,10 +584,14 @@ def get_trades(symbol, limit=500):
         trades = []
         for t in data.get("data", []):
             try:
+                # v9.10: tambah fillTime untuk windowed net flow calculation
+                # Bitget field: "fillTime" (ms) atau "cTime" fallback
+                ts_ms = int(t.get("fillTime", t.get("cTime", t.get("ts", 0))))
                 trades.append({
                     "price": float(t["price"]),
                     "size":  float(t["size"]),
                     "side":  t.get("side", "").lower(),
+                    "ts_ms": ts_ms,
                 })
             except:
                 pass
@@ -547,12 +617,6 @@ def get_orderbook(symbol, levels=50):
     return 0.5, 0, 0
 
 def get_liquidations(symbol):
-    """
-    GC-2: Ambil data liquidation order dari Bitget.
-    Return: (long_liq_usd_30m, short_liq_usd_30m)
-    long_liq  = orang yang long kena likuidasi (bearish signal jika besar)
-    short_liq = orang yang short kena likuidasi (bullish signal — squeeze)
-    """
     data = safe_get(
         f"{BITGET_BASE}/api/v2/mix/market/liquidation-orders",
         params={"symbol": symbol, "productType": "usdt-futures",
@@ -572,8 +636,6 @@ def get_liquidations(symbol):
                 continue
             usd  = float(o.get("size", 0)) * float(o.get("fillPrice", 0))
             side = o.get("side", "").lower()
-            # 'sell' liquidation = long position kena liq
-            # 'buy' liquidation  = short position kena liq
             if "sell" in side:
                 long_liq += usd
             else:
@@ -583,7 +645,6 @@ def get_liquidations(symbol):
         return 0, 0
 
 def get_rsi(candles, period=14):
-    """Hitung RSI dari candles."""
     if len(candles) < period + 1:
         return 50.0
     closes = [c["close"] for c in candles]
@@ -683,11 +744,6 @@ def calc_poc(candles):
     return pmin + (poc_b + 0.5) * bsize
 
 def find_resistance_targets(candles_1h, cur):
-    """
-    BUG-F FIX: Gantikan find_swing_targets yang selalu fallback ke +10%.
-    Gunakan resistance levels berbasis volume (high yang sering disentuh).
-    Lebih reliabel untuk menentukan target realistis.
-    """
     if len(candles_1h) < 24:
         return cur * 1.10, cur * 1.18
 
@@ -699,7 +755,6 @@ def find_resistance_targets(candles_1h, cur):
         h = recent[i]["high"]
         if h <= min_t:
             continue
-        # Hitung berapa kali harga mendekati level ini (±1.5%)
         touches = sum(
             1 for c in recent
             if abs(c["high"] - h) / h < 0.015 or abs(c["low"] - h) / h < 0.015
@@ -708,11 +763,9 @@ def find_resistance_targets(candles_1h, cur):
             resistance_levels.append((h, touches, recent[i]["volume_usd"]))
 
     if not resistance_levels:
-        # Fallback: ATR-based target
         atr = calc_atr(candles_1h[-24:]) or cur * 0.02
         return round(cur * 1.10, 8), round(cur * 1.18, 8)
 
-    # Sort by proximity ke harga sekarang
     resistance_levels.sort(key=lambda x: x[0])
     t1 = resistance_levels[0][0]
     t2 = resistance_levels[1][0] if len(resistance_levels) > 1 else t1 * 1.08
@@ -723,7 +776,6 @@ def find_resistance_targets(candles_1h, cur):
 #  📊  INDIKATOR
 # ══════════════════════════════════════════════════════════════
 def calc_rvol(candles_1h):
-    """RVOL dengan cap 30x (v9.4 fix dipertahankan)."""
     if len(candles_1h) < 25:
         return 1.0
     last_complete = candles_1h[-2]
@@ -777,9 +829,6 @@ def calc_price_slope(candles_1h):
     return (p_end - p_start) / p_start / len(window) if p_start > 0 else 0.0
 
 def calc_cvd_signal(candles_1h):
-    """
-    CVD divergence — v9.4: tambah tier negatif untuk distribusi.
-    """
     if len(candles_1h) < 12:
         return 0, ""
     window    = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
@@ -818,7 +867,6 @@ def calc_cvd_signal(candles_1h):
     return 0, ""
 
 def calc_short_term_cvd(candles_1h):
-    """CVD window 6h — lebih sensitif terhadap distribusi baru."""
     if len(candles_1h) < 12:
         return 0, ""
     recent = candles_1h[-6:]
@@ -976,8 +1024,6 @@ def layer_volume_intelligence(candles_1h):
     if cvd_sig:
         sigs.append(cvd_sig)
 
-    # BUG-E FIX v9.6: RVOL tinggi + CVD negatif = distribusi
-    # v9.5 terlalu agresif → penalty di-cap maks 12, tier berdasarkan CVD severity
     if rvol >= 5.0:
         stcvd_check, _ = calc_short_term_cvd(candles_1h)
         if stcvd_check <= -10:
@@ -1067,24 +1113,8 @@ def layer_structure(candles_1h):
 
 
 def layer_positioning(symbol, funding, oi_chg1h):
-    """
-    v9.8 FIX-4: L/S penalty diperkuat + hard block untuk long overcrowded.
-    
-    Dari forensik v9.5:
-    - BANANA L/S=1.396 hanya -3 poin → lolos, padahal longs sudah dominan
-    - SFPUSDT L/S=1.665 hanya -6 poin → lolos, padahal squeeze fuel habis
-    
-    Masalah: L/S tinggi artinya TIDAK ADA short yang bisa di-squeeze.
-    Pump butuh short squeeze atau akumulasi baru. L/S > 1.3 tanpa
-    fundamental kuat = distribusi aktif atau pump sudah terjadi.
-    
-    Fix: penalti diperbesar 2x, dan return flag `ls_block` untuk gate di master_score.
-    
-    v9.4 FIX dipertahankan:
-    - Funding 5 tier presisi (true neutral < ±0.001%)
-    """
     score, sigs = 0, []
-    ls_block = False  # v9.8: flag hard block jika L/S terlalu tinggi
+    ls_block = False
 
     if funding <= -0.0004:
         score += 8;  sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup KUAT!")
@@ -1115,7 +1145,6 @@ def layer_positioning(symbol, funding, oi_chg1h):
             ls_score = 5;  sigs.append(f"L/S {ls:.2f} — lebih banyak short")
         elif ls <= 1.15:
             ls_score = 2
-        # ── FIX-4 v9.8: Penalti L/S diperbesar, ditambah hard block ──────────
         elif 1.15 < ls <= 1.3:
             ls_score = -5;  sigs.append(f"L/S {ls:.2f} — longs mulai dominan")
         elif 1.3 < ls <= 1.6:
@@ -1128,11 +1157,9 @@ def layer_positioning(symbol, funding, oi_chg1h):
             ls_score = -25; sigs.append(f"🚨 L/S {ls:.2f} — long overcrowded ekstrem")
         elif ls > 3.0:
             ls_score  = -30
-            ls_block  = True   # Hard block: tidak mungkin pump
+            ls_block  = True
             sigs.append(f"🚨🚨 L/S {ls:.2f} — long overcrowded KRITIS, hard block aktif")
 
-        # ── Special: L/S 1.3-2.0 tapi funding negatif kuat = mungkin masih bisa ──
-        # Jika funding sangat negatif, short masih ada meski jumlah longs lebih banyak
         if 1.3 < ls <= 2.0 and funding <= -0.0003:
             override = min(abs(ls_score) * 0.4, 8)
             ls_score += int(override)
@@ -1259,20 +1286,10 @@ def get_time_mult():
 #  🔴 GC-2: LIQUIDATION CASCADE DETECTOR
 # ══════════════════════════════════════════════════════════════
 def layer_liquidation(symbol, candles_1h):
-    """
-    GC-2: Analisis liquidation order untuk deteksi:
-    a) Long liquidation massal baru → coin baru saja kena long flush
-       → kemungkinan bounce, tapi hati-hati dead cat bounce
-    b) Short liquidation cluster → short squeeze sedang terjadi = bullish
-    
-    Return: (score, signals, long_liq_usd, short_liq_usd, should_block)
-    """
     long_liq, short_liq = get_liquidations(symbol)
     score, sigs = 0, []
     should_block = False
 
-    # Block jika long liquidation masif terjadi baru-baru ini
-    # → ini artinya coin baru saja kena dump, bukan pre-pump
     if long_liq > CONFIG["liq_long_block_usd"] * 3:
         should_block = True
         sigs.append(f"🚨 Long liq masif ${long_liq/1e3:.0f}K dalam 30m — pump aborted!")
@@ -1283,7 +1300,6 @@ def layer_liquidation(symbol, candles_1h):
         score -= 7
         sigs.append(f"Long liq ${long_liq/1e3:.0f}K — tekanan jual terindikasi")
 
-    # Bonus jika short liquidation cluster → short squeeze signal
     if short_liq > CONFIG["liq_short_bonus_usd"] * 2:
         score += 20
         sigs.append(f"🔥🔥 Short liq ${short_liq/1e3:.0f}K — SHORT SQUEEZE AKTIF!")
@@ -1302,28 +1318,9 @@ def layer_liquidation(symbol, candles_1h):
 # ══════════════════════════════════════════════════════════════
 def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
                            ls_ratio, funding, chg_24h):
-    """
-    GC-3: "Linea Signature" — template pre-pump yang paling valid dari forensik.
-
-    LINEA (satu-satunya valid dari 8 alert) memiliki kombinasi:
-    - OI 1h naik masif (+9.80%)   → posisi baru masuk cepat
-    - OI 24h naik (+14.31%)       → akumulasi berlanjut, bukan distribusi
-    - Harga turun (-3.53%)        → DIVERGENCE BULLISH (OI naik, harga turun)
-    - RSI oversold (32.47)        → seller exhaustion, siap reversal
-    - L/S < 1 (0.708)             → short masih dominan = fuel squeeze ada
-
-    v9.6 FIX: Pisah komponen OI-dependent vs OI-independent.
-    Sebelumnya: `if not oi_valid: return 0` → layer mati total di run pertama.
-    Sekarang: komponen RSI, L/S, price SELALU dihitung. OI component
-    hanya diaktifkan jika oi_valid=True.
-
-    Score maksimal (full signature): 25 poin
-    """
     score, sigs, components = 0, [], 0
 
-    # ── GRUP A: OI-INDEPENDENT (selalu aktif, tidak butuh snapshot history) ──
-
-    # Komponen L/S ratio — short masih dominan = squeeze fuel ada
+    # GRUP A: OI-INDEPENDENT
     if ls_ratio is not None:
         if ls_ratio < 0.75:
             score += 6; components += 1
@@ -1332,14 +1329,12 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
             score += 3; components += 1
             sigs.append(f"[Linea-LS] L/S {ls_ratio:.2f} — short dominan")
 
-    # Komponen harga — harga flat/turun = belum pump, masih ada ruang
     if chg_24h < -3:
         score += 5; components += 1
         sigs.append(f"✅ [Linea-P] Harga {chg_24h:+.1f}% — tertekan, siap reversal")
     elif chg_24h <= CONFIG["linea_price_max_chg"]:
         score += 2; components += 1
 
-    # Komponen CVD 6h — buying pressure tersembunyi
     stcvd_sc, stcvd_sig = calc_short_term_cvd(candles_1h)
     if stcvd_sc >= 8:
         score += 5; components += 1
@@ -1347,11 +1342,10 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
     elif stcvd_sc > 0:
         score += 2
 
-    # ── GRUP B: OI-DEPENDENT (hanya aktif jika oi_valid=True) ────────────────
+    # GRUP B: OI-DEPENDENT
     oi_1h_ok = False
     oi_24h_ok = False
     if oi_valid:
-        # Komponen OI 1h naik signifikan
         oi_1h_ok = oi_chg1h >= CONFIG["linea_oi_1h_min"]
         if oi_chg1h >= 8.0:
             score += 8; components += 1
@@ -1362,7 +1356,6 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
         elif oi_1h_ok:
             score += 3; components += 1
 
-        # Komponen OI 24h naik
         oi_24h_ok = oi_chg24h >= CONFIG["linea_oi_24h_min"]
         if oi_chg24h >= 10.0:
             score += 6; components += 1
@@ -1370,7 +1363,6 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
         elif oi_24h_ok:
             score += 3; components += 1
 
-        # Komponen divergence: OI naik + harga turun = sinyal terkuat
         if oi_1h_ok and oi_24h_ok and chg_24h < 0:
             score += 8; components += 1
             sigs.append(
@@ -1381,7 +1373,6 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
             score += 4; components += 1
             sigs.append(f"[Linea-DIV] OI naik + Harga flat — akumulasi tersembunyi")
 
-    # ── BONUS: Full Linea Signature ────────────────────────────────────────
     if components >= 4:
         score += 5
         sigs.append(f"⭐ FULL LINEA SIGNATURE ({components} komponen) — pre-pump template!")
@@ -1397,41 +1388,8 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
 
 # ══════════════════════════════════════════════════════════════
 #  🔴 GC-5: MICRO-CAP OI ACCELERATION DETECTOR (v9.8)
-#  ══════════════════════════════════════════════════════════════
-#
-#  MOTIVASI — Forensik HOLO pump 30% yang terlewat:
-#  ─────────────────────────────────────────────────
-#  Pada 6:26 WIB scanner tidak mendeteksi HOLO karena:
-#  • Harga masih flat → tidak ada momentum signal
-#  • Volume masih rendah → tidak masuk Bucket A
-#  • Funding ≈ 0% → tidak ada squeeze signal
-#  • L/S balanced → tidak ada positioning signal
-#
-#  Yang SEBENARNYA terjadi di balik layar:
-#  • OI naik +138% dalam 24h (dari hampir nol = BESAR)
-#  • Futures flow 8h naik +8998% (whale masuk diam-diam sejak malam)
-#  • OI tumbuh tapi harga BELUM ikut = divergence akumulasi tersembunyi
-#
-#  PRINSIP DETEKSI:
-#  ────────────────
-#  Untuk micro-cap (OI < $3M), pertumbuhan OI yang terlihat kecil
-#  secara absolut bisa berarti SANGAT BESAR secara relatif.
-#  HOLO: OI dari $300K → $700K = +133% → ini SINYAL BESAR untuk micro-cap.
-#  Untuk large-cap (OI $100M), naik $400K tidak ada artinya.
-#
-#  Deteksi 4 komponen:
-#  1. OI GROWTH RATE: seberapa cepat OI tumbuh antar snapshot
-#  2. OI ACCELERATION: apakah pertumbuhan makin cepat (second derivative)
-#  3. DIVERGENCE: OI naik signifikan tapi harga masih flat/turun
-#  4. DORMANT AWAKENING: coin yang biasa sepi tiba-tiba ada aktivitas OI
-#
+# ══════════════════════════════════════════════════════════════
 def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
-    """
-    GC-5: Deteksi akumulasi tersembunyi pada micro-cap via OI growth rate.
-    
-    Return: (score, signals, accel_data_dict)
-    Score maksimal: 30 poin
-    """
     score, sigs = 0, []
     accel = {
         "oi_value":       oi_value,
@@ -1447,7 +1405,6 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
     if oi_value <= 0:
         return 0, [], accel
 
-    # Hanya aktif untuk micro-cap
     is_micro = oi_value < CONFIG["oi_accel_micro_thresh"]
     is_dormant = vol_24h < CONFIG["oi_accel_dormant_vol"]
     accel["is_micro_cap"] = is_micro
@@ -1457,24 +1414,19 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
     hist  = snaps.get(symbol, [])
 
     if len(hist) < 2:
-        # Belum ada history — tidak bisa hitung growth rate
         return 0, [], accel
 
     now = time.time()
 
     def oi_at(target_ts, tolerance=900):
-        """Cari OI paling dekat dengan target timestamp (±tolerance detik)."""
         cands = [d for d in hist if abs(d["ts"] - target_ts) < tolerance]
-        if not cands:
-            return None
-        return min(cands, key=lambda d: abs(d["ts"] - target_ts))
+        return min(cands, key=lambda d: abs(d["ts"] - target_ts)) if cands else None
 
     def growth_pct(old_snap):
         if not old_snap or old_snap["oi"] <= 0:
             return None
         return (oi_value - old_snap["oi"]) / old_snap["oi"] * 100
 
-    # Hitung growth rate di berbagai window
     snap_1h = oi_at(now - 3600)
     snap_3h = oi_at(now - 10800)
     snap_6h = oi_at(now - 21600)
@@ -1487,8 +1439,6 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
     if gr_3h is not None: accel["growth_rate_3h"] = round(gr_3h, 2)
     if gr_6h is not None: accel["growth_rate_6h"] = round(gr_6h, 2)
 
-    # ── KOMPONEN 1: OI Growth Rate ────────────────────────────────────────
-    # Scoring berbeda untuk micro-cap vs normal
     multiplier = 1.5 if is_micro else 1.0
     extra_tag  = " [MICRO]" if is_micro else ""
 
@@ -1497,14 +1447,10 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
     if primary_gr is not None:
         if primary_gr >= CONFIG["oi_accel_extreme"] * multiplier:
             score += 20
-            sigs.append(
-                f"🚀 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — AKUMULASI EKSTREM!"
-            )
+            sigs.append(f"🚀 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — AKUMULASI EKSTREM!")
         elif primary_gr >= CONFIG["oi_accel_strong"] * multiplier:
             score += 14
-            sigs.append(
-                f"🔥 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — akumulasi sangat kuat"
-            )
+            sigs.append(f"🔥 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — akumulasi sangat kuat")
         elif primary_gr >= CONFIG["oi_accel_medium"]:
             score += 9
             sigs.append(f"OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — akumulasi signifikan")
@@ -1512,35 +1458,27 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
             score += 4
             sigs.append(f"OI tumbuh +{primary_gr:.0f}%/1h — awal akumulasi")
         elif primary_gr < -CONFIG["oi_accel_weak"]:
-            # OI turun cepat → distribusi
             score -= 8
             sigs.append(f"⚠️ OI turun {primary_gr:.0f}%/1h — distribusi cepat")
 
-    # ── KOMPONEN 2: OI Acceleration (second derivative) ──────────────────
-    # Apakah pertumbuhan makin cepat? gr_1h > gr_3h/3 = akselerasi
     if gr_1h is not None and gr_3h is not None and gr_3h != 0:
-        # Normalize: 1h rate vs 3h rate/3 (per jam)
         rate_1h_per_h = gr_1h
         rate_3h_per_h = gr_3h / 3.0
         if rate_3h_per_h > 0 and rate_1h_per_h > rate_3h_per_h * 1.5:
             accel_ratio = rate_1h_per_h / rate_3h_per_h
             accel["acceleration"] = round(accel_ratio, 2)
             score += 6
-            sigs.append(
-                f"⚡ OI akselerasi {accel_ratio:.1f}x lebih cepat dari rata-rata 3h"
-            )
+            sigs.append(f"⚡ OI akselerasi {accel_ratio:.1f}x lebih cepat dari rata-rata 3h")
         elif rate_3h_per_h > 0 and rate_1h_per_h > rate_3h_per_h * 1.2:
             score += 3
             sigs.append("OI momentum membangun — pertumbuhan makin cepat")
 
-    # ── KOMPONEN 3: DIVERGENCE — OI naik tapi harga flat ─────────────────
     price_flat = abs(chg_24h) <= CONFIG["oi_accel_div_price_max"]
     oi_growing  = (primary_gr or 0) >= CONFIG["oi_accel_weak"]
 
     if oi_growing and price_flat:
         accel["divergence"] = True
         if chg_24h < 0 and (primary_gr or 0) >= CONFIG["oi_accel_medium"]:
-            # OI naik + harga turun = sinyal terkuat (LINEA/HOLO pattern)
             score += 10
             sigs.append(
                 f"⭐ OI DIVERGENCE: OI +{primary_gr:.0f}% saat harga {chg_24h:+.1f}% "
@@ -1553,10 +1491,7 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
                 f"({chg_24h:+.1f}%)"
             )
 
-    # ── KOMPONEN 4: DORMANT AWAKENING ────────────────────────────────────
-    # Deteksi coin yang biasa tidur tiba-tiba ada aktivitas OI
     if is_dormant and is_micro and gr_6h is not None:
-        # Cek apakah OI 6h lalu sangat rendah dibanding sekarang
         snap_6h_val = snap_6h["oi"] if snap_6h else None
         if snap_6h_val and snap_6h_val > 0:
             awakening_mult = oi_value / snap_6h_val
@@ -1568,11 +1503,295 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
                 )
             elif awakening_mult >= CONFIG["oi_dormant_baseline_mult"]:
                 score += 7
-                sigs.append(
-                    f"🌅 OI awakening {awakening_mult:.1f}x dari baseline tidur"
-                )
+                sigs.append(f"🌅 OI awakening {awakening_mult:.1f}x dari baseline tidur")
 
     return min(score, CONFIG["max_oi_accel_score"]), sigs, accel
+
+
+# ══════════════════════════════════════════════════════════════
+#  🔴 GC-6: MULTI-TF NET FLOW LAYER (v9.10)
+# ══════════════════════════════════════════════════════════════
+#
+#  NET FLOW = Buy USD - Sell USD per window waktu.
+#  Lebih akurat dari CVD (yang hanya lihat arah candle).
+#
+#  Sumber data:
+#  ─────────────────────────────────────────────────
+#  Candle-based (lebih reliable, covers 3 hari):
+#    buy_ratio = (close - low) / (high - low)   per candle
+#    net_usd   = (buy_ratio * 2 - 1) * vol_usd  per candle
+#    net_pct   = sum(net_usd) / sum(vol_usd) * 100
+#
+#    Window: 72h (3 hari), 24h, 6h dari candle_1h
+#            3h dari candle_15m (lebih granular)
+#
+#  Tick-based (paling real-time, 15 menit terakhir):
+#    Langsung dari get_trades() — sisi buy vs sell dalam USD
+#    Membutuhkan fillTime timestamp (sudah ditambah di v9.10)
+#
+#  Pattern yang dideteksi:
+#  ─────────────────────────────────────────────────
+#  1. WHALE ACCUMULATION FUNNEL (sinyal terkuat):
+#     72h: netral/sedikit negatif (whale suppress price)
+#     24h: mulai positif (akumulasi fase tengah)
+#      6h: positif kuat (hampir selesai, siap pump)
+#     → Pola "V-shape" dalam net flow = pre-pump template
+#
+#  2. FULL ALIGNMENT BULLISH:
+#     72h, 24h, 6h semua positif → momentum kuat
+#
+#  3. DISTRIBUSI SISTEMATIS (hard block):
+#     72h, 24h, 6h semua negatif melewati threshold → keluar
+#
+#  4. FLOW ACCELERATION:
+#     6h rate > 24h rate → tekanan beli makin kencang
+
+def _candle_net_flow(candles):
+    """
+    Hitung net flow dari list candle.
+    Return: (net_usd, net_pct, buy_usd, sell_usd)
+    net_pct range: [-100%, +100%]
+    """
+    buy_usd  = 0.0
+    sell_usd = 0.0
+    for c in candles:
+        rng = c["high"] - c["low"]
+        buy_ratio = (c["close"] - c["low"]) / rng if rng > 0 else 0.5
+        b = buy_ratio * c["volume_usd"]
+        s = (1.0 - buy_ratio) * c["volume_usd"]
+        buy_usd  += b
+        sell_usd += s
+    total  = buy_usd + sell_usd
+    net    = buy_usd - sell_usd
+    net_pct = net / total * 100 if total > 0 else 0.0
+    return net, net_pct, buy_usd, sell_usd
+
+
+def _tick_net_flow(trades, window_minutes=15):
+    """
+    Hitung net flow dari trade ticks dalam window menit terakhir.
+    Return: (net_usd, net_pct, buy_usd, sell_usd, trade_count)
+    """
+    if not trades:
+        return 0.0, 0.0, 0.0, 0.0, 0
+    now_ms  = int(time.time() * 1000)
+    cutoff  = now_ms - window_minutes * 60 * 1000
+    # Filter by timestamp jika tersedia, jika tidak gunakan semua trades
+    has_ts  = any(t.get("ts_ms", 0) > 0 for t in trades)
+    recent  = [t for t in trades if t.get("ts_ms", 0) > cutoff] if has_ts else trades
+    if not recent:
+        recent = trades  # fallback: gunakan semua jika tidak ada yang masuk window
+    buy_usd  = sum(t["size"] * t["price"] for t in recent if "buy"  in t.get("side", ""))
+    sell_usd = sum(t["size"] * t["price"] for t in recent if "sell" in t.get("side", ""))
+    total    = buy_usd + sell_usd
+    net      = buy_usd - sell_usd
+    net_pct  = net / total * 100 if total > 0 else 0.0
+    return net, net_pct, buy_usd, sell_usd, len(recent)
+
+
+def _classify_flow(net_pct):
+    """Klasifikasi net_pct menjadi label."""
+    if net_pct > CONFIG["nf_strong_buy"]:  return "STRONG_BUY"
+    if net_pct > CONFIG["nf_buy"]:         return "BUY"
+    if net_pct > -CONFIG["nf_neutral_max"]: return "NEUTRAL"
+    if net_pct > CONFIG["nf_strong_sell"]: return "SELL"
+    return "STRONG_SELL"
+
+
+def layer_net_flow(candles_1h, candles_15m, trades):
+    """
+    GC-6: Multi-TF Net Flow Layer.
+
+    Return: (score, signals, flow_data, should_block)
+    score range: dapat negatif (penalti) hingga max 25 poin.
+    should_block: True jika distribusi sistematis di semua TF.
+    flow_data: dict berisi semua data flow untuk alert Telegram.
+    """
+    score, sigs = 0, []
+    flow_data   = {
+        "72h": {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
+        "24h": {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
+        "6h":  {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
+        "3h":  {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
+        "15m": {"net_pct": 0, "net_usd": 0, "label": "NO_DATA", "count": 0},
+        "has_data": False,
+    }
+    should_block = False
+
+    # ── Candle-based flow ─────────────────────────────────────
+    pct_72h = pct_24h = pct_6h = pct_3h = None
+
+    if len(candles_1h) >= 72:
+        net, pct, buy, sell = _candle_net_flow(candles_1h[-72:])
+        pct_72h = pct
+        flow_data["72h"] = {
+            "net_pct": round(pct, 1), "net_usd": round(net),
+            "buy_usd": round(buy),   "sell_usd": round(sell),
+            "label":   _classify_flow(pct),
+        }
+
+    if len(candles_1h) >= 24:
+        net, pct, buy, sell = _candle_net_flow(candles_1h[-24:])
+        pct_24h = pct
+        flow_data["24h"] = {
+            "net_pct": round(pct, 1), "net_usd": round(net),
+            "buy_usd": round(buy),   "sell_usd": round(sell),
+            "label":   _classify_flow(pct),
+        }
+
+    if len(candles_1h) >= 6:
+        net, pct, buy, sell = _candle_net_flow(candles_1h[-6:])
+        pct_6h = pct
+        flow_data["6h"] = {
+            "net_pct": round(pct, 1), "net_usd": round(net),
+            "buy_usd": round(buy),   "sell_usd": round(sell),
+            "label":   _classify_flow(pct),
+        }
+
+    if candles_15m and len(candles_15m) >= 12:
+        net, pct, buy, sell = _candle_net_flow(candles_15m[-12:])
+        pct_3h = pct
+        flow_data["3h"] = {
+            "net_pct": round(pct, 1), "net_usd": round(net),
+            "buy_usd": round(buy),   "sell_usd": round(sell),
+            "label":   _classify_flow(pct),
+        }
+
+    # ── Tick-based flow (15 menit) ────────────────────────────
+    pct_15m = None
+    if trades:
+        net, pct, buy, sell, cnt = _tick_net_flow(trades, window_minutes=15)
+        pct_15m = pct
+        flow_data["15m"] = {
+            "net_pct": round(pct, 1), "net_usd": round(net),
+            "buy_usd": round(buy),    "sell_usd": round(sell),
+            "label":   _classify_flow(pct), "count": cnt,
+        }
+
+    # Tandai ada data
+    flow_data["has_data"] = (pct_24h is not None)
+
+    if not flow_data["has_data"]:
+        return 0, [], flow_data, False
+
+    # ════════════════════════════════════════════════════════
+    #  GATE: Distribusi Sistematis di Semua TF
+    # ════════════════════════════════════════════════════════
+    if (pct_72h is not None
+            and pct_72h < CONFIG["nf_gate_72h"]
+            and pct_24h < CONFIG["nf_gate_24h"]
+            and pct_6h  < CONFIG["nf_gate_6h"]):
+        should_block = True
+        sigs.append(
+            f"🚨 NET FLOW DISTRIBUSI: 72h={pct_72h:+.1f}% "
+            f"24h={pct_24h:+.1f}% 6h={pct_6h:+.1f}% — whale keluar semua TF"
+        )
+        return score, sigs, flow_data, should_block
+
+    # ════════════════════════════════════════════════════════
+    #  SCORING
+    # ════════════════════════════════════════════════════════
+
+    # ── 1. Whale Accumulation Funnel (sinyal paling kuat) ─────
+    # Pattern: 72h netral/tipis negatif → 24h mulai positif → 6h kuat positif
+    # Ini adalah pola yang paling sering mendahului pump besar
+    if (pct_72h is not None
+            and CONFIG["nf_whale_72h_min"] <= pct_72h <= CONFIG["nf_whale_72h_max"]
+            and pct_24h is not None and pct_24h >= CONFIG["nf_whale_24h_min"]
+            and pct_6h  is not None and pct_6h  >= CONFIG["nf_whale_6h_min"]):
+        score += 20
+        sigs.append(
+            f"🐋 WHALE FUNNEL: 72h={pct_72h:+.1f}% → 24h={pct_24h:+.1f}% → "
+            f"6h={pct_6h:+.1f}% — akumulasi 3 hari terkonfirmasi!"
+        )
+
+    # ── 2. Full Alignment Bullish (semua TF positif) ──────────
+    elif (pct_72h is not None and pct_72h > CONFIG["nf_buy"]
+            and pct_24h is not None and pct_24h > CONFIG["nf_buy"]
+            and pct_6h  is not None and pct_6h  > CONFIG["nf_buy"]):
+        score += 15
+        sigs.append(
+            f"✅ NET FLOW BULLISH: 72h={pct_72h:+.1f}% "
+            f"24h={pct_24h:+.1f}% 6h={pct_6h:+.1f}% — semua TF buy dominan"
+        )
+
+    # ── 3. Partial Alignment ──────────────────────────────────
+    else:
+        # 24h + 6h positif (72h mungkin kurang data atau negatif ringan)
+        if (pct_24h is not None and pct_24h > CONFIG["nf_buy"]
+                and pct_6h is not None and pct_6h > CONFIG["nf_buy"]):
+            score += 10
+            sigs.append(
+                f"✅ Net Flow 24h={pct_24h:+.1f}% & 6h={pct_6h:+.1f}% positif — "
+                f"akumulasi mid-term"
+            )
+
+        # Hanya 6h positif kuat (shift baru terjadi)
+        elif pct_6h is not None and pct_6h > CONFIG["nf_strong_buy"]:
+            score += 7
+            sigs.append(
+                f"Net Flow 6h={pct_6h:+.1f}% — buying pressure naik tiba-tiba"
+            )
+        elif pct_6h is not None and pct_6h > CONFIG["nf_buy"]:
+            score += 4
+            sigs.append(f"Net Flow 6h={pct_6h:+.1f}% — sedikit buy dominant")
+
+        # 72h negatif sedang + 24h mulai membaik = early whale pattern
+        if (pct_72h is not None and CONFIG["nf_strong_sell"] < pct_72h < 0
+                and pct_24h is not None and pct_24h > CONFIG["nf_buy"]):
+            score += 5
+            sigs.append(
+                f"📈 Flow shifting: 72h={pct_72h:+.1f}% → 24h={pct_24h:+.1f}% "
+                f"— whale mulai akumulasi"
+            )
+
+    # ── 4. Penalti TF negatif ─────────────────────────────────
+    if pct_72h is not None:
+        if pct_72h < CONFIG["nf_strong_sell"]:
+            score -= 12
+            sigs.append(f"⚠️ Net Flow 72h={pct_72h:+.1f}% — distribusi besar 3 hari")
+        elif pct_72h < CONFIG["nf_sell"]:
+            score -= 6
+            sigs.append(f"Net Flow 72h={pct_72h:+.1f}% — tekanan jual 3 hari")
+
+    if pct_24h is not None:
+        if pct_24h < CONFIG["nf_strong_sell"]:
+            score -= 10
+            sigs.append(f"⚠️ Net Flow 24h={pct_24h:+.1f}% — distribusi aktif hari ini")
+        elif pct_24h < CONFIG["nf_sell"]:
+            score -= 5
+
+    # ── 5. Flow Acceleration (6h rate > 24h rate) ─────────────
+    if pct_6h is not None and pct_24h is not None:
+        # Annualize: 6h → per hari = *4; 24h sudah per hari
+        rate_6h_daily  = pct_6h  * 4
+        rate_24h_daily = pct_24h
+        if rate_6h_daily > rate_24h_daily + 10 and pct_6h > 0:
+            score += 3
+            sigs.append(
+                f"⚡ Flow akselerasi: 6h={pct_6h:+.1f}% >> 24h={pct_24h:+.1f}% "
+                f"— tekanan beli makin kencang"
+            )
+
+    # ── 6. Real-time ticks 15m bonus ─────────────────────────
+    if pct_15m is not None and flow_data["15m"]["count"] >= 10:
+        if pct_15m > CONFIG["nf_strong_buy"]:
+            score += 4
+            sigs.append(
+                f"✅ Ticks 15m={pct_15m:+.1f}% ({flow_data['15m']['count']} trades) "
+                f"— beli dominan real-time"
+            )
+        elif pct_15m > CONFIG["nf_buy"]:
+            score += 2
+        elif pct_15m < CONFIG["nf_strong_sell"]:
+            score -= 5
+            sigs.append(
+                f"⚠️ Ticks 15m={pct_15m:+.1f}% — jual dominan sekarang"
+            )
+        elif pct_15m < CONFIG["nf_sell"]:
+            score -= 2
+
+    return min(score, CONFIG["max_netflow_score"]), sigs, flow_data, should_block
 
 
 def calc_entry(candles_1h):
@@ -1593,7 +1812,6 @@ def calc_entry(candles_1h):
     entry  = min(support * 1.002, cur * 0.998)
     sl     = max(entry - CONFIG["atr_sl_mult"] * atr, entry * 0.88)
 
-    # BUG-F FIX: gunakan find_resistance_targets, bukan find_swing_targets
     t1_res, t2_res = find_resistance_targets(candles_1h, cur)
     t1_atr         = entry + CONFIG["atr_t1_mult"] * atr
     t1             = t1_res if t1_res > cur * 1.05 else t1_atr
@@ -1625,28 +1843,17 @@ def calc_entry(candles_1h):
 #  🛡️  GATE: SUDAH PUMP (BUG-D FIX)
 # ══════════════════════════════════════════════════════════════
 def is_already_pumped(oi_chg24h, vol_chg24h_pct, chg_24h, oi_valid):
-    """
-    BUG-D FIX: Gate "sudah pump" yang kuat.
-    
-    BARD di v9.4: OI 24h +38.57% + Volume +214% → BUKAN pre-pump, ini POST-PUMP.
-    Sekarang: kombinasi OI besar + volume masif + harga naik → block langsung.
-    
-    Return: (should_block, reason)
-    """
     if not oi_valid:
-        # Jika OI tidak valid, pakai hanya price + volume
         if chg_24h > 15 and vol_chg24h_pct > 150:
             return True, f"Harga +{chg_24h:.0f}% + Volume +{vol_chg24h_pct:.0f}% — pump sudah terjadi"
         return False, ""
 
-    # OI naik masif + harga naik = posisi dibuka SETELAH pump, bukan sebelum
     if oi_chg24h > 35 and chg_24h > 3:
         return True, f"OI 24h +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}% — TERLAMBAT (post-pump)"
     if oi_chg24h > 25 and chg_24h > 5:
         return True, f"OI 24h +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}% — pump sudah berjalan"
     if oi_chg24h > 15 and chg_24h > 10:
         return True, f"OI +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}% — momentum sudah habis"
-    # Volume masif + harga naik tanpa OI validation
     if vol_chg24h_pct > 200 and chg_24h > 8:
         return True, f"Volume +{vol_chg24h_pct:.0f}% + Harga +{chg_24h:.0f}% — crowd sudah masuk"
     return False, ""
@@ -1662,6 +1869,34 @@ def master_score(symbol, ticker, tickers_dict):
 
     if len(c1h) < 48 or len(c15m) < 20:
         return None
+
+    # ══════════════════════════════════════════════════════════
+    #  🔴 v9.9 BUG #2 FIX: DEAD ACTIVITY GATE
+    # ══════════════════════════════════════════════════════════
+    # MASALAH: METAUSDT Flow 5 menit = $0/$0 tapi dapat skor tinggi
+    # karena scanner membaca RVOL/Volume dari candle HISTORIS (bukan sekarang).
+    # Coin yang sudah selesai cycle atau sedang tidur bisa lolos karena
+    # layer_volume_intelligence() melihat rata-rata jam lalu, bukan candle terkini.
+    #
+    # FIX: Bandingkan volume candle 1h TERKINI vs avg volume 6 candle sebelumnya.
+    # Jika candle terkini < 10% dari avg → coin mati/tidur saat ini → block.
+    #
+    # Threshold 10% sangat konservatif:
+    # - Sepi biasa: 30-60% dari avg → TIDAK diblock (masih bisa pump)
+    # - Coin mati:  < 10% dari avg  → DIBLOCK
+    # - METAUSDT pola: Flow $0 = 0% dari avg → jelas diblock
+    if len(c1h) >= 7:
+        last_vol     = c1h[-1]["volume_usd"]            # candle 1h paling baru
+        avg_vol_6h   = sum(c["volume_usd"] for c in c1h[-7:-1]) / 6  # 6 candle sebelumnya
+        if avg_vol_6h > 0:
+            activity_ratio = last_vol / avg_vol_6h
+            if activity_ratio < CONFIG["dead_activity_threshold"]:
+                log.info(
+                    f"  {symbol}: GATE dead activity "
+                    f"(last_1h=${last_vol:.0f} = {activity_ratio:.1%} avg_6h=${avg_vol_6h:.0f})"
+                )
+                return None
+    # ══════════════════════════════════════════════════════════
 
     funding = get_funding(symbol)
 
@@ -1695,18 +1930,10 @@ def master_score(symbol, ticker, tickers_dict):
         log.info(f"  {symbol}: GATE funding ekstrem ({funding:.5f})")
         return None
 
-    # ── FIX-2 v9.8: VOLUME EXHAUSTION GATE ────────────────────────────
-    # MEME di v9.5: Volume 24h -73.72% lolos karena RVOL historis tinggi.
-    # Scanner tidak memeriksa apakah volume SEKARANG sedang collapse.
-    # Coin dengan volume collapse tidak akan pump — tidak ada yang beli.
-    #
-    # Logika: volume 24h sekarang vs rata-rata vol ticker dalam base pool
-    # Proxy: gunakan change volume dari ticker jika tersedia
     try:
-        vol_change_24h = float(ticker.get("volChange24h", 0))  # Bitget field
+        vol_change_24h = float(ticker.get("volChange24h", 0))
     except:
         vol_change_24h = 0
-    # Fallback: estimasi dari candle jika field tidak tersedia
     if vol_change_24h == 0 and len(c1h) >= 48:
         vol_24h_now  = sum(c["volume_usd"] for c in c1h[-24:])
         vol_24h_prev = sum(c["volume_usd"] for c in c1h[-48:-24])
@@ -1717,7 +1944,6 @@ def master_score(symbol, ticker, tickers_dict):
         log.info(f"  {symbol}: GATE volume exhaustion ({vol_change_24h:.0f}% 24h)")
         return None
     elif vol_change_24h < -45:
-        # Bukan block, tapi penalti besar akan diterapkan di scoring
         log.info(f"  {symbol}: Volume turun {vol_change_24h:.0f}% — penalti aktif")
 
     if len(c1h) >= 6:
@@ -1769,8 +1995,7 @@ def master_score(symbol, ticker, tickers_dict):
         oi_chg1h, oi_chg24h, oi_valid = get_oi_changes(symbol, oi_value)
 
     # BUG-D FIX: Gate "sudah pump"
-    # Estimasi vol_chg dari ticker (tidak punya historical, pakai perubahan OI sebagai proxy)
-    vol_chg_proxy = oi_chg24h * 3 if oi_valid else 0  # rough proxy
+    vol_chg_proxy = oi_chg24h * 3 if oi_valid else 0
     pumped, pump_reason = is_already_pumped(oi_chg24h, vol_chg_proxy, chg_24h, oi_valid)
     if pumped:
         log.info(f"  {symbol}: GATE already pumped — {pump_reason}")
@@ -1778,7 +2003,6 @@ def master_score(symbol, ticker, tickers_dict):
 
     # Layer 4: Positioning
     pos_sc, pos_sigs, ls_ratio, ls_block = layer_positioning(symbol, funding, oi_chg1h)
-    # FIX-4: Hard block jika L/S > 3.0 (tidak ada squeeze potential sama sekali)
     if ls_block:
         log.info(f"  {symbol}: GATE L/S overcrowded kritis (L/S={ls_ratio:.2f})")
         return None
@@ -1807,7 +2031,7 @@ def master_score(symbol, ticker, tickers_dict):
         return None
     score += liq_sc;  sigs += liq_sigs;  bd["liq"] = liq_sc
 
-    # RSI (untuk GC-3 Linea Signature)
+    # RSI
     rsi_1h = get_rsi(c1h[-48:] if len(c1h) >= 48 else c1h)
 
     # GC-3: Linea Signature Layer
@@ -1815,7 +2039,6 @@ def master_score(symbol, ticker, tickers_dict):
         c1h, oi_chg1h, oi_chg24h, oi_valid,
         ls_ratio, funding, chg_24h
     )
-    # RSI bonus untuk Linea Signature
     if linea_components >= 2 and rsi_1h < CONFIG["linea_rsi_max"]:
         linea_sc += 5
         linea_sigs.append(f"✅ [Linea-4] RSI {rsi_1h:.1f} — oversold, siap reversal")
@@ -1834,15 +2057,37 @@ def master_score(symbol, ticker, tickers_dict):
             f"div={oi_accel_data['divergence']}"
         )
 
-    # OI adjustments (v9.5: threshold diperketat BUG-B + BUG-C)
+    # GC-6: Multi-TF Net Flow Layer
+    # Trades sudah diambil di calc_whale() — reuse dari sana agar tidak dobel request
+    # Tapi calc_whale dipanggil sebelumnya dan trades tidak di-pass ke sini.
+    # Ambil trades sekali lagi (di-cache tidak ada untuk trades, tapi panggilan cepat).
+    # TODO: refactor agar trades diambil sekali dan di-pass ke keduanya.
+    trades_for_flow = get_trades(symbol, 500)
+    nf_sc, nf_sigs, nf_data, nf_block = layer_net_flow(c1h, c15m, trades_for_flow)
+    if nf_block:
+        log.info(
+            f"  {symbol}: GATE net flow distribusi sistematis "
+            f"(72h={nf_data['72h']['net_pct']:+.1f}% "
+            f"24h={nf_data['24h']['net_pct']:+.1f}% "
+            f"6h={nf_data['6h']['net_pct']:+.1f}%)"
+        )
+        return None
+    score += nf_sc;  sigs += nf_sigs;  bd["netflow"] = nf_sc
+    log.info(
+        f"  [GC-6] {symbol}: nf={nf_sc:+d} "
+        f"72h={nf_data['72h']['net_pct']:+.1f}% "
+        f"24h={nf_data['24h']['net_pct']:+.1f}% "
+        f"6h={nf_data['6h']['net_pct']:+.1f}% "
+        f"15m={nf_data['15m']['net_pct']:+.1f}%"
+    )
+
+    # OI adjustments
     if oi_value > 0:
         if oi_valid:
-            # Gate distribusi ekstrem
             if rvol > 4.0 and oi_chg24h < -20:
                 log.info(f"  {symbol}: GATE distribusi ekstrem (RVOL {rvol:.1f}x, OI 24h {oi_chg24h:.1f}%)")
                 return None
 
-            # BUG-B FIX: OI 24h threshold lebih agresif & bertingkat
             if oi_chg24h < -20:
                 score -= 25; sigs.append(f"⚠️ OI 24h turun {oi_chg24h:.1f}% — distribusi masif")
             elif oi_chg24h < -10:
@@ -1852,7 +2097,6 @@ def master_score(symbol, ticker, tickers_dict):
             elif oi_chg24h < -3:
                 score -= 5;  sigs.append(f"OI 24h {oi_chg24h:.1f}% — sedikit berkurang")
 
-            # BUG-C FIX: OI 1h threshold bertingkat
             if oi_chg1h < -8:
                 score -= 20; sigs.append(f"🚨 OI 1h turun {oi_chg1h:.1f}% — distribusi CEPAT!")
             elif oi_chg1h < -5:
@@ -1862,17 +2106,14 @@ def master_score(symbol, ticker, tickers_dict):
             elif oi_chg1h > 5:
                 score += 5;  sigs.append(f"✅ OI 1h naik {oi_chg1h:.1f}% — posisi baru masuk")
 
-            # BUG-B+C: HARD BLOCK — multi-TF OI decline
             if oi_chg24h < -3 and oi_chg1h < -2:
                 log.info(f"  {symbol}: GATE multi-TF OI decline ({oi_chg24h:.1f}%/{oi_chg1h:.1f}%)")
                 return None
 
-            # Multi-TF OI decline gate (v9.3 dipertahankan)
             if oi_chg24h < -1.0 and oi_chg1h < -0.5:
                 score -= 12
                 sigs.append(f"⚠️ OI turun semua TF (24h:{oi_chg24h:.1f}% 1h:{oi_chg1h:.1f}%)")
 
-            # Volume spike + OI drop
             if rvol > 1.5 and oi_chg24h < -15:
                 score -= 18; sigs.append(f"🚨 Vol spike ({rvol:.1f}x) + OI {oi_chg24h:.1f}% — distribusi kuat")
             elif rvol > 1.5 and oi_chg24h < -10:
@@ -1881,21 +2122,16 @@ def master_score(symbol, ticker, tickers_dict):
                 score += 8;  sigs.append(f"✅ Vol naik + OI naik — akumulasi kuat")
 
         else:
-            # ── FIX-3 v9.8: OI-INVALID FALLBACK PROTECTION ───────────────────
-            # BANANA v9.5: OI -15.44% lolos karena oi_valid=False → penalti 0
-            # Saat tidak ada OI history, scanner buta total terhadap distribusi.
-            # Fallback: estimasi kondisi OI dari sinyal proxy yang tersedia.
-            sigs.append("ℹ️ OI history belum tersedia (run pertama)")
+            # ── FIX-3 v9.8 DIPERTAHANKAN + DIPERKUAT ──────────────────────────
+            # Saat oi_valid=False (hanya run pertama sekarang, bukan setiap run):
+            sigs.append("ℹ️ OI history belum tersedia (run pertama — akan aktif mulai run ke-2)")
 
-            # Proxy 1: Volume 24h vs OI current
-            # Jika OI sangat rendah dibanding volume = posisi tidak dibuka = tidak pre-pump
             if oi_value > 0 and vol_24h > 0:
                 oi_to_vol = oi_value / vol_24h
                 if oi_to_vol < 0.05:
                     score -= 10
                     sigs.append(f"⚠️ OI/Vol ratio sangat rendah ({oi_to_vol:.3f}) — posisi tidak dibangun")
 
-            # Proxy 2: Volume change dari candles (sudah dihitung sebelumnya)
             if vol_change_24h < -40:
                 score -= 15
                 sigs.append(f"⚠️ Volume 24h {vol_change_24h:.0f}% + OI unknown — distribusi tidak dapat dikonfirmasi")
@@ -1903,16 +2139,18 @@ def master_score(symbol, ticker, tickers_dict):
                 score -= 8
                 sigs.append(f"Volume 24h {vol_change_24h:.0f}% — interest menurun")
 
-            # Proxy 3: L/S ratio sebagai proxy OI bias
-            # Jika L/S > 1.3 saat OI unknown = longs dominan tanpa konfirmasi = high risk
             if ls_ratio is not None and ls_ratio > 1.3:
                 score -= 8
                 sigs.append(f"⚠️ L/S {ls_ratio:.2f} + OI unknown — distribusi long tidak dapat dikonfirmasi")
 
-            # Proxy 4: Funding positif + OI unknown = longs masuk tapi arah tidak jelas
             if funding > 0.0003:
                 score -= 5
                 sigs.append(f"Funding {funding:.5f} + OI unknown — longs dominan tanpa validasi OI")
+
+            # v9.9: Tambahan penalty untuk run pertama — lebih konservatif
+            # Tanpa OI history sama sekali, composite threshold dinaikkan implisit
+            score -= 10
+            sigs.append("⚠️ Run pertama: OI baseline belum ada — -10 poin konservatif")
 
         if len(c1h) >= 24:
             vol_24h_candles  = [c["volume_usd"] for c in c1h[-24:]]
@@ -1943,21 +2181,15 @@ def master_score(symbol, ticker, tickers_dict):
                 score = max(0, score - 10)
                 sigs.append(f"⚠️ Range 24h {range24:.0f}% — pump sudah berjalan?")
 
-    # Time multiplier
     tmult, tsig = get_time_mult()
-    # BUG-G FIX: jangan cap score sebelum composite — biarkan raw score
-    # mencerminkan semua signal. Cap hanya pada composite akhir.
     raw_score = int(score * tmult)
     if tsig:
         sigs.append(tsig)
 
-    # Pump probability
     prob = compute_pump_probability(c1h, ws)
     bd["prob_score"] = round(prob["probability_score"] * 100, 1)
     bd["prob_class"] = prob["classification"]
 
-    # BUG-G FIX: composite dihitung dari raw_score (tidak di-cap dulu)
-    # Ini mencegah overflow artifisial seperti ALGO score=100 di v9.4
     composite = int(
         min(raw_score, 100) * CONFIG["composite_w_layer"]
         + prob["probability_score"] * 100 * CONFIG["composite_w_prob"]
@@ -2005,6 +2237,8 @@ def master_score(symbol, ticker, tickers_dict):
         "linea_components": linea_components,
         "oi_accel_score":  oi_accel_sc,
         "oi_accel_data":   oi_accel_data,
+        "nf_data":         nf_data,
+        "nf_score":        nf_sc,
     }
 
 
@@ -2048,8 +2282,36 @@ def build_alert(r, rank=None):
         liq_str = (f"<b>Liquidation:</b> Long ${r.get('long_liq',0)/1e3:.0f}K | "
                    f"Short ${r.get('short_liq',0)/1e3:.0f}K (30m)\n")
 
+    # v9.10: Net Flow section
+    nf_str = ""
+    nfd = r.get("nf_data", {})
+    if nfd.get("has_data"):
+        def _flow_icon(label):
+            return {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "NEUTRAL": "⚪",
+                    "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(label, "⚪")
+
+        f72 = nfd.get("72h", {}); f24 = nfd.get("24h", {})
+        f6  = nfd.get("6h",  {}); f15 = nfd.get("15m", {})
+        nf72_icon = _flow_icon(f72.get("label", "NO_DATA"))
+        nf24_icon = _flow_icon(f24.get("label", "NO_DATA"))
+        nf6_icon  = _flow_icon(f6.get("label",  "NO_DATA"))
+        nf15_icon = _flow_icon(f15.get("label", "NO_DATA"))
+        nf_score  = r.get("nf_score", 0)
+        nf_str = (
+            f"<b>Net Flow   :</b> [{nf_score:+d}poin]\n"
+            f"  {nf72_icon}72h:{f72.get('net_pct',0):+.1f}%  "
+            f"{nf24_icon}24h:{f24.get('net_pct',0):+.1f}%  "
+            f"{nf6_icon}6h:{f6.get('net_pct',0):+.1f}%  "
+            f"{nf15_icon}15m:{f15.get('net_pct',0):+.1f}%\n"
+        )
+
+    # v9.9: Tampilkan warning jika OI belum valid (run pertama)
+    oi_warning = ""
+    if not bd.get("oi_valid", True):
+        oi_warning = "⚠️ <i>OI baseline belum tersedia (run pertama)</i>\n"
+
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.8</b>\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.10</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']}\n"
         f"<b>Composite :</b> {comp}/100  {bar}\n"
         f"<b>Layer Score:</b> {sc}/100\n"
@@ -2057,12 +2319,15 @@ def build_alert(r, rank=None):
         f"<b>RSI 1h     :</b> {r.get('rsi_1h', 0):.1f}\n"
         f"{linea_str}"
         f"{accel_str}"
+        f"{oi_warning}"
         f"<b>Sektor     :</b> {r['sector']}\n"
         f"<b>Harga      :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h | {r['chg_7d']:+.1f}% 7d)\n"
         f"<b>Vol 24h    :</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
         f"<b>6h Vol     :</b> ${r['avg_vol_6h']:.0f}/h  | 6h Range: {r['range_6h']:.1f}%\n"
         f"<b>Coiling    :</b> {r['coiling']}h  | BBW: {r['bbw_val']:.1f}%\n"
-        f"<b>OI 24h/1h :</b> {r['oi_change_24h']:+.1f}% / {r.get('oi_change_1h',0):+.1f}%\n"
+        f"<b>OI 24h/1h :</b> {r['oi_change_24h']:+.1f}% / {r.get('oi_change_1h',0):+.1f}%"
+        f"  [valid:{bd.get('oi_valid','?')}]\n"
+        f"{nf_str}"
         f"{liq_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🐋 <b>WHALE SCORE: {r['ws']}/100</b>\n"
@@ -2095,7 +2360,7 @@ def build_alert(r, rank=None):
         f"4H:{bd.get('tf4h',0)} Ctx:{bd.get('ctx',0)} "
         f"Whale:{bd.get('whale',0)} Liq:{bd.get('liq',0)} "
         f"Linea:{bd.get('linea',0)} Accel:{bd.get('oi_accel',0)} "
-        f"Stealth:{bd.get('stealth',0)}\n"
+        f"Flow:{bd.get('netflow',0)} Stealth:{bd.get('stealth',0)}\n"
         f"  OI valid:{bd.get('oi_valid','?')} RSI:{bd.get('rsi_1h','?')} "
         f"[Prob] MVS:{pm.get('max_vol_spike','?')}x "
         f"Irr:{pm.get('vol_irregularity','?')} "
@@ -2106,7 +2371,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v9.8 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v9.10 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp     = r.get("composite_score", r["score"])
         bar      = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -2117,8 +2382,9 @@ def build_summary(results):
         prob_cls = r.get("prob_class", "?")
         rsi      = r.get("rsi_1h", 0)
         linea    = f" ⭐L{r.get('linea_components',0)}" if r.get("linea_components", 0) >= 2 else ""
+        oi_tag   = " ⚠️OI?" if not r.get("bd", {}).get("oi_valid", True) else ""
         msg += (
-            f"{i}. <b>{r['symbol']}</b> [C:{comp} S:{r['score']} {bar}]{linea}\n"
+            f"{i}. <b>{r['symbol']}</b> [C:{comp} S:{r['score']} {bar}]{linea}{oi_tag}\n"
             f"   🐋{r['ws']} | RVOL:{r['rvol']:.1f}x | {vol} | "
             f"T1:+{t1p:.0f}% | {prob:.0f}% {prob_cls} | RSI:{rsi:.0f}\n"
         )
@@ -2126,15 +2392,9 @@ def build_summary(results):
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔍  GC-4: STRATIFIED PRE-FILTER (fix "80 coin yang sama")
+#  🔍  GC-4: STRATIFIED PRE-FILTER
 # ══════════════════════════════════════════════════════════════
 def calc_volume_anomaly_score(ticker):
-    """
-    Proxy volume anomaly dari data ticker saja (tanpa API candle tambahan).
-    Deteksi: volume tinggi TAPI harga belum naik = akumulasi tersembunyi.
-    
-    Prinsip: Jika volume besar tapi harga flat → smart money masuk diam-diam.
-    """
     try:
         cur     = float(ticker.get("lastPr",      0))
         high24h = float(ticker.get("high24h",     cur))
@@ -2149,10 +2409,9 @@ def calc_volume_anomaly_score(ticker):
 
     vas = 0
 
-    # Volume besar relatif terhadap range = akumulasi diam
     range24 = (high24h - low24h) / low24h * 100 if low24h > 0 else 99
     if range24 > 0:
-        vol_per_range = vol / range24   # semakin besar = volume padat per % range
+        vol_per_range = vol / range24
         if vol_per_range > 500_000:
             vas += 8
         elif vol_per_range > 200_000:
@@ -2160,20 +2419,17 @@ def calc_volume_anomaly_score(ticker):
         elif vol_per_range > 50_000:
             vas += 2
 
-    # Harga mendekati low 24h tapi volume besar = beli di bawah
     dist_from_low = (cur - low24h) / low24h * 100 if low24h > 0 else 99
     if dist_from_low < 5 and vol > 100_000:
-        vas += 7   # harga di dekat low tapi ada yang beli
+        vas += 7
     elif dist_from_low < 10 and vol > 50_000:
         vas += 4
 
-    # Volume besar tapi harga tidak naik signifikan = tersembunyi
     if vol > 500_000 and -3 <= chg24h <= 5:
         vas += 5
     elif vol > 200_000 and -5 <= chg24h <= 3:
         vas += 3
 
-    # Range sempit = konsolidasi (potensi breakout)
     if range24 < 5:
         vas += 4
     elif range24 < 10:
@@ -2183,7 +2439,6 @@ def calc_volume_anomaly_score(ticker):
 
 
 def pre_score_ticker(ticker):
-    """Quick scoring sebelum deep scan (dipertahankan dari v9.4)."""
     try:
         cur     = float(ticker.get("lastPr",      0))
         high24h = float(ticker.get("high24h",     cur))
@@ -2222,7 +2477,6 @@ def pre_score_ticker(ticker):
 
 
 def load_wildcard_state():
-    """Load state rotasi wildcard (GC-4)."""
     try:
         p = CONFIG["wildcard_seed_file"]
         if os.path.exists(p):
@@ -2240,33 +2494,9 @@ def save_wildcard_state(state):
         pass
 
 def build_candidate_list(tickers):
-    """
-    v9.8: Whitelist-based candidate selection.
-
-    Arsitektur baru:
-    ─────────────────────────────────────────────────────
-    Pool sumber : WHITELIST_SYMBOLS (324 coin pilihan user)
-    Gantikan    : Dynamic scan 474 coin dengan STOCK_TICKERS filter
-
-    Keunggulan whitelist vs dynamic pool:
-    • Tidak ada coin sampah / stock ticker lolos
-    • Semua 324 coin dipantau SETIAP run (tidak ada yang terlewat)
-    • HOLO ada di whitelist → pasti di-scan setiap run
-    • Lebih cepat: 324 vs 474 deep scan candidates
-    • Tetap ada vol/chg filter dasar untuk skip coin tidak aktif
-
-    GC-4 Stratified bucket TETAP DIPAKAI di dalam whitelist:
-    • Bucket A (Spike):    coin dengan volume anomaly tertinggi
-    • Bucket B (Quality):  top pre-score dari whitelist
-    • Bucket C (Wildcard): rotasi dari sisa whitelist (tidak pernah skip)
-
-    Perbedaan vs v9.8: Bucket C sekarang dari sisa WHITELIST, bukan
-    pool 474 coin. Semua 324 coin mendapat giliran lebih sering.
-    """
     wc_state = load_wildcard_state()
     wc_state["run_count"] = wc_state.get("run_count", 0) + 1
 
-    # ── Base pool: whitelist ∩ tickers yang aktif di Bitget ──────────────
     base_pool = []
     not_found = []
     for sym in WHITELIST_SYMBOLS:
@@ -2284,10 +2514,9 @@ def build_candidate_list(tickers):
             price = float(t.get("lastPr",       0))
         except:
             continue
-        # Filter dasar: skip yang benar-benar tidak aktif
-        if vol   < CONFIG["pre_filter_vol"]:       continue  # vol < $1K = ghost coin
-        if vol   > CONFIG["max_vol_24h"]:          continue  # > $50M = too big
-        if abs(chg) > CONFIG["gate_chg_24h_max"]:  continue  # sudah pump > 30%
+        if vol   < CONFIG["pre_filter_vol"]:       continue
+        if vol   > CONFIG["max_vol_24h"]:          continue
+        if abs(chg) > CONFIG["gate_chg_24h_max"]:  continue
         if price <= 0:                              continue
         base_pool.append(sym)
 
@@ -2295,7 +2524,6 @@ def build_candidate_list(tickers):
         log.debug(f"Whitelist tidak ditemukan di Bitget: {not_found[:5]}... ({len(not_found)} total)")
     log.info(f"Whitelist pool: {len(base_pool)}/{len(WHITELIST_SYMBOLS)} coin aktif")
 
-    # ── BUCKET A: Volume Anomaly / Spike ─────────────────────────────────
     spike_scores = []
     for sym in base_pool:
         t   = tickers[sym]
@@ -2307,7 +2535,6 @@ def build_candidate_list(tickers):
     bucket_a = [x[0] for x in spike_scores[:CONFIG["bucket_spike"]]]
     a_set    = set(bucket_a)
 
-    # ── BUCKET B: Quality Pre-Score ───────────────────────────────────────
     quality_scores = []
     for sym in base_pool:
         if sym in a_set:
@@ -2320,10 +2547,6 @@ def build_candidate_list(tickers):
     bucket_b = [x[0] for x in quality_scores[:CONFIG["bucket_quality"]]]
     b_set    = set(bucket_b)
 
-    # ── BUCKET C: Whitelist Wildcard ──────────────────────────────────────
-    # Sisa dari whitelist yang tidak masuk A atau B.
-    # Karena pool sudah selektif (324 coin), Bucket C dari whitelist
-    # jauh lebih berharga dari sebelumnya (bukan dari 474 coin random).
     wildcard_pool = [
         sym for sym in base_pool
         if sym not in a_set and sym not in b_set
@@ -2336,7 +2559,6 @@ def build_candidate_list(tickers):
     wc_state["last_seen"] = bucket_c[:10]
     save_wildcard_state(wc_state)
 
-    # ── Gabung semua bucket ───────────────────────────────────────────────
     all_candidates, seen = [], set()
     for sym in bucket_a + bucket_b + bucket_c:
         if sym not in seen:
@@ -2351,7 +2573,6 @@ def build_candidate_list(tickers):
         f"Total={len(all_candidates)}"
     )
 
-    # Attach volume untuk log
     return [(sym, tickers[sym]) for sym in all_candidates if sym in tickers]
 
 
@@ -2359,7 +2580,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v9.8 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v9.10 — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
@@ -2368,10 +2589,8 @@ def run_scan():
 
     log.info(f"Total ticker: {len(tickers)}")
 
-    # GC-4: Stratified Pre-filter
     candidates = build_candidate_list(tickers)
 
-    # ── Deep scan ─────────────────────────────────────────────
     results = []
     for i, (sym, t) in enumerate(candidates):
         try:
@@ -2392,10 +2611,12 @@ def run_scan():
                 prob_cls = res["prob_class"]
                 linea    = res.get("linea_components", 0)
                 rsi      = res.get("rsi_1h", 0)
+                oi_v     = res.get("bd", {}).get("oi_valid", "?")
                 log.info(
                     f"  Score={res['score']} Comp={comp} W={res['ws']} "
                     f"RVOL={res['rvol']:.1f}x Prob={prob:.0f}% ({prob_cls}) "
                     f"Linea={linea}/5 RSI={rsi:.0f} "
+                    f"OI_valid={oi_v} "
                     f"T1=+{res['entry']['liq_pct']:.1f}%"
                 )
                 if (comp >= CONFIG["min_composite_alert"]
@@ -2414,7 +2635,6 @@ def run_scan():
 
         time.sleep(CONFIG["sleep_coins"])
 
-    # Sort by composite + linea bonus
     results.sort(
         key=lambda x: (
             x["composite_score"] + x.get("linea_components", 0) * 2,
@@ -2424,15 +2644,12 @@ def run_scan():
     )
     log.info(f"Lolos threshold: {len(results)} coin")
 
-    # v9.6 FIX: qualified filter diperluas dengan 3 jalur lolos
-    # Sebelumnya PLTRUSDT (Prob=80%, C=53) dan MBOXUSDT (Prob=72%, C=57) miss
-    # karena W<15 dan C<62. Prob tinggi harus menjadi jalur lolos independen.
     qualified = [
         r for r in results
-        if (r["ws"] >= CONFIG["min_whale_score"]        # jalur 1: whale kuat
-            or r["composite_score"] >= 62               # jalur 2: composite tinggi
-            or r["prob_score"] >= 0.75                  # jalur 3: prob Imminent Pump
-            or r.get("linea_components", 0) >= 3)       # jalur 4: Linea Signature kuat
+        if (r["ws"] >= CONFIG["min_whale_score"]
+            or r["composite_score"] >= 62
+            or r["prob_score"] >= 0.75
+            or r.get("linea_components", 0) >= 3)
     ]
 
     if not qualified:
@@ -2452,7 +2669,8 @@ def run_scan():
             log.info(
                 f"✅ Alert #{rank}: {r['symbol']} "
                 f"S={r['score']} C={r['composite_score']} W={r['ws']} "
-                f"Prob={r['prob_score']*100:.0f}% Linea={r.get('linea_components',0)}/5"
+                f"Prob={r['prob_score']*100:.0f}% Linea={r.get('linea_components',0)}/5 "
+                f"OI_valid={r.get('bd',{}).get('oi_valid','?')}"
             )
         time.sleep(2)
 
@@ -2464,10 +2682,9 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v9.8                            ║")
-    log.info("║  FIX-1+2: Stock blacklist + Vol Exhaustion Gate             ║")
-    log.info("║  FIX-3: OI-Invalid Fallback Protection            ║")
-    log.info("║  FIX-4: L/S Hard Block + penalti 2x       ║")
+    log.info("║  PRE-PUMP SCANNER v9.10                           ║")
+    log.info("║  GC-6: Multi-TF Net Flow (72h/24h/6h/15m)        ║")
+    log.info("║  Whale Funnel Pattern + Distribusi Gate           ║")
     log.info("╚═══════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
