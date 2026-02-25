@@ -401,7 +401,7 @@ def set_cooldown(sym):
 # ══════════════════════════════════════════════════════════════
 #  🌐  HTTP UTILITIES
 # ══════════════════════════════════════════════════════════════
-def safe_get(url, params=None, timeout=12):
+def safe_get(url, params=None, timeout=30):
     for attempt in range(2):
         try:
             r = requests.get(url, params=params, timeout=timeout)
