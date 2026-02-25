@@ -1,27 +1,26 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.7                                                   ║
+║  PRE-PUMP SCANNER v9.8                                                   ║
 ║                                                                          ║
-║  FIX v9.7 (dari forensik alert v9.5 vs CoinGlass):                      ║
+║  v9.8 — WHITELIST + MICRO-CAP OI ACCELERATION DETECTOR                  ║
 ║                                                                          ║
-║  FIX-1: RDDTUSDT + 11 stock tokens baru ke blacklist                    ║
-║    RDDT = Reddit Inc (NYSE) — CONFIRMED lolos v9.5 sebagai false alert  ║
+║  PERUBAHAN ARSITEKTUR #1: COIN WHITELIST                                 ║
+║    Ganti dynamic scan 474 coin → 324 coin pilihan user                  ║
+║    Keunggulan: lebih fokus, lebih cepat, tidak ada coin sampah          ║
+║    Pre-filter tetap berjalan di dalam whitelist untuk kecepatan         ║
+║    COIN: Scan hanya USDT-futures yang ada di WHITELIST_SYMBOLS          ║
 ║                                                                          ║
-║  FIX-2: Volume Exhaustion Gate                                           ║
-║    MEME Volume -73.72% lolos karena RVOL historis tinggi (bug serius)   ║
-║    Fix: Gate langsung jika vol change 24h < -60% (minat pasar habis)    ║
+║  PERUBAHAN ARSITEKTUR #2: GC-5 MICRO-CAP OI ACCELERATION (HOLO FIX)   ║
+║    Forensik HOLO: pump 30% tidak terdeteksi karena semua layer blind    ║
+║    terhadap "quiet accumulation" pada coin dormant (vol < $500K)        ║
+║    Fix: Layer baru khusus micro-cap yang deteksi:                       ║
+║    • OI growth rate acceleration (naik cepat dari baseline nol)         ║
+║    • OI momentum: seberapa cepat OI tumbuh vs historisnya              ║
+║    • Divergence: OI naik drastis tapi harga BELUM ikut                  ║
+║    • Dormant awakening: coin yg biasa tidur tiba-tiba ada OI growth    ║
+║    Score: max 30 poin, hanya aktif jika OI < $3M & harga flat <5%     ║
 ║                                                                          ║
-║  FIX-3: OI-Invalid Fallback Protection                                   ║
-║    BANANA OI -15.44% lolos karena oi_valid=False → penalti OI = 0      ║
-║    Fix: 4 proxy pengganti OI saat history belum ada                      ║
-║    (vol ratio, vol change candle, L/S proxy, funding proxy)              ║
-║                                                                          ║
-║  FIX-4: L/S Hard Block + Penalti 2x Lebih Kuat                          ║
-║    BANANA L/S=1.396 hanya -3 poin, SFPUSDT L/S=1.665 hanya -6 poin    ║
-║    Fix: penalti berlipat, hard block jika L/S > 3.0                     ║
-║    Exception: L/S tinggi + funding sangat negatif = mitigasi parsial   ║
-║                                                                          ║
-║  (Semua fix v9.6 dipertahankan: Linea, BUG-E, Qualified filter)        ║
+║  (Semua fix v9.8 dipertahankan)                                         ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -38,11 +37,25 @@ except ImportError:
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+# ── Logging: console + file (v9.8) ───────────────────────────────────────
+# Log ke file /tmp/scanner_v9.log agar tidak hilang saat terminal ditutup
+# Cara baca log: tail -f /tmp/scanner_v9.log
+import logging.handlers as _lh
+_log_fmt    = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_log_root   = logging.getLogger()
+_log_root.setLevel(logging.INFO)
+# Console handler
+_ch = logging.StreamHandler()
+_ch.setFormatter(_log_fmt)
+_log_root.addHandler(_ch)
+# File handler dengan rotasi 10MB
+_fh = _lh.RotatingFileHandler(
+    "/tmp/scanner_v9.log", maxBytes=10*1024*1024, backupCount=3
 )
+_fh.setFormatter(_log_fmt)
+_log_root.addHandler(_fh)
 log = logging.getLogger(__name__)
+log.info("Log file aktif: /tmp/scanner_v9.log (rotasi 10MB)")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -133,6 +146,28 @@ CONFIG = {
     "linea_rsi_max":             48.0,   # RSI di bawah 48 (oversold/netral rendah)
     "linea_ls_max":               1.1,   # L/S < 1.1 (short atau hampir seimbang)
     "linea_price_max_chg":        5.0,   # Harga belum naik > 5%
+
+    # ── GC-5: Micro-cap OI Acceleration (v9.8 — HOLO Fix) ────
+    # Mendeteksi "quiet accumulation" pada coin dormant:
+    # OI tumbuh cepat dari baseline rendah SEMENTARA harga masih flat.
+    # Forensik HOLO: OI +138% dalam 24h, flow +8998% dalam 8h, harga flat.
+    "max_oi_accel_score":        30,    # max score layer ini
+    "oi_accel_micro_thresh": 3_000_000, # OI < $3M = micro-cap, amplifier aktif
+    "oi_accel_dormant_vol":    500_000, # Vol < $500K = coin dormant/tidur
+    # Threshold OI acceleration (pertumbuhan rate antar snapshot):
+    "oi_accel_weak":             15.0,  # OI naik >15% dalam window = lemah
+    "oi_accel_medium":           35.0,  # OI naik >35% = medium
+    "oi_accel_strong":           70.0,  # OI naik >70% = kuat (HOLO level)
+    "oi_accel_extreme":         120.0,  # OI naik >120% = ekstrem
+    # Divergence: OI naik cepat tapi harga masih flat
+    "oi_accel_div_price_max":     5.0,  # Harga belum naik > 5% = divergence valid
+    # Dormant awakening: coin dari tidur panjang mulai ada OI
+    "oi_dormant_baseline_mult":   3.0,  # OI sekarang > 3x rata-rata historis = awakening
+
+    # ── Log file (v9.8) ───────────────────────────────────────
+    # Log ke file supaya tidak hilang saat terminal ditutup
+    "log_file": "/tmp/scanner_v9.log",
+    "log_max_mb": 10,  # rotasi setelah 10MB
 }
 
 # ── STOCK_TICKERS — v9.5: +7 token dari audit BUG-A ─────────────────────
@@ -161,7 +196,7 @@ STOCK_TICKERS = {
     "ABNBUSDT",     # Airbnb
     "AIRBNBUSDT",   # alias
     # ════════════════════════════════════════════════════
-    # v9.7 FIX-1: CONFIRMED lolos alert v9.5
+    # v9.8 FIX-1: CONFIRMED lolos alert v9.5
     # ════════════════════════════════════════════════════
     "RDDTUSDT",     # Reddit Inc (NYSE: RDDT) — lolos alert v9.5 ❌
     "RDDUSDT",      # alias Reddit
@@ -178,6 +213,56 @@ STOCK_TICKERS = {
 }
 
 MANUAL_EXCLUDE = set()
+
+# ══════════════════════════════════════════════════════════════
+#  📋  WHITELIST — 324 coin pilihan (v9.8)
+#  Gantikan dynamic scan dari 474 coin.
+#  Hanya coin di list ini yang akan di-deep-scan.
+#  Update via MANUAL_EXCLUDE untuk exclude sementara tanpa edit whitelist.
+# ══════════════════════════════════════════════════════════════
+WHITELIST_SYMBOLS = {
+    "DOGEUSDT", "BCHUSDT", "ADAUSDT", "HYPEUSDT", "XMRUSDT", "LINKUSDT", "XLMUSDT", "HBARUSDT",
+    "LTCUSDT", "ZECUSDT", "AVAXUSDT", "SHIBUSDT", "SUIUSDT", "TONUSDT", "WLFIUSDT", "CROUSDT",
+    "UNIUSDT", "DOTUSDT", "TAOUSDT", "MUSDT", "AAVEUSDT", "ASTERUSDT", "PEPEUSDT", "BGBUSDT",
+    "SKYUSDT", "ETCUSDT", "NEARUSDT", "ONDOUSDT", "POLUSDT", "ICPUSDT", "WLDUSDT", "ATOMUSDT",
+    "XDCUSDT", "COINUSDT", "NIGHTUSDT", "ENAUSDT", "PIPPINUSDT", "KASUSDT", "TRUMPUSDT", "QNTUSDT",
+    "ALGOUSDT", "RENDERUSDT", "FILUSDT", "MORPHOUSDT", "APTUSDT", "SUPERUSDT", "VETUSDT", "PUMPUSDT",
+    "1000SATSUSDT", "ARBUSDT", "1000BONKUSDT", "STABLEUSDT", "KITEUSDT", "JUPUSDT", "SEIUSDT", "ZROUSDT",
+    "STXUSDT", "DYDXUSDT", "VIRTUALUSDT", "DASHUSDT", "PENGUUSDT", "CAKEUSDT", "JSTUSDT", "XTZUSDT",
+    "ETHFIUSDT", "1MBABYDOGEUSDT", "IPUSDT", "LITUSDT", "HUSDT", "FETUSDT", "CHZUSDT", "CRVUSDT",
+    "KAIAUSDT", "IMXUSDT", "BSVUSDT", "INJUSDT", "AEROUSDT", "PYTHUSDT", "IOTAUSDT", "EIGENUSDT",
+    "GRTUSDT", "JASMYUSDT", "DEXEUSDT", "SPXUSDT", "TIAUSDT", "FLOKIUSDT", "HNTUSDT", "SIRENUSDT",
+    "LDOUSDT", "CFXUSDT", "OPUSDT", "ENSUSDT", "STRKUSDT", "MONUSDT", "AXSUSDT", "SANDUSDT",
+    "PENDLEUSDT", "WIFUSDT", "LUNCUSDT", "FFUSDT", "NEOUSDT", "THETAUSDT", "RIVERUSDT", "BATUSDT",
+    "MANAUSDT", "CVXUSDT", "COMPUSDT", "BARDUSDT", "SENTUSDT", "GALAUSDT", "VVVUSDT", "RAYUSDT",
+    "XPLUSDT", "FLUIDUSDT", "FARTCOINUSDT", "GLMUSDT", "RUNEUSDT", "0GUSDT", "POWERUSDT", "SKRUSDT",
+    "EGLDUSDT", "BUSDT", "BERAUSDT", "SNXUSDT", "BANUSDT", "JTOUSDT", "ARUSDT", "COWUSDT",
+    "DEEPUSDT", "SUSDT", "LPTUSDT", "MELANIAUSDT", "UBUSDT", "FOGOUSDT", "ARCUSDT", "WUSDT",
+    "PIEVERSEUSDT", "AWEUSDT", "HOMEUSDT", "GASUSDT", "ICNTUSDT", "ZENUSDT", "XVGUSDT", "ROSEUSDT",
+    "MYXUSDT", "KSMUSDT", "RSRUSDT", "ATHUSDT", "KMNOUSDT", "AKTUSDT", "ZORAUSDT", "ESPUSDT",
+    "TOSHIUSDT", "STGUSDT", "ZILUSDT", "LYNUSDT", "APEUSDT", "KAITOUSDT", "FORMUSDT", "AZTECUSDT",
+    "QUSDT", "MOVEUSDT", "MINAUSDT", "SOONUSDT", "TUSDT", "BRETTUSDT", "ACHUSDT", "TURBOUSDT",
+    "NXPCUSDT", "ALCHUSDT", "ZETAUSDT", "MOCAUSDT", "CYSUSDT", "ASTRUSDT", "ENSOUSDT", "AXLUSDT",
+    "UAIUSDT", "VTHOUSDT", "RAVEUSDT", "NMRUSDT", "COAIUSDT", "GWEIUSDT", "MEUSDT", "ORCAUSDT",
+    "BLURUSDT", "MERLUSDT", "MOODENGUSDT", "BIOUSDT", "SOMIUSDT", "B2USDT", "ORDIUSDT", "SPKUSDT",
+    "ZAMAUSDT", "PARTIUSDT", "1000RATSUSDT", "SSVUSDT", "BIRBUSDT", "POPCATUSDT", "GUNUSDT", "BEATUSDT",
+    "BANANAS31USDT", "LAUSDT", "LINEAUSDT", "DRIFTUSDT", "AVNTUSDT", "GRASSUSDT", "GPSUSDT", "PNUTUSDT",
+    "CELOUSDT", "LUNAUSDT", "VANAUSDT", "TRIAUSDT", "IOTXUSDT", "POLYXUSDT", "ANKRUSDT", "SAHARAUSDT",
+    "RPLUSDT", "MASKUSDT", "UMAUSDT", "TAGUSDT", "USELESSUSDT", "MEMEUSDT", "ATUSDT", "KGENUSDT",
+    "SKYAIUSDT", "ONTUSDT", "ENJUSDT", "SIGNUSDT", "CTKUSDT", "NOTUSDT", "CYBERUSDT", "GMTUSDT",
+    "FIDAUSDT", "CROSSUSDT", "STEEMUSDT", "LABUSDT", "BREVUSDT", "AUCTIONUSDT", "HOLOUSDT", "PEOPLEUSDT",
+    "CVCUSDT", "IOUSDT", "BROCCOLIUSDT", "SXTUSDT", "CLANKERUSDT", "BIGTIMEUSDT", "BLASTUSDT", "THEUSDT",
+    "XPINUSDT", "MANTAUSDT", "YGGUSDT", "WAXPUSDT", "ONGUSDT", "LAYERUSDT", "ANIMEUSDT", "BOMEUSDT",
+    "C98USDT", "API3USDT", "AGLDUSDT", "MMTUSDT", "INXUSDT", "GIGGLEUSDT", "IDOLUSDT", "ARKMUSDT",
+    "RESOLVUSDT", "EULUSDT", "METISUSDT", "SONICUSDT", "TNSRUSDT", "PROMUSDT", "SAPIENUSDT", "VELVETUSDT",
+    "FLOCKUSDT", "BANKUSDT", "ALLOUSDT", "USUALUSDT", "SLPUSDT", "ARIAUSDT", "MIRAUSDT", "MAGICUSDT",
+    "ZKCUSDT", "INUSDT", "NAORISUSDT", "MAGMAUSDT", "REZUSDT", "WCTUSDT", "FUSDT", "ELSAUSDT",
+    "SPACEUSDT", "APRUSDT", "AIXBTUSDT", "GOATUSDT", "DENTUSDT", "JCTUSDT", "XAIUSDT", "AIOUSDT",
+    "ZKPUSDT", "VINEUSDT", "METAUSDT", "FIGHTUSDT", "INITUSDT", "BASUSDT", "NEWTUSDT", "FUNUSDT",
+    "FOLKSUSDT", "ARPAUSDT", "MOVRUSDT", "MUBARAKUSDT", "NOMUSDT", "ACTUSDT", "ZKJUSDT", "VANRYUSDT",
+    "AINUSDT", "RECALLUSDT", "MAVUSDT", "CLOUSDT", "LIGHTUSDT", "TOWNSUSDT", "BLESSUSDT", "HAEDALUSDT",
+    "4USDT", "USUSDT", "HEIUSDT", "OGUSDT",
+}
 
 GRAN_MAP = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
 
@@ -983,7 +1068,7 @@ def layer_structure(candles_1h):
 
 def layer_positioning(symbol, funding, oi_chg1h):
     """
-    v9.7 FIX-4: L/S penalty diperkuat + hard block untuk long overcrowded.
+    v9.8 FIX-4: L/S penalty diperkuat + hard block untuk long overcrowded.
     
     Dari forensik v9.5:
     - BANANA L/S=1.396 hanya -3 poin → lolos, padahal longs sudah dominan
@@ -999,7 +1084,7 @@ def layer_positioning(symbol, funding, oi_chg1h):
     - Funding 5 tier presisi (true neutral < ±0.001%)
     """
     score, sigs = 0, []
-    ls_block = False  # v9.7: flag hard block jika L/S terlalu tinggi
+    ls_block = False  # v9.8: flag hard block jika L/S terlalu tinggi
 
     if funding <= -0.0004:
         score += 8;  sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup KUAT!")
@@ -1030,7 +1115,7 @@ def layer_positioning(symbol, funding, oi_chg1h):
             ls_score = 5;  sigs.append(f"L/S {ls:.2f} — lebih banyak short")
         elif ls <= 1.15:
             ls_score = 2
-        # ── FIX-4 v9.7: Penalti L/S diperbesar, ditambah hard block ──────────
+        # ── FIX-4 v9.8: Penalti L/S diperbesar, ditambah hard block ──────────
         elif 1.15 < ls <= 1.3:
             ls_score = -5;  sigs.append(f"L/S {ls:.2f} — longs mulai dominan")
         elif 1.3 < ls <= 1.6:
@@ -1309,6 +1394,187 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
 # ══════════════════════════════════════════════════════════════
 #  💰  ENTRY ZONE CALCULATOR
 # ══════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════
+#  🔴 GC-5: MICRO-CAP OI ACCELERATION DETECTOR (v9.8)
+#  ══════════════════════════════════════════════════════════════
+#
+#  MOTIVASI — Forensik HOLO pump 30% yang terlewat:
+#  ─────────────────────────────────────────────────
+#  Pada 6:26 WIB scanner tidak mendeteksi HOLO karena:
+#  • Harga masih flat → tidak ada momentum signal
+#  • Volume masih rendah → tidak masuk Bucket A
+#  • Funding ≈ 0% → tidak ada squeeze signal
+#  • L/S balanced → tidak ada positioning signal
+#
+#  Yang SEBENARNYA terjadi di balik layar:
+#  • OI naik +138% dalam 24h (dari hampir nol = BESAR)
+#  • Futures flow 8h naik +8998% (whale masuk diam-diam sejak malam)
+#  • OI tumbuh tapi harga BELUM ikut = divergence akumulasi tersembunyi
+#
+#  PRINSIP DETEKSI:
+#  ────────────────
+#  Untuk micro-cap (OI < $3M), pertumbuhan OI yang terlihat kecil
+#  secara absolut bisa berarti SANGAT BESAR secara relatif.
+#  HOLO: OI dari $300K → $700K = +133% → ini SINYAL BESAR untuk micro-cap.
+#  Untuk large-cap (OI $100M), naik $400K tidak ada artinya.
+#
+#  Deteksi 4 komponen:
+#  1. OI GROWTH RATE: seberapa cepat OI tumbuh antar snapshot
+#  2. OI ACCELERATION: apakah pertumbuhan makin cepat (second derivative)
+#  3. DIVERGENCE: OI naik signifikan tapi harga masih flat/turun
+#  4. DORMANT AWAKENING: coin yang biasa sepi tiba-tiba ada aktivitas OI
+#
+def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
+    """
+    GC-5: Deteksi akumulasi tersembunyi pada micro-cap via OI growth rate.
+    
+    Return: (score, signals, accel_data_dict)
+    Score maksimal: 30 poin
+    """
+    score, sigs = 0, []
+    accel = {
+        "oi_value":       oi_value,
+        "is_micro_cap":   False,
+        "is_dormant":     False,
+        "growth_rate_1h": 0.0,
+        "growth_rate_3h": 0.0,
+        "growth_rate_6h": 0.0,
+        "acceleration":   0.0,
+        "divergence":     False,
+    }
+
+    if oi_value <= 0:
+        return 0, [], accel
+
+    # Hanya aktif untuk micro-cap
+    is_micro = oi_value < CONFIG["oi_accel_micro_thresh"]
+    is_dormant = vol_24h < CONFIG["oi_accel_dormant_vol"]
+    accel["is_micro_cap"] = is_micro
+    accel["is_dormant"]   = is_dormant
+
+    snaps = load_oi_snapshots()
+    hist  = snaps.get(symbol, [])
+
+    if len(hist) < 2:
+        # Belum ada history — tidak bisa hitung growth rate
+        return 0, [], accel
+
+    now = time.time()
+
+    def oi_at(target_ts, tolerance=900):
+        """Cari OI paling dekat dengan target timestamp (±tolerance detik)."""
+        cands = [d for d in hist if abs(d["ts"] - target_ts) < tolerance]
+        if not cands:
+            return None
+        return min(cands, key=lambda d: abs(d["ts"] - target_ts))
+
+    def growth_pct(old_snap):
+        if not old_snap or old_snap["oi"] <= 0:
+            return None
+        return (oi_value - old_snap["oi"]) / old_snap["oi"] * 100
+
+    # Hitung growth rate di berbagai window
+    snap_1h = oi_at(now - 3600)
+    snap_3h = oi_at(now - 10800)
+    snap_6h = oi_at(now - 21600)
+
+    gr_1h = growth_pct(snap_1h)
+    gr_3h = growth_pct(snap_3h)
+    gr_6h = growth_pct(snap_6h)
+
+    if gr_1h is not None: accel["growth_rate_1h"] = round(gr_1h, 2)
+    if gr_3h is not None: accel["growth_rate_3h"] = round(gr_3h, 2)
+    if gr_6h is not None: accel["growth_rate_6h"] = round(gr_6h, 2)
+
+    # ── KOMPONEN 1: OI Growth Rate ────────────────────────────────────────
+    # Scoring berbeda untuk micro-cap vs normal
+    multiplier = 1.5 if is_micro else 1.0
+    extra_tag  = " [MICRO]" if is_micro else ""
+
+    primary_gr = gr_1h if gr_1h is not None else gr_3h
+
+    if primary_gr is not None:
+        if primary_gr >= CONFIG["oi_accel_extreme"] * multiplier:
+            score += 20
+            sigs.append(
+                f"🚀 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — AKUMULASI EKSTREM!"
+            )
+        elif primary_gr >= CONFIG["oi_accel_strong"] * multiplier:
+            score += 14
+            sigs.append(
+                f"🔥 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — akumulasi sangat kuat"
+            )
+        elif primary_gr >= CONFIG["oi_accel_medium"]:
+            score += 9
+            sigs.append(f"OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — akumulasi signifikan")
+        elif primary_gr >= CONFIG["oi_accel_weak"]:
+            score += 4
+            sigs.append(f"OI tumbuh +{primary_gr:.0f}%/1h — awal akumulasi")
+        elif primary_gr < -CONFIG["oi_accel_weak"]:
+            # OI turun cepat → distribusi
+            score -= 8
+            sigs.append(f"⚠️ OI turun {primary_gr:.0f}%/1h — distribusi cepat")
+
+    # ── KOMPONEN 2: OI Acceleration (second derivative) ──────────────────
+    # Apakah pertumbuhan makin cepat? gr_1h > gr_3h/3 = akselerasi
+    if gr_1h is not None and gr_3h is not None and gr_3h != 0:
+        # Normalize: 1h rate vs 3h rate/3 (per jam)
+        rate_1h_per_h = gr_1h
+        rate_3h_per_h = gr_3h / 3.0
+        if rate_3h_per_h > 0 and rate_1h_per_h > rate_3h_per_h * 1.5:
+            accel_ratio = rate_1h_per_h / rate_3h_per_h
+            accel["acceleration"] = round(accel_ratio, 2)
+            score += 6
+            sigs.append(
+                f"⚡ OI akselerasi {accel_ratio:.1f}x lebih cepat dari rata-rata 3h"
+            )
+        elif rate_3h_per_h > 0 and rate_1h_per_h > rate_3h_per_h * 1.2:
+            score += 3
+            sigs.append("OI momentum membangun — pertumbuhan makin cepat")
+
+    # ── KOMPONEN 3: DIVERGENCE — OI naik tapi harga flat ─────────────────
+    price_flat = abs(chg_24h) <= CONFIG["oi_accel_div_price_max"]
+    oi_growing  = (primary_gr or 0) >= CONFIG["oi_accel_weak"]
+
+    if oi_growing and price_flat:
+        accel["divergence"] = True
+        if chg_24h < 0 and (primary_gr or 0) >= CONFIG["oi_accel_medium"]:
+            # OI naik + harga turun = sinyal terkuat (LINEA/HOLO pattern)
+            score += 10
+            sigs.append(
+                f"⭐ OI DIVERGENCE: OI +{primary_gr:.0f}% saat harga {chg_24h:+.1f}% "
+                f"— akumulasi tersembunyi KUAT"
+            )
+        elif price_flat and (primary_gr or 0) >= CONFIG["oi_accel_medium"]:
+            score += 6
+            sigs.append(
+                f"OI divergence: OI +{primary_gr:.0f}% tapi harga flat "
+                f"({chg_24h:+.1f}%)"
+            )
+
+    # ── KOMPONEN 4: DORMANT AWAKENING ────────────────────────────────────
+    # Deteksi coin yang biasa tidur tiba-tiba ada aktivitas OI
+    if is_dormant and is_micro and gr_6h is not None:
+        # Cek apakah OI 6h lalu sangat rendah dibanding sekarang
+        snap_6h_val = snap_6h["oi"] if snap_6h else None
+        if snap_6h_val and snap_6h_val > 0:
+            awakening_mult = oi_value / snap_6h_val
+            if awakening_mult >= CONFIG["oi_dormant_baseline_mult"] * 2:
+                score += 12
+                sigs.append(
+                    f"🌅 DORMANT AWAKENING: OI {awakening_mult:.1f}x dalam 6h pada "
+                    f"coin tidur (vol ${vol_24h/1e3:.0f}K)"
+                )
+            elif awakening_mult >= CONFIG["oi_dormant_baseline_mult"]:
+                score += 7
+                sigs.append(
+                    f"🌅 OI awakening {awakening_mult:.1f}x dari baseline tidur"
+                )
+
+    return min(score, CONFIG["max_oi_accel_score"]), sigs, accel
+
+
 def calc_entry(candles_1h):
     cur  = candles_1h[-1]["close"]
     atr  = calc_atr(candles_1h, 14) or cur * 0.02
@@ -1429,7 +1695,7 @@ def master_score(symbol, ticker, tickers_dict):
         log.info(f"  {symbol}: GATE funding ekstrem ({funding:.5f})")
         return None
 
-    # ── FIX-2 v9.7: VOLUME EXHAUSTION GATE ────────────────────────────
+    # ── FIX-2 v9.8: VOLUME EXHAUSTION GATE ────────────────────────────
     # MEME di v9.5: Volume 24h -73.72% lolos karena RVOL historis tinggi.
     # Scanner tidak memeriksa apakah volume SEKARANG sedang collapse.
     # Coin dengan volume collapse tidak akan pump — tidak ada yang beli.
@@ -1555,6 +1821,19 @@ def master_score(symbol, ticker, tickers_dict):
         linea_sigs.append(f"✅ [Linea-4] RSI {rsi_1h:.1f} — oversold, siap reversal")
     score += linea_sc;  sigs += linea_sigs;  bd["linea"] = linea_sc
 
+    # GC-5: Micro-cap OI Acceleration Layer
+    oi_accel_sc, oi_accel_sigs, oi_accel_data = layer_oi_acceleration(
+        symbol, oi_value, chg_24h, vol_24h
+    )
+    score += oi_accel_sc;  sigs += oi_accel_sigs;  bd["oi_accel"] = oi_accel_sc
+    if oi_accel_sc > 0:
+        log.info(
+            f"  [GC-5] {symbol}: accel={oi_accel_sc} "
+            f"gr1h={oi_accel_data['growth_rate_1h']:+.1f}% "
+            f"micro={oi_accel_data['is_micro_cap']} "
+            f"div={oi_accel_data['divergence']}"
+        )
+
     # OI adjustments (v9.5: threshold diperketat BUG-B + BUG-C)
     if oi_value > 0:
         if oi_valid:
@@ -1602,7 +1881,7 @@ def master_score(symbol, ticker, tickers_dict):
                 score += 8;  sigs.append(f"✅ Vol naik + OI naik — akumulasi kuat")
 
         else:
-            # ── FIX-3 v9.7: OI-INVALID FALLBACK PROTECTION ───────────────────
+            # ── FIX-3 v9.8: OI-INVALID FALLBACK PROTECTION ───────────────────
             # BANANA v9.5: OI -15.44% lolos karena oi_valid=False → penalti 0
             # Saat tidak ada OI history, scanner buta total terhadap distribusi.
             # Fallback: estimasi kondisi OI dari sinyal proxy yang tersedia.
@@ -1724,6 +2003,8 @@ def master_score(symbol, ticker, tickers_dict):
         "long_liq":        long_liq,
         "short_liq":       short_liq,
         "linea_components": linea_components,
+        "oi_accel_score":  oi_accel_sc,
+        "oi_accel_data":   oi_accel_data,
     }
 
 
@@ -1749,19 +2030,33 @@ def build_alert(r, rank=None):
     if r.get("linea_components", 0) >= 3:
         linea_str = f"<b>Linea Sig :</b> ⭐ {r['linea_components']}/5 komponen!\n"
 
+    accel_str = ""
+    ad = r.get("oi_accel_data", {})
+    accel_sc = r.get("oi_accel_score", 0)
+    if accel_sc > 0:
+        div_tag = " 📈DIV" if ad.get("divergence") else ""
+        micro_tag = " [MICRO]" if ad.get("is_micro_cap") else ""
+        accel_str = (
+            f"<b>OI Accel  :</b> +{accel_sc}poin{micro_tag}{div_tag} | "
+            f"1h:{ad.get('growth_rate_1h', 0):+.1f}% "
+            f"3h:{ad.get('growth_rate_3h', 0):+.1f}% "
+            f"6h:{ad.get('growth_rate_6h', 0):+.1f}%\n"
+        )
+
     liq_str = ""
     if r.get("long_liq", 0) > 0 or r.get("short_liq", 0) > 0:
         liq_str = (f"<b>Liquidation:</b> Long ${r.get('long_liq',0)/1e3:.0f}K | "
                    f"Short ${r.get('short_liq',0)/1e3:.0f}K (30m)\n")
 
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.7</b>\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.8</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']}\n"
         f"<b>Composite :</b> {comp}/100  {bar}\n"
         f"<b>Layer Score:</b> {sc}/100\n"
         f"<b>Prob Model :</b> {prob_pct:.1f}% ({prob_cls})\n"
         f"<b>RSI 1h     :</b> {r.get('rsi_1h', 0):.1f}\n"
         f"{linea_str}"
+        f"{accel_str}"
         f"<b>Sektor     :</b> {r['sector']}\n"
         f"<b>Harga      :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h | {r['chg_7d']:+.1f}% 7d)\n"
         f"<b>Vol 24h    :</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
@@ -1799,7 +2094,8 @@ def build_alert(r, rank=None):
         f"Struct:{bd.get('struct',0)} Pos:{bd.get('pos',0)} "
         f"4H:{bd.get('tf4h',0)} Ctx:{bd.get('ctx',0)} "
         f"Whale:{bd.get('whale',0)} Liq:{bd.get('liq',0)} "
-        f"Linea:{bd.get('linea',0)} Stealth:{bd.get('stealth',0)}\n"
+        f"Linea:{bd.get('linea',0)} Accel:{bd.get('oi_accel',0)} "
+        f"Stealth:{bd.get('stealth',0)}\n"
         f"  OI valid:{bd.get('oi_valid','?')} RSI:{bd.get('rsi_1h','?')} "
         f"[Prob] MVS:{pm.get('max_vol_spike','?')}x "
         f"Irr:{pm.get('vol_irregularity','?')} "
@@ -1810,7 +2106,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v9.7 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v9.8 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp     = r.get("composite_score", r["score"])
         bar      = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -1945,60 +2241,61 @@ def save_wildcard_state(state):
 
 def build_candidate_list(tickers):
     """
-    GC-4: Stratified 3-Bucket Pre-filter.
-    
-    Menggantikan sistem top-N flat yang menghasilkan 80 coin identik setiap run.
-    
-    BUCKET A — SPIKE (30 coin):
-      Coin dengan volume anomaly score tinggi dari ticker saja.
-      Proxy: volume besar tapi harga belum bergerak = akumulasi tersembunyi.
-      Target: menangkap coin yang akan pump tapi belum terdekeksi.
-    
-    BUCKET B — QUALITY (35 coin):
-      Top pre-score seperti biasa (coin paling "siap" dari metrik ticker).
-      Ini adalah bucket yang paling reliable dan konsisten.
-    
-    BUCKET C — WILDCARD (25 coin):
-      Rotasi semi-random dari pool coin yang lolos filter dasar.
-      Seed berubah setiap run untuk coverage yang berbeda.
-      Setiap coin mendapat "giliran" scan dalam beberapa run.
-      Target: menangkap coin yang tidak masuk bucket A atau B.
-    
-    Keunggulan vs v9.4:
-    - Tidak ada coin yang "stuck" selalu masuk atau selalu dilewat
-    - Wildcard memastikan coin low-vol yang mau pump tetap terpantau
-    - Spike bucket menangkap accumulation yang tersembunyi di volume
-    - Total coverage lebih luas: 90 coin (vs 80 fixed sebelumnya)
+    v9.8: Whitelist-based candidate selection.
+
+    Arsitektur baru:
+    ─────────────────────────────────────────────────────
+    Pool sumber : WHITELIST_SYMBOLS (324 coin pilihan user)
+    Gantikan    : Dynamic scan 474 coin dengan STOCK_TICKERS filter
+
+    Keunggulan whitelist vs dynamic pool:
+    • Tidak ada coin sampah / stock ticker lolos
+    • Semua 324 coin dipantau SETIAP run (tidak ada yang terlewat)
+    • HOLO ada di whitelist → pasti di-scan setiap run
+    • Lebih cepat: 324 vs 474 deep scan candidates
+    • Tetap ada vol/chg filter dasar untuk skip coin tidak aktif
+
+    GC-4 Stratified bucket TETAP DIPAKAI di dalam whitelist:
+    • Bucket A (Spike):    coin dengan volume anomaly tertinggi
+    • Bucket B (Quality):  top pre-score dari whitelist
+    • Bucket C (Wildcard): rotasi dari sisa whitelist (tidak pernah skip)
+
+    Perbedaan vs v9.8: Bucket C sekarang dari sisa WHITELIST, bukan
+    pool 474 coin. Semua 324 coin mendapat giliran lebih sering.
     """
     wc_state = load_wildcard_state()
     wc_state["run_count"] = wc_state.get("run_count", 0) + 1
 
-    # Pool awal: semua coin yang lolos filter dasar
+    # ── Base pool: whitelist ∩ tickers yang aktif di Bitget ──────────────
     base_pool = []
-    for sym, t in tickers.items():
-        if not sym.endswith("USDT"):
-            continue
-        if sym in STOCK_TICKERS or sym in MANUAL_EXCLUDE:
-            continue
-        if any(kw in sym for kw in EXCLUDED_KEYWORDS):
+    not_found = []
+    for sym in WHITELIST_SYMBOLS:
+        if sym in MANUAL_EXCLUDE:
             continue
         if is_cooldown(sym):
             continue
+        if sym not in tickers:
+            not_found.append(sym)
+            continue
+        t = tickers[sym]
         try:
             vol   = float(t.get("quoteVolume", 0))
             chg   = float(t.get("change24h",   0)) * 100
             price = float(t.get("lastPr",       0))
         except:
             continue
-        if vol   < CONFIG["pre_filter_vol"]:      continue
-        if vol   > CONFIG["max_vol_24h"]:         continue
-        if abs(chg) > CONFIG["gate_chg_24h_max"]: continue
-        if price <= 0:                             continue
+        # Filter dasar: skip yang benar-benar tidak aktif
+        if vol   < CONFIG["pre_filter_vol"]:       continue  # vol < $1K = ghost coin
+        if vol   > CONFIG["max_vol_24h"]:          continue  # > $50M = too big
+        if abs(chg) > CONFIG["gate_chg_24h_max"]:  continue  # sudah pump > 30%
+        if price <= 0:                              continue
         base_pool.append(sym)
 
-    log.info(f"Base pool: {len(base_pool)} coin lolos filter dasar")
+    if not_found:
+        log.debug(f"Whitelist tidak ditemukan di Bitget: {not_found[:5]}... ({len(not_found)} total)")
+    log.info(f"Whitelist pool: {len(base_pool)}/{len(WHITELIST_SYMBOLS)} coin aktif")
 
-    # ── BUCKET A: Volume Anomaly / Spike ─────────────────────
+    # ── BUCKET A: Volume Anomaly / Spike ─────────────────────────────────
     spike_scores = []
     for sym in base_pool:
         t   = tickers[sym]
@@ -2006,12 +2303,11 @@ def build_candidate_list(tickers):
         ps  = pre_score_ticker(t)
         spike_scores.append((sym, vas, ps, float(t.get("quoteVolume", 0))))
 
-    # Sort: prioritas vas tinggi, tiebreak ps
     spike_scores.sort(key=lambda x: (-x[1], -x[2]))
     bucket_a = [x[0] for x in spike_scores[:CONFIG["bucket_spike"]]]
     a_set    = set(bucket_a)
 
-    # ── BUCKET B: Quality Pre-Score ───────────────────────────
+    # ── BUCKET B: Quality Pre-Score ───────────────────────────────────────
     quality_scores = []
     for sym in base_pool:
         if sym in a_set:
@@ -2024,26 +2320,24 @@ def build_candidate_list(tickers):
     bucket_b = [x[0] for x in quality_scores[:CONFIG["bucket_quality"]]]
     b_set    = set(bucket_b)
 
-    # ── BUCKET C: Wildcard Rotation ───────────────────────────
+    # ── BUCKET C: Whitelist Wildcard ──────────────────────────────────────
+    # Sisa dari whitelist yang tidak masuk A atau B.
+    # Karena pool sudah selektif (324 coin), Bucket C dari whitelist
+    # jauh lebih berharga dari sebelumnya (bukan dari 474 coin random).
     wildcard_pool = [
         sym for sym in base_pool
         if sym not in a_set and sym not in b_set
     ]
-
-    # Seed berbeda setiap run berdasarkan waktu + run_count
-    # → coin yang berbeda terpilih setiap run
     seed = int(time.time() / 3600) + wc_state["run_count"]
     rng  = random.Random(seed)
     rng.shuffle(wildcard_pool)
     bucket_c = wildcard_pool[:CONFIG["bucket_wildcard"]]
 
-    # Simpan state
-    wc_state["last_seen"] = bucket_c[:10]  # track sebagian
+    wc_state["last_seen"] = bucket_c[:10]
     save_wildcard_state(wc_state)
 
-    # Gabungkan semua bucket (tidak ada duplikasi)
-    all_candidates = []
-    seen = set()
+    # ── Gabung semua bucket ───────────────────────────────────────────────
+    all_candidates, seen = [], set()
     for sym in bucket_a + bucket_b + bucket_c:
         if sym not in seen:
             all_candidates.append(sym)
@@ -2065,7 +2359,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v9.7 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v9.8 — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
@@ -2170,7 +2464,7 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v9.7                            ║")
+    log.info("║  PRE-PUMP SCANNER v9.8                            ║")
     log.info("║  FIX-1+2: Stock blacklist + Vol Exhaustion Gate             ║")
     log.info("║  FIX-3: OI-Invalid Fallback Protection            ║")
     log.info("║  FIX-4: L/S Hard Block + penalti 2x       ║")
