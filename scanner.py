@@ -36,14 +36,14 @@
 ║    - Scan SEMUA 324 coin whitelist setiap run                          ║
 ║    - Hapus stratified bucketing (A/B/C)                                 ║
 ║    - Expected: ~310-320 coin per run (yang aktif di Bitget)            ║
-║    - Runtime: ~5-7 menit (vs ~2 menit original)                        ║
+║    - Run: ~5-7 menit (vs ~2 menit original)                        ║
 ║                                                                          ║
 ║  (Semua fix v9.9 dipertahankan)                                         ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
-import requests, time, os, math, json, logging
-from datetime import datetime, timezone
+import requests, , os, math, json, logging
+from date import datetime, timezone
 from collections import defaultdict
 
 try:
