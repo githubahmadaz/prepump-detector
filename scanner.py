@@ -1,17 +1,17 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v12.1-FINAL                                           ║
+║  PRE-PUMP SCANNER v12.2-FINAL                                           ║
 ║                                                                          ║
-║  PERUBAHAN vs v12.0:                                                     ║
-║    ✅ Threshold net flow diperketat:                                    ║
-║       - 6h: dari -10% → -8% (penalti -15 → -20)                        ║
-║       - 15m: dari -15% → -12% (penalti -20 → -25)                      ║
-║    ✅ Volume creep hanya valid jika harga naik (skor dikurangi jika flat)║
-║    ✅ Penalti tambahan untuk net flow negatif + harga flat/turun        ║
+║  PERUBAHAN vs v12.1:                                                     ║
+║    ✅ Hapus hard block "dead activity" → jadi penalti -5                ║
+║    ✅ Ubah hard block volume exhaustion (< -60%) → penalti -15          ║
+║    ✅ Ubah hard block overbought (>35% 7d tanpa squeeze) → penalti -15 ║
+║    ✅ Perbaiki fungsi get_oi_changes (gunakan get_oi_change)            ║
+║    ✅ Threshold net flow tetap diperketat                               ║
 ║                                                                          ║
 ║  EXPECTED RESULT:                                                        ║
-║    Lebih selektif terhadap sinyal palsu (seperti TRUMP & MORPHO)       ║
-║    Tetap sensitif terhadap pola akumulasi nyata                         ║
+║    Lebih banyak coin yang diproses, tidak langsung diblok               ║
+║    Tetap selektif dengan penalti, bukan block                           ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 log.info("Log file aktif: /tmp/scanner_v12.log (rotasi 10MB)")
 
 # ══════════════════════════════════════════════════════════════
-#  ⚙️  CONFIG (diperbarui dengan threshold lebih ketat)
+#  ⚙️  CONFIG (diperbarui)
 # ══════════════════════════════════════════════════════════════
 CONFIG = {
     # ── Threshold alert ───────────────────────────────────────
@@ -64,10 +64,10 @@ CONFIG = {
     "max_vol_24h":       50_000_000,
     "pre_filter_vol":         1_000,
 
-    # ── Gate perubahan harga ───────────────────────────────────
-    "gate_chg_24h_max":          30.0,
-    "gate_chg_7d_max":           35.0,
-    "gate_chg_7d_min":          -35.0,
+    # ── Gate perubahan harga (sekarang jadi penalti, bukan block) ──
+    "gate_chg_24h_max":          30.0,   # masih dipakai di pre-filter
+    "gate_chg_7d_max":           35.0,   # untuk overbought penalty
+    "gate_chg_7d_min":          -35.0,   # untuk downtrend penalty
     "gate_funding_extreme":      -0.002,
 
     # ── Candle limits ─────────────────────────────────────────
@@ -113,10 +113,10 @@ CONFIG = {
     "breakout_bonus":            15,
 
     # ── Net flow penalty (diperketat) ─────────────────────────
-    "netflow_15m_penalty_threshold": -12,   # dari -15
-    "netflow_15m_penalty":          -25,    # dari -20
-    "netflow_6h_penalty_threshold":  -8,    # dari -10
-    "netflow_6h_penalty":            -20,   # dari -15
+    "netflow_15m_penalty_threshold": -12,
+    "netflow_15m_penalty":          -25,
+    "netflow_6h_penalty_threshold":  -8,
+    "netflow_6h_penalty":            -20,
 
     # ── CVD divergence confirmation ───────────────────────────
     "cvd_div_require_price_slope": True,
@@ -301,7 +301,7 @@ _cache         = {}
 EXCLUDED_KEYWORDS = ["XAU","PAXG","BTC","ETH","USDC","DAI","BUSD","UST","LUNC","LUNA"]
 
 # ══════════════════════════════════════════════════════════════
-#  🔒  COOLDOWN & SNAPSHOTS (OI + Orderbook)
+#  🔒  COOLDOWN & SNAPSHOTS
 # ══════════════════════════════════════════════════════════════
 def load_cooldown():
     try:
@@ -504,6 +504,13 @@ def get_oi_change(symbol, seconds_ago):
         if current_oi > 0:
             return (current_oi - best["oi"]) / best["oi"] * 100
     return None
+
+def get_oi_changes(symbol, current_oi):
+    """Fungsi kompatibilitas untuk gate overbought (mengembalikan tuple)."""
+    chg1h = get_oi_change(symbol, 3600) or 0
+    chg24h = get_oi_change(symbol, 86400) or 0
+    oi_valid = (chg1h != 0 or chg24h != 0)
+    return chg1h, chg24h, oi_valid
 
 def get_long_short_ratio(symbol):
     data = safe_get(
@@ -904,14 +911,12 @@ def layer_extended_dry_volume(candles_1h, avg_vol_24h):
     return 0, ""
 
 def layer_volume_creep(candles_1h):
-    """Deteksi peningkatan volume bertahap dengan konfirmasi harga."""
     if len(candles_1h) < 12:
         return 0, ""
     vols = [c["volume_usd"] for c in candles_1h[-12:]]
     ma3 = sum(vols[-3:]) / 3
     ma6 = sum(vols[-6:]) / 6
     ma12 = sum(vols) / 12
-    # Hitung price slope 3 jam
     p_now = candles_1h[-1]["close"]
     p_3h = candles_1h[-3]["close"] if len(candles_1h) >= 3 else p_now
     slope_3h = (p_now - p_3h) / p_3h * 100 if p_3h != 0 else 0
@@ -1470,7 +1475,7 @@ def layer_net_flow(candles_1h, candles_15m, trades):
     flow_data["has_data"] = (pct_24h is not None)
     if not flow_data["has_data"]:
         return 0, [], flow_data, False
-    # GATE: Distribusi Sistematis
+    # GATE: Distribusi Sistematis (tetap block jika ekstrem)
     if (pct_72h is not None
             and pct_72h < CONFIG["nf_gate_72h"]
             and pct_24h < CONFIG["nf_gate_24h"]
@@ -1544,7 +1549,7 @@ def layer_net_flow(candles_1h, candles_15m, trades):
                 f"⚡ Flow akselerasi: 6h={pct_6h:+.1f}% >> 24h={pct_24h:+.1f}% "
                 f"— tekanan beli makin kencang"
             )
-    # Penalti tambahan untuk net flow jangka pendek yang sangat negatif (diperketat)
+    # Penalti tambahan untuk net flow jangka pendek yang sangat negatif
     if pct_15m is not None and flow_data["15m"]["count"] >= 10:
         if pct_15m > CONFIG["nf_strong_buy"]:
             score += 4
@@ -1680,7 +1685,7 @@ def calc_entry(candles_1h, candles_15m):
     }
 
 # ══════════════════════════════════════════════════════════════
-#  🧠  MASTER SCORE
+#  🧠  MASTER SCORE (dengan perubahan gate)
 # ══════════════════════════════════════════════════════════════
 def master_score(symbol, ticker, tickers_dict):
     c1h  = get_candles(symbol, "1h",  CONFIG["candle_1h"])
@@ -1688,25 +1693,35 @@ def master_score(symbol, ticker, tickers_dict):
     c4h  = get_candles(symbol, "4h",  CONFIG["candle_4h"])
     if len(c1h) < 48 or len(c15m) < 20:
         return None
+
+    # ====== GATE: Dead activity (sekarang jadi penalti, bukan block) ======
+    dead_penalty = 0
     if len(c1h) >= 7:
         last_vol     = c1h[-1]["volume_usd"]
         avg_vol_6h   = sum(c["volume_usd"] for c in c1h[-7:-1]) / 6
         if avg_vol_6h > 0:
             activity_ratio = last_vol / avg_vol_6h
-            if activity_ratio < CONFIG.get("dead_activity_threshold", 0.10):
-                log.info(f"  {symbol}: GATE dead activity")
-                return None
+            if activity_ratio < 0.10:
+                dead_penalty = -5
+                log.info(f"  {symbol}: dead activity terdeteksi, penalti -5")
+
     funding = get_funding(symbol)
+
     try:
         p7d_ago = c1h[-168]["close"] if len(c1h) >= 168 else c1h[0]["close"]
         chg_7d  = (c1h[-1]["close"] - p7d_ago) / p7d_ago * 100 if p7d_ago > 0 else 0
     except:
         chg_7d = 0
+
     try:
         chg_24h = float(ticker.get("change24h", 0)) * 100
         vol_24h = float(ticker.get("quoteVolume", 0))
     except:
         chg_24h, vol_24h = 0, 0
+
+    # ====== Overbought / downtrend jadi penalti, bukan block ======
+    overbought_penalty = 0
+    downtrend_penalty = 0
     if chg_7d > CONFIG["gate_chg_7d_max"]:
         oi_value = get_open_interest(symbol)
         oi_chg_1h, _, oi_valid_gate = get_oi_changes(symbol, oi_value) if oi_value > 0 else (0, 0, False)
@@ -1714,11 +1729,13 @@ def master_score(symbol, ticker, tickers_dict):
                         and oi_valid_gate
                         and oi_chg_1h > CONFIG["squeeze_oi_change_min"])
         if not real_squeeze:
-            log.info(f"  {symbol}: GATE overbought ({chg_7d:.1f}%) tanpa squeeze")
-            return None
+            overbought_penalty = -15
+            log.info(f"  {symbol}: Overbought ({chg_7d:.1f}%) tanpa squeeze, penalti -15")
     if chg_7d < CONFIG["gate_chg_7d_min"]:
-        log.info(f"  {symbol}: GATE downtrend ({chg_7d:.1f}%)")
-        return None
+        downtrend_penalty = -20
+        log.info(f"  {symbol}: Downtrend ({chg_7d:.1f}%), penalti -20")
+
+    # ====== Volume exhaustion jadi penalti ======
     try:
         vol_change_24h = float(ticker.get("volChange24h", 0))
     except:
@@ -1728,11 +1745,16 @@ def master_score(symbol, ticker, tickers_dict):
         vol_24h_prev = sum(c["volume_usd"] for c in c1h[-48:-24])
         if vol_24h_prev > 0:
             vol_change_24h = (vol_24h_now - vol_24h_prev) / vol_24h_prev * 100
+
+    vol_exhaustion_penalty = 0
     if vol_change_24h < -60:
-        log.info(f"  {symbol}: GATE volume exhaustion ({vol_change_24h:.0f}% 24h)")
-        return None
+        vol_exhaustion_penalty = -15
+        log.info(f"  {symbol}: Volume exhaustion ({vol_change_24h:.0f}% 24h), penalti -15")
     elif vol_change_24h < -45:
-        log.info(f"  {symbol}: Volume turun {vol_change_24h:.0f}% — penalti aktif")
+        vol_exhaustion_penalty = -8
+        log.info(f"  {symbol}: Volume turun {vol_change_24h:.0f}%, penalti -8")
+
+    # ====== Lanjut perhitungan skor ======
     if len(c1h) >= 6:
         pre6       = c1h[-6:]
         avg_vol_6h = sum(c["volume_usd"] for c in pre6) / 6
@@ -1741,51 +1763,76 @@ def master_score(symbol, ticker, tickers_dict):
         range_6h   = (high_6h - low_6h) / low_6h * 100 if low_6h > 0 else 0
     else:
         avg_vol_6h, range_6h = 0, 0
+
     score, sigs, bd = 0, [], {}
     trades = get_trades(symbol, 500)
     avg_vol_24h = sum(c["volume_usd"] for c in c1h[-24:]) / 24 if len(c1h) >= 24 else 1
+
+    # Terapkan penalti awal
+    score += dead_penalty
+    score += overbought_penalty
+    score += downtrend_penalty
+    score += vol_exhaustion_penalty
+
+    # Layer volume intelligence
     v_sc, v_sigs, rvol, ots_type = layer_volume_intelligence(c1h, trades)
     score += v_sc;  sigs += v_sigs;  bd["vol"] = v_sc
+
     stcvd_sc, stcvd_sig = calc_short_term_cvd(c1h, trades)
     score += stcvd_sc
     if stcvd_sig:
         sigs.append(stcvd_sig)
     bd["stcvd"] = stcvd_sc
+
+    # Extended dry volume
     dry_sc, dry_sig = layer_extended_dry_volume(c1h, avg_vol_24h)
     score += dry_sc
     if dry_sig:
         sigs.append(dry_sig)
     bd["extended_dry"] = dry_sc
+
+    # Volume creep
     creep_sc, creep_sig = layer_volume_creep(c1h)
     score += creep_sc
     if creep_sig:
         sigs.append(creep_sig)
     bd["volume_creep"] = creep_sc
+
+    # Breakout
     breakout_sc, breakout_sig = layer_breakout(c1h, avg_vol_24h)
     score += breakout_sc
     if breakout_sig:
         sigs.append(breakout_sig)
     bd["breakout"] = breakout_sc
+
+    # Flat accumulation
     fa_sc, fa_sigs = layer_flat_accumulation(c1h)
     score += fa_sc;  sigs += fa_sigs;  bd["flat"] = fa_sc
+
+    # Structure
     st_sc, st_sigs, bbw_val, bbw_pct, coiling = layer_structure(c1h)
     score += st_sc;  sigs += st_sigs;  bd["struct"] = st_sc
+
+    # Stealth bonus (rasio)
     stealth_bonus = 0
     if len(c1h) >= 6:
         if avg_vol_6h < avg_vol_24h * CONFIG["stealth_vol_ratio"] and coiling > CONFIG["stealth_min_coiling"] and range_6h < CONFIG["stealth_max_range"]:
             stealth_bonus = 25
             sigs.append(f"🕵️ STEALTH PATTERN: vol {avg_vol_6h/avg_vol_24h:.0%} dari rata-rata")
     score += stealth_bonus;  bd["stealth"] = stealth_bonus
+
+    # OI data
     oi_value   = get_open_interest(symbol)
     oi_chg1h   = None
     oi_chg24h  = None
     oi_valid   = False
     if oi_value > 0:
         save_oi_snapshot(symbol, oi_value)
-        snaps = load_oi_snapshots().get(symbol, [])
         oi_chg1h = get_oi_change(symbol, 3600)
         oi_chg24h = get_oi_change(symbol, 86400)
         oi_valid = (oi_chg1h is not None)
+
+    # Penalty already pumped
     pump_penalty, pump_reason, pump_sigs = penalty_already_pumped(
         oi_chg24h or 0, vol_change_24h, chg_24h, oi_valid, c1h, oi_chg1h or 0, trades, avg_vol_24h
     )
@@ -1793,40 +1840,60 @@ def master_score(symbol, ticker, tickers_dict):
     if pump_reason:
         sigs.append(pump_reason)
     sigs += pump_sigs
+
+    # Positioning
     pos_sc, pos_sigs, ls_ratio, ls_block = layer_positioning(symbol, funding, oi_chg1h or 0)
     if ls_block:
         log.info(f"  {symbol}: GATE L/S overcrowded kritis (L/S={ls_ratio:.2f})")
         return None
     score += pos_sc;  sigs += pos_sigs;  bd["pos"] = pos_sc
+
+    # 4h confluence
     tf4h_sc = 0
     if c4h:
         tf4h_sc, tf4h_sig = calc_4h_confluence(c4h)
         if tf4h_sig:
             sigs.append(tf4h_sig)
     score += tf4h_sc;  bd["tf4h"] = tf4h_sc
+
+    # Context
     ctx_sc, ctx_sigs, sector = layer_context(symbol, tickers_dict)
     score += ctx_sc;  sigs += ctx_sigs;  bd["ctx"] = ctx_sc
+
+    # Whale
     ws, whale_bonus, wev = calc_whale(symbol, c15m, funding, trades)
     score += whale_bonus;  bd["whale"] = whale_bonus
+
+    # Liquidation
     liq_sc, liq_sigs, long_liq, short_liq, liq_block = layer_liquidation(symbol, c1h)
     if liq_block:
         log.info(f"  {symbol}: GATE liquidation — long flush baru saja terjadi")
         return None
     score += liq_sc;  sigs += liq_sigs;  bd["liq"] = liq_sc
+
+    # OI Acceleration
     oi_accel_sc, oi_accel_sigs, oi_accel_data = layer_oi_acceleration(
         symbol, oi_value, chg_24h, vol_24h
     )
     score += oi_accel_sc;  sigs += oi_accel_sigs;  bd["oi_accel"] = oi_accel_sc
+
+    # Net Flow
     nf_sc, nf_sigs, nf_data, nf_block = layer_net_flow(c1h, c15m, trades)
     if nf_block:
         log.info(f"  {symbol}: GATE net flow distribusi sistematis")
         return None
     score += nf_sc;  sigs += nf_sigs;  bd["netflow"] = nf_sc
+
+    # Divergence
     div_sc, div_sigs = layer_divergence(c1h, None, trades, symbol)
     score += div_sc
     sigs += div_sigs
     bd["divergence"] = div_sc
+
+    # RSI
     rsi_1h = get_rsi(c1h[-48:] if len(c1h) >= 48 else c1h)
+
+    # OI additional scoring
     if oi_value > 0:
         if oi_valid:
             if oi_chg24h is not None:
@@ -1847,12 +1914,15 @@ def master_score(symbol, ticker, tickers_dict):
                     score -= 6;  sigs.append(f"OI 1h {oi_chg1h:.1f}% — mulai berkurang")
                 elif oi_chg1h > 5:
                     score += 5;  sigs.append(f"✅ OI 1h naik {oi_chg1h:.1f}% — posisi baru masuk")
+            # Hapus hard block multi-TF OI decline, ganti penalti
             if oi_chg24h and oi_chg1h and oi_chg24h < -3 and oi_chg1h < -2:
-                log.info(f"  {symbol}: GATE multi-TF OI decline")
-                return None
+                score -= 15
+                sigs.append(f"⚠️ Multi-TF OI decline (24h:{oi_chg24h:.1f}%, 1h:{oi_chg1h:.1f}%) - penalti")
         else:
             sigs.append("ℹ️ OI history belum tersedia (run pertama) — penalti ringan")
             score -= 3
+
+        # Volume momentum
         if len(c1h) >= 24:
             vol_24h_candles  = [c["volume_usd"] for c in c1h[-24:]]
             avg_vol_24h_base = sum(vol_24h_candles) / len(vol_24h_candles) if vol_24h_candles else 0
@@ -1862,14 +1932,15 @@ def master_score(symbol, ticker, tickers_dict):
                     score -= 10; sigs.append(f"⚠️ Volume 6h hanya {vol_momentum:.0%} avg 24h")
                 elif vol_momentum < 0.70:
                     score -= 5;  sigs.append(f"Volume 6h menurun ({vol_momentum:.0%})")
+
         bd["oi_change"]    = round(oi_chg24h, 1) if oi_chg24h else 0
         bd["oi_change_1h"] = round(oi_chg1h, 1) if oi_chg1h else 0
         bd["oi_valid"]     = oi_valid
     else:
         bd["oi_change"] = bd["oi_change_1h"] = 0
         bd["oi_valid"]  = False
-    if chg_7d > CONFIG["gate_chg_7d_max"]:
-        score -= 15; sigs.append(f"⚠️ Overbought ({chg_7d:+.1f}% 7d)")
+
+    # Range 24h terlalu lebar (penalti)
     if len(c1h) >= 24:
         high24 = max(c["high"] for c in c1h[-24:])
         low24  = min(c["low"]  for c in c1h[-24:])
@@ -1878,18 +1949,25 @@ def master_score(symbol, ticker, tickers_dict):
             if range24 > 55:
                 score = max(0, score - 10)
                 sigs.append(f"⚠️ Range 24h {range24:.0f}% — pump sudah berjalan?")
+
+    # Time multiplier
     tmult, tsig = get_time_mult()
     raw_score = int(score * tmult)
     if tsig:
         sigs.append(tsig)
+
+    # Penalti RVOL rendah
     if rvol < 0.5:
         penalty = int((bd.get("struct", 0) + bd.get("pos", 0)) * 0.2)
         raw_score -= penalty
         sigs.append(f"⚠️ RVOL rendah ({rvol:.1f}x) - diskon 20% untuk sinyal struktur/posisi")
+
+    # Prob model
     _, cvd_pct, _, _ = calc_real_cvd(trades, 6)
     prob = compute_pump_probability(c1h, oi_chg1h, oi_chg24h, funding, ls_ratio, cvd_pct, ws)
     bd["prob_score"] = round(prob["probability_score"] * 100, 1)
     bd["prob_class"] = prob["classification"]
+
     composite = int(
         min(raw_score, 100) * CONFIG["composite_w_layer"]
         + prob["probability_score"] * 100 * CONFIG["composite_w_prob"]
@@ -1897,10 +1975,13 @@ def master_score(symbol, ticker, tickers_dict):
     composite = min(composite, 100)
     bd["composite"] = composite
     bd["rsi_1h"]    = round(rsi_1h, 1)
+
     entry = calc_entry(c1h, c15m)
     if not entry or entry["liq_pct"] < CONFIG["min_target_pct"]:
         return None
+
     price_now = float(ticker.get("lastPr", 0)) or c1h[-1]["close"]
+
     return {
         "symbol":          symbol,
         "score":           raw_score,
@@ -2009,7 +2090,7 @@ def build_alert(r, rank=None):
     if bd.get("divergence", 0) > 0:
         extra_signals.append("📊 Divergence")
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v12.1-FINAL</b>\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v12.2-FINAL</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']}\n"
         f"<b>Pump Type :</b> {type_icon} {type_name}\n"
         f"<b>Composite :</b> {comp}/100  {bar}\n"
@@ -2069,7 +2150,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v12.1-FINAL — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v12.2-FINAL — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp     = r.get("composite_score", r["score"])
         bar      = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -2176,11 +2257,11 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v12.1-FINAL — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v12.2-FINAL — {utc_now()} ===")
     log.info("=" * 70)
-    log.info("PERUBAHAN vs v12.0:")
-    log.info("  • Threshold net flow diperketat (6h: -8%/-20, 15m: -12%/-25)")
-    log.info("  • Volume creep hanya valid jika harga naik")
+    log.info("PERUBAHAN vs v12.1:")
+    log.info("  • Hard block dead activity, overbought, downtrend, volume exhaustion diubah jadi penalti")
+    log.info("  • Multi-TF OI decline jadi penalti (bukan block)")
     log.info("=" * 70)
     tickers = get_all_tickers()
     if not tickers:
@@ -2274,7 +2355,7 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v12.1-FINAL                    ║")
+    log.info("║  PRE-PUMP SCANNER v12.2-FINAL                    ║")
     log.info("║  FOKUS: Deteksi pump 1-4 jam sebelumnya          ║")
     log.info("╚═══════════════════════════════════════════════════╝")
     if not BOT_TOKEN or not CHAT_ID:
