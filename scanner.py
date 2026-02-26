@@ -26,7 +26,7 @@
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
-import requests, time, os, math, json, logging, random, numpy as np
+import requests, time, os, math, json, logging, random
 from datetime import datetime, timezone
 from collections import defaultdict
 
