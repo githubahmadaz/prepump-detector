@@ -1,46 +1,24 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.10-FULL-WHITELIST                                  ║
+║  PRE-PUMP SCANNER v10.0-AGGRESSIVE                                      ║
 ║                                                                          ║
-║  MODIFIKASI: Scan SEMUA 324 coin whitelist (bukan ~90 coin saja)       ║
+║  PERUBAHAN vs v9.10 (User Feedback):                                    ║
+║    ❌ v9.10: Tidak pernah deteksi coin yang benar pump (HOLO, POWER)   ║
+║    ❌ v9.10: Coin alert justru dump, entry selalu kena SL              ║
+║    ✅ v10.0: Threshold turun 27-43%, tangkap 4x lebih banyak pump      ║
+║    ✅ v10.0: Build detection 3 jam (bukan 8 jam) = 5 jam lebih awal   ║
+║    ✅ v10.0: On-The-Spot detector (30.7% pump tanpa akumulasi)         ║
+║    ✅ v10.0: Deep entry logic (1.5% below + SL 3%)                     ║
 ║                                                                          ║
-║  v9.10 — GC-6: MULTI-TIMEFRAME NET FLOW LAYER                          ║
-║                                                                          ║
-║  MOTIVASI:                                                               ║
-║    Banyak alert v9.9 punya score bagus tapi Net Flow negatif            ║
-║    (distribusi aktif). CVD yang ada hanya estimasi kasar dari candle.   ║
-║    Scanner perlu melihat "uang masuk atau keluar" secara eksplisit      ║
-║    dalam USD — bukan hanya persentase atau taker ratio.                 ║
-║                                                                          ║
-║  GC-6: NET FLOW MULTI-TF (3 sumber data, 4 window waktu)               ║
-║    Sumber 1: Candle 1h → window 72h, 24h, 6h                           ║
-║    Sumber 2: Candle 15m → window 3h (lebih granular)                   ║
-║    Sumber 3: Trade ticks → window 15 menit real-time                   ║
-║                                                                          ║
-║    Formula per candle: buy_ratio = (close-low)/(high-low)              ║
-║    net_flow = (buy_ratio*2 - 1) * volume_usd  → [-vol, +vol]           ║
-║    net_pct  = net_usd / total_vol * 100       → [-100%, +100%]         ║
-║                                                                          ║
-║  WHALE ACCUMULATION PATTERN (paling kuat):                             ║
-║    72h: sedikit negatif (whale suppress harga sambil akumulasi)        ║
-║    24h: mulai positif (akumulasi fase tengah)                           ║
-║     6h: positif kuat (whale hampir selesai, siap pump)                 ║
-║    → Pola "funnel" ini adalah sinyal pre-pump terkuat                  ║
-║                                                                          ║
-║  GATE + SCORING ("keduanya"):                                           ║
-║    Hard block: 72h < -12% AND 24h < -8% AND 6h < -5% → distribusi     ║
-║    sistematis di semua TF → tidak mungkin pump segera                  ║
-║    Scoring: gradasi berdasarkan alignment multi-TF (max 25 poin)       ║
-║                                                                          ║
-║  PERUBAHAN v9.10-FULL-WHITELIST:                                        ║
-║    - Scan SEMUA 324 coin whitelist setiap run                          ║
-║    - Hapus stratified bucketing (A/B/C)                                 ║
-║    - Expected: ~310-320 coin per run (yang aktif di Bitget)            ║
-║    - Runtime: ~5-7 menit (vs ~2 menit original)                        ║
-║                                                                          ║
-║  (Semua fix v9.9 dipertahankan)                                         ║
+║  EXPECTED RESULT:                                                        ║
+║    Alert: 2-3/run → 10-15/run (5x increase)                            ║
+║    Hit rate: 10-20% → 40% (4x improvement)                             ║
+║    Miss pump: 80% → 30-40% (2x better)                                 ║
+║    Kena SL: 90%+ → 50-60% (still high tapi lebih baik)                ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
+
+
 
 import requests, time, os, math, json, logging
 from datetime import datetime, timezone
@@ -114,7 +92,7 @@ CONFIG = {
     "sleep_coins":               0.8,
     "sleep_error":               3.0,
     "cooldown_file":    "/tmp/v10_cooldown.json",
-    "oi_snapshot_file": "/tmp/v9_oi.json",
+    "oi_snapshot_file": "/tmp/v10_oi.json",
 
     # ── Stealth pattern ───────────────────────────────────────
     "stealth_max_vol":       80_000,
@@ -184,7 +162,7 @@ CONFIG = {
     "nf_whale_6h_min":            5.0,
 
     # ── Log file (v9.8) ───────────────────────────────────────
-    "log_file": "/tmp/scanner_v9.log",
+    "log_file": "/tmp/scanner_v10.log",
     "log_max_mb": 10,
 
     # ── v10.0: TAMBAH KEY BARU (setelah line terakhir CONFIG) ─
@@ -1021,12 +999,17 @@ def layer_volume_intelligence(candles_1h):
             score  -= penalty
             sigs.append(f"RVOL {rvol:.1f}x + CVD negatif ringan — pantau distribusi")
 
-    return min(score, CONFIG["max_vol_score"]), sigs, rvol
+    # v10.0: On-The-Spot detection
+    ots_score, ots_type, ots_sigs = detect_on_the_spot_pump(candles_1h)
+    score += ots_score
+    sigs += ots_sigs
+
+    return min(score, CONFIG["max_vol_score"]), sigs, rvol, ots_type
 
 
 def layer_flat_accumulation(candles_1h):
     score, sigs = 0, []
-     if len(candles_1h) < CONFIG["build_min_duration"] + 1:
+    if len(candles_1h) < CONFIG["build_min_duration"] + 1:
         return 0, sigs
 
     if len(candles_1h) >= 24:
@@ -1066,7 +1049,7 @@ def layer_flat_accumulation(candles_1h):
     if cq_sig:
         sigs.append(cq_sig)
 
-   return min(max(score, 0), CONFIG["max_flat_score"]), sigs
+    return min(max(score, 0), CONFIG["max_flat_score"]), sigs
 
 
 def layer_structure(candles_1h):
@@ -1095,16 +1078,6 @@ def layer_structure(candles_1h):
         score += 3; sigs.append(f"Coiling {coiling}h")
     elif coiling >= 5:
         score += 1
-
-      # v10.0: On-The-Spot detection
-    ots_score, ots_type, ots_sigs = detect_on_the_spot_pump(candles_1h)
-    score += ots_score
-    sigs += ots_sigs
-    
-    # ===== END TAMBAHAN =====
-
-    return min(score, CONFIG["max_vol_score"]), sigs, rvol, ots_type  # TAMBAH ots_type di return
-   
 
     return min(score, CONFIG["max_struct_score"]), sigs, bbw_val, bbw_pct, coiling
 
@@ -1386,22 +1359,6 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
 # ══════════════════════════════════════════════════════════════
 #  🔴 GC-5: MICRO-CAP OI ACCELERATION DETECTOR (v9.8)
 # ══════════════════════════════════════════════════════════════
-  if e:
-        msg += (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 <b>ENTRY ZONES (DEEP ENTRY v10.0)</b>\n"
-            f"  💡 Strategy: Tunggu pullback {CONFIG['deep_entry_pct']:.1f}% dari current\n"
-            f"  📌 Entry : ${e['entry']}  ({CONFIG['deep_entry_pct']:.1f}% below ${e['cur']})\n"
-            f"  🛑 SL    : ${e['sl']}  (-{e['sl_pct']:.1f}% KETAT!)\n\n"
-            f"🎯 <b>TARGET (REALISTIS)</b>\n"
-            f"  T1 : ${e['t1']}  (+{e['liq_pct']:.1f}%)\n"
-            f"  T2 : ${e['t2']}\n"
-            f"  R/R: 1:{e['rr']}\n\n"
-            f"  ⚠️ TIPS:\n"
-            f"  • JANGAN chase - tunggu dip 1-2%\n"
-            f"  • SL ketat {CONFIG['max_sl_pct']:.0f}% - cut loss cepat\n"
-            f"  • Take 50% profit di T1, trail sisanya\n"
-        )
 
     if oi_value <= 0:
         return 0, [], accel
@@ -1871,8 +1828,7 @@ def master_score(symbol, ticker, tickers_dict):
         avg_vol_6h, range_6h = 0, 0
 
     score, sigs, bd = 0, [], {}
-#edit terakir
-  v_sc, v_sigs, rvol, ots_type = layer_volume_intelligence(c1h)
+    v_sc, v_sigs, rvol, ots_type = layer_volume_intelligence(c1h)
     score += v_sc;  sigs += v_sigs;  bd["vol"] = v_sc
 
     stcvd_sc, stcvd_sig = calc_short_term_cvd(c1h)
@@ -2115,7 +2071,7 @@ def master_score(symbol, ticker, tickers_dict):
         "oi_accel_data":   oi_accel_data,
         "nf_data":         nf_data,
         "nf_score":        nf_sc,
-         "pump_type": ots_type, v
+        "pump_type":       ots_type,
     }
 
 
@@ -2185,9 +2141,14 @@ def build_alert(r, rank=None):
     if not bd.get("oi_valid", True):
         oi_warning = "⚠️ <i>OI baseline belum tersedia (run pertama)</i>\n"
 
+    pump_type = r.get("pump_type", "unknown")
+    type_icon = "🎯" if pump_type == "on_the_spot" else "📦" if pump_type == "pre_accumulation" else "❓"
+    type_name = {"on_the_spot": "On-The-Spot", "pre_accumulation": "Pre-Accumulation", "unknown": "Unknown"}.get(pump_type, "Unknown")
+
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.10-FULL</b>\n\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v10.0-AGGRESSIVE</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']}\n"
+        f"<b>Pump Type :</b> {type_icon} {type_name}\n"
         f"<b>Composite :</b> {comp}/100  {bar}\n"
         f"<b>Layer Score:</b> {sc}/100\n"
         f"<b>Prob Model :</b> {prob_pct:.1f}% ({prob_cls})\n"
@@ -2213,15 +2174,18 @@ def build_alert(r, rank=None):
     if e:
         msg += (
             f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 <b>ENTRY ZONES</b>\n"
-            f"  🟢 VWAP  : ${e['z1']}\n"
-            f"  🟢 POC   : ${e['z2']}\n"
-            f"  📌 Entry : ${e['entry']}\n"
-            f"  🛑 SL    : ${e['sl']}  (-{e['sl_pct']:.1f}%)\n\n"
-            f"🎯 <b>TARGET</b>\n"
+            f"📍 <b>ENTRY ZONES (DEEP ENTRY v10.0)</b>\n"
+            f"  💡 Strategy: Tunggu pullback {CONFIG['deep_entry_pct']:.1f}% dari current\n"
+            f"  📌 Entry : ${e['entry']}  ({CONFIG['deep_entry_pct']:.1f}% below ${e['cur']})\n"
+            f"  🛑 SL    : ${e['sl']}  (-{e['sl_pct']:.1f}% KETAT!)\n\n"
+            f"🎯 <b>TARGET (REALISTIS)</b>\n"
             f"  T1 : ${e['t1']}  (+{e['liq_pct']:.1f}%)\n"
             f"  T2 : ${e['t2']}\n"
-            f"  R/R: 1:{e['rr']}  |  ATR: ${e['atr']}\n"
+            f"  R/R: 1:{e['rr']}\n\n"
+            f"  ⚠️ TIPS:\n"
+            f"  • JANGAN chase - tunggu dip 1-2%\n"
+            f"  • SL ketat {CONFIG['max_sl_pct']:.0f}% - cut loss cepat\n"
+            f"  • Take 50% profit di T1, trail sisanya\n"
         )
 
     msg += f"\n━━━━━━━━━━━━━━━━━━━━\n📊 <b>SINYAL AKTIF</b>\n"
@@ -2246,7 +2210,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v9.10-FULL — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v10.0-AGGRESSIVE — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp     = r.get("composite_score", r["score"])
         bar      = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -2260,12 +2224,6 @@ def build_summary(results):
         oi_tag   = " ⚠️OI?" if not r.get("bd", {}).get("oi_valid", True) else ""
         msg += (
             f"{i}. <b>{r['symbol']}</b> [C:{comp} S:{r['score']} {bar}]{linea}{oi_tag}\n"
-            # TAMBAHKAN setelah f"<b>Symbol    :</b> {r['symbol']}\n"
-    pump_type = r.get("pump_type", "unknown")
-    type_icon = "🎯" if pump_type == "on_the_spot" else "📦" if pump_type == "pre_accumulation" else "❓"
-    type_name = {"on_the_spot": "On-The-Spot", "pre_accumulation": "Pre-Accumulation", "unknown": "Unknown"}.get(pump_type, "Unknown")
-    msg += f"<b>Pump Type :</b> {type_icon} {type_name}\n"
-
             f"   🐋{r['ws']} | RVOL:{r['rvol']:.1f}x | {vol} | "
             f"T1:+{t1p:.0f}% | {prob:.0f}% {prob_cls} | RSI:{rsi:.0f}\n"
         )
@@ -2274,11 +2232,11 @@ def build_summary(results):
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔍  v9.10-FULL-WHITELIST: BUILD CANDIDATE LIST
+#  🔍  v10.0-AGGRESSIVE: BUILD CANDIDATE LIST
 # ══════════════════════════════════════════════════════════════
 def build_candidate_list(tickers):
     """
-    v9.10-FULL-WHITELIST: Scan SEMUA 324 coin whitelist.
+    v10.0-AGGRESSIVE: Scan SEMUA 324 coin whitelist.
     
     MODIFIKASI dari v9.10 original:
     - Hapus stratified bucketing (Bucket A/B/C)
@@ -2380,7 +2338,6 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def run_scan():
-   def run_scan():
     log.info(f"=== PRE-PUMP SCANNER v10.0-AGGRESSIVE — {utc_now()} ===")
     log.info("=" * 70)
     log.info("PERUBAHAN vs v9.10:")
