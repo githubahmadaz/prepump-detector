@@ -1353,12 +1353,10 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
 
 
 # ══════════════════════════════════════════════════════════════
-#  💰  ENTRY ZONE CALCULATOR
-# ══════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════
 #  🔴 GC-5: MICRO-CAP OI ACCELERATION DETECTOR (v9.8)
 # ══════════════════════════════════════════════════════════════
+def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
+    score, sigs, accel = 0, [], {}
 
     if oi_value <= 0:
         return 0, [], accel
