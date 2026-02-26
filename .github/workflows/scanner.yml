@@ -2,15 +2,15 @@ name: Pre-Pump Scanner
 
 on:
   schedule:
-    # Jalankan setiap 4 jam pada menit ke-0
-    - cron: '0 */2 * * *'
+    # Jalankan setiap 15 menit
+     - cron: '0 */2 * * *'
   workflow_dispatch:
     # Tombol "Run manually" di GitHub
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 12
 
     steps:
       - name: Checkout kode
