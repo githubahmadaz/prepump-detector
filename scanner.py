@@ -1,48 +1,32 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v9.10-FULL-WHITELIST                                  ║
+║  PRE-PUMP SCANNER v10.0                                                  ║
 ║                                                                          ║
-║  MODIFIKASI: Scan SEMUA 324 coin whitelist (bukan ~90 coin saja)       ║
+║  Research-backed improvements dari 3 jurnal ilmiah:                     ║
 ║                                                                          ║
-║  v9.10 — GC-6: MULTI-TIMEFRAME NET FLOW LAYER                          ║
+║  [J1] "The Doge of Wall Street" — arXiv 2105.00733                     ║
+║       + StdRushOrder (threshold 12.8)                                   ║
+║       + Sell Rush Dominance Gate (sumber FP utama)                     ║
 ║                                                                          ║
-║  MOTIVASI:                                                               ║
-║    Banyak alert v9.9 punya score bagus tapi Net Flow negatif            ║
-║    (distribusi aktif). CVD yang ada hanya estimasi kasar dari candle.   ║
-║    Scanner perlu melihat "uang masuk atau keluar" secara eksplisit      ║
-║    dalam USD — bukan hanya persentase atau taker ratio.                 ║
+║  [J2] "Microstructure and Manipulation" — arXiv 2504.15790             ║
+║       + On-The-Spot Pump Detector (30.7% pump yang terlewat)           ║
+║       + On-The-Spot Weak Signal Gate                                    ║
 ║                                                                          ║
-║  GC-6: NET FLOW MULTI-TF (3 sumber data, 4 window waktu)               ║
-║    Sumber 1: Candle 1h → window 72h, 24h, 6h                           ║
-║    Sumber 2: Candle 15m → window 3h (lebih granular)                   ║
-║    Sumber 3: Trade ticks → window 15 menit real-time                   ║
+║  [J3] "Detecting P&D with Crypto-Assets" — MDPI 2023                   ║
+║       + Bobot probability model dari RF feature importance              ║
+║       + Volume 60-minute insider buying signal                          ║
 ║                                                                          ║
-║    Formula per candle: buy_ratio = (close-low)/(high-low)              ║
-║    net_flow = (buy_ratio*2 - 1) * volume_usd  → [-vol, +vol]           ║
-║    net_pct  = net_usd / total_vol * 100       → [-100%, +100%]         ║
-║                                                                          ║
-║  WHALE ACCUMULATION PATTERN (paling kuat):                             ║
-║    72h: sedikit negatif (whale suppress harga sambil akumulasi)        ║
-║    24h: mulai positif (akumulasi fase tengah)                           ║
-║     6h: positif kuat (whale hampir selesai, siap pump)                 ║
-║    → Pola "funnel" ini adalah sinyal pre-pump terkuat                  ║
-║                                                                          ║
-║  GATE + SCORING ("keduanya"):                                           ║
-║    Hard block: 72h < -12% AND 24h < -8% AND 6h < -5% → distribusi     ║
-║    sistematis di semua TF → tidak mungkin pump segera                  ║
-║    Scoring: gradasi berdasarkan alignment multi-TF (max 25 poin)       ║
-║                                                                          ║
-║  PERUBAHAN v9.10-FULL-WHITELIST:                                        ║
-║    - Scan SEMUA 324 coin whitelist setiap run                          ║
-║    - Hapus stratified bucketing (A/B/C)                                 ║
-║    - Expected: ~310-320 coin per run (yang aktif di Bitget)            ║
-║    - Run: ~5-7 menit (vs ~2 menit original)                        ║
-║                                                                          ║
-║  (Semua fix v9.9 dipertahankan)                                         ║
+║  Perubahan vs v9.9:                                                     ║
+║  - Whitelist diperbarui sesuai pilihan user                             ║
+║  - Stratified bucket dinonaktifkan → scan semua whitelist langsung      ║
+║  - Gate baru: Sell Rush Dominance, On-The-Spot Weak                    ║
+║  - Sinyal baru: StdRushOrder, On-The-Spot, Vol60m                      ║
+║  - Bobot prob: irr 0.20→0.26, slope 0.13→0.20, spike 0.28→0.22        ║
+║  - min_prob_alert: 0.50 → 0.45 (lebih sensitif, kurangi FN)            ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 
-import requests, time, os, math, json, logging, random
+import requests, time, os, math, json, logging, random, numpy as np
 from datetime import datetime, timezone
 from collections import defaultdict
 
@@ -55,21 +39,21 @@ except ImportError:
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 
-# ── Logging: console + file (v9.8) ───────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────
 import logging.handlers as _lh
-_log_fmt    = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-_log_root   = logging.getLogger()
+_log_fmt  = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_log_root = logging.getLogger()
 _log_root.setLevel(logging.INFO)
 _ch = logging.StreamHandler()
 _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v9.log", maxBytes=10*1024*1024, backupCount=3
+    "/tmp/scanner_v10.log", maxBytes=10*1024*1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 log = logging.getLogger(__name__)
-log.info("Log file aktif: /tmp/scanner_v9.log (rotasi 10MB)")
+log.info("Log file aktif: /tmp/scanner_v10.log")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -78,7 +62,7 @@ log.info("Log file aktif: /tmp/scanner_v9.log (rotasi 10MB)")
 CONFIG = {
     # ── Threshold alert ───────────────────────────────────────
     "min_composite_alert":       52,
-    "min_prob_alert":          0.50,
+    "min_prob_alert":          0.45,   # v10.0: 0.50→0.45 [J3: lebih sensitif]
     "min_score_alert":           30,
     "min_whale_score":           15,
     "max_alerts_per_run":         8,
@@ -113,8 +97,8 @@ CONFIG = {
     "alert_cooldown_sec":       3600,
     "sleep_coins":               0.8,
     "sleep_error":               3.0,
-    "cooldown_file":    "/tmp/v9_cooldown.json",
-    "oi_snapshot_file": "/tmp/v9_oi.json",
+    "cooldown_file":    "/tmp/v10_cooldown.json",
+    "oi_snapshot_file": "/tmp/v10_oi.json",
 
     # ── Stealth pattern ───────────────────────────────────────
     "stealth_max_vol":       80_000,
@@ -126,7 +110,7 @@ CONFIG = {
     "squeeze_oi_change_min":     3.0,
 
     # ── Layer max scores ──────────────────────────────────────
-    "max_vol_score":             30,
+    "max_vol_score":             50,   # v10.0: 30→50 (ada sinyal OTS + Vol60m)
     "max_flat_score":            20,
     "max_struct_score":          15,
     "max_pos_score":             15,
@@ -135,12 +119,12 @@ CONFIG = {
     "max_whale_bonus":           20,
     "max_linea_score":           25,
 
-    # ── Pump probability weights ──────────────────────────────
-    "prob_mvs_w1":         30,
-    "prob_irr_w2":         20,
-    "prob_avs_w3":         15,
-    "prob_atr_w4":         20,
-    "prob_slope_w5":       15,
+    # ── Pump probability weights v10.0 (dari RF feature importance [J3]) ─
+    "prob_mvs_w1":         22,   # max_vol_spike    30→22 [J3]
+    "prob_irr_w2":         26,   # vol_irregularity 20→26 [J1: StdRushOrder proxy]
+    "prob_avs_w3":         15,   # avg_vol_spike    15=15
+    "prob_atr_w4":         17,   # norm_atr         20→17 [J3]
+    "prob_slope_w5":       20,   # price_slope      15→20 [J3: avg_price tertinggi]
 
     # ── GC-2: Liquidation Detector ────────────────────────────
     "liq_window_min":            30,
@@ -168,55 +152,49 @@ CONFIG = {
     # ── v9.9 BUG #2: Dead Activity Gate ──────────────────────
     "dead_activity_threshold":   0.10,
 
-    # ── GC-6: Multi-TF Net Flow (v9.10) ───────────────────────
-    "max_netflow_score":         25,
-    "nf_strong_buy":             12.0,
-    "nf_buy":                     5.0,
-    "nf_neutral_max":             5.0,
-    "nf_sell":                   -5.0,
-    "nf_strong_sell":           -15.0,
-    "nf_gate_72h":              -12.0,
-    "nf_gate_24h":               -8.0,
-    "nf_gate_6h":                -5.0,
-    "nf_whale_72h_max":           3.0,
-    "nf_whale_72h_min":         -15.0,
-    "nf_whale_24h_min":           3.0,
-    "nf_whale_6h_min":            5.0,
+    # ── v10.0 NEW: Rush Order Config [J1] ────────────────────
+    "rush_std_threshold":        12.8,
+    "rush_std_micro_threshold":   6.4,
+    "rush_micro_vol_usd":    500_000,
+    "rush_sell_fp_ratio":        0.30,
 
-    # ── Log file (v9.8) ───────────────────────────────────────
-    "log_file": "/tmp/scanner_v9.log",
+    # ── v10.0 NEW: On-The-Spot Pump Config [J2] ──────────────
+    "ots_no_accum_vol_ratio":    0.50,
+    "ots_spike_vol_ratio":        5.0,
+    "ots_price_change_min":      0.05,
+    "ots_confirm_vol_ratio":      7.0,
+
+    # ── v10.0 NEW: Volume 60-Minute Window [J3] ──────────────
+    "vol60m_ratio_threshold":     3.0,
+    "vol60m_accum_ratio":         2.0,
+
+    # ── Log file ──────────────────────────────────────────────
+    "log_file": "/tmp/scanner_v10.log",
     "log_max_mb": 10,
 }
 
-# ── STOCK_TICKERS ─────────────────────────────────────────────────────────
-STOCK_TICKERS = {
-    "CSCOUSDT","PEPUSDT","QQQUSDT","AAPLUSDT","MSFTUSDT","GOOGLUSDT",
-    "INTCUSDT","AMDUSDT","NVDAUSDT","TSLAUSDT","AMZNUSDT","METAUSDT",
-    "NFLXUSDT","ADBEUSDT","CRMUSDT","ORCLUSDT","IBMUSDT","SAPUSDT",
-    "PYPLUSDT","UBERUSDT","LYFTUSDT","SPYUSDT","DIAUSDT","IWMUSDT",
-    "MCDUSDT","KOLUSDT","DISUSDT","BRKUSDT","JPMCUSDT","BACHUSDT",
-    "SBUXUSDT","NKEUSDT","WMTUSDT","COSTUSDT","HDUSTUSDT",
-    "LLYUSDT","PFIZUSDT","JNJUSDT","ABBVUSDT","MRKUSDT","AMGNUSDT",
-    "ASMLUSDT","TSMCUSDT",
-    "HOODUSDT","COINUSDT",
-    "GSUSDT","MSUSDT","BAMUSDT",
-    "SNAPUSDT",
-    "FUTUUSDT","TIGRUSDT","MUUSDT","MRVLUSDT","QCOMUSDT","TXNUSDT",
-    "SMHUSDT","FOUSDT","GMUSDT","RIVUSDT","LCIDUSDT","NIOOUSDT",
-    "RDTUSDT","SPOTUSDT","RBLXUSDT","SHOPUSDT","ETSYUSDT",
-    "BABAUSDT","AVGOUSDT","BRKBUSDT","VISAUSDT","MAUSDT","ABNBUSDT","AIRBNBUSDT",
-    "RDDTUSDT","RDDUSDT","PLTRUSDT","MSTRUSDT","SOFIUSDT","NUSDT",
-    "AFRMUSDT","UPSTUSDT","CARVAUSDT","IONQUSDT","ARQITUSDT","ROBHUSDT",
-}
-
-MANUAL_EXCLUDE = set()
-
-# ══════════════════════════════════════════════════════════════
-#  📋  WHITELIST — 324 coin pilihan (v9.8)
-
-# ══════════════════════════════════════════════════════════════
+# ── WHITELIST — pilihan user ──────────────────────────────────────────────
 WHITELIST_SYMBOLS = {
- "DOGEUSDT", "BCHUSDT", "ADAUSDT", "HYPEUSDT", "XMRUSDT", "LINKUSDT", "XLMUSDT", "HBARUSDT",
+    "UAIUSDT", "VTHOUSDT", "RAVEUSDT", "NMRUSDT", "COAIUSDT", "GWEIUSDT", "MEUSDT", "ORCAUSDT",
+    "BLURUSDT", "MERLUSDT", "MOODENGUSDT", "BIOUSDT", "SOMIUSDT", "B2USDT", "ORDIUSDT", "SPKUSDT",
+    "ZAMAUSDT", "PARTIUSDT", "1000RATSUSDT", "SSVUSDT", "BIRBUSDT", "POPCATUSDT", "GUNUSDT", "BEATUSDT",
+    "BANANAS31USDT", "LAUSDT", "LINEAUSDT", "DRIFTUSDT", "AVNTUSDT", "GRASSUSDT", "GPSUSDT", "PNUTUSDT",
+    "CELOUSDT", "LUNAUSDT", "VANAUSDT", "TRIAUSDT", "IOTXUSDT", "POLYXUSDT", "ANKRUSDT", "SAHARAUSDT",
+    "RPLUSDT", "MASKUSDT", "UMAUSDT", "TAGUSDT", "USELESSUSDT", "MEMEUSDT", "ATUSDT", "KGENUSDT",
+    "SKYAIUSDT", "ONTUSDT", "ENJUSDT", "SIGNUSDT", "CTKUSDT", "NOTUSDT", "CYBERUSDT", "GMTUSDT",
+    "FIDAUSDT", "CROSSUSDT", "STEEMUSDT", "LABUSDT", "BREVUSDT", "AUCTIONUSDT", "HOLOUSDT", "PEOPLEUSDT",
+    "CVCUSDT", "IOUSDT", "BROCCOLIUSDT", "SXTUSDT", "CLANKERUSDT", "BIGTIMEUSDT", "BLASTUSDT", "THEUSDT",
+    "XPINUSDT", "MANTAUSDT", "YGGUSDT", "WAXPUSDT", "ONGUSDT", "LAYERUSDT", "ANIMEUSDT", "BOMEUSDT",
+    "C98USDT", "API3USDT", "AGLDUSDT", "MMTUSDT", "INXUSDT", "GIGGLEUSDT", "IDOLUSDT", "ARKMUSDT",
+    "RESOLVUSDT", "EULUSDT", "METISUSDT", "SONICUSDT", "TNSRUSDT", "PROMUSDT", "SAPIENUSDT", "VELVETUSDT",
+    "FLOCKUSDT", "BANKUSDT", "ALLOUSDT", "USUALUSDT", "SLPUSDT", "ARIAUSDT", "MIRAUSDT", "MAGICUSDT",
+    "ZKCUSDT", "INUSDT", "NAORISUSDT", "MAGMAUSDT", "REZUSDT", "WCTUSDT", "FUSDT", "ELSAUSDT",
+    "SPACEUSDT", "APRUSDT", "AIXBTUSDT", "GOATUSDT", "DENTUSDT", "JCTUSDT", "XAIUSDT", "AIOUSDT",
+    "ZKPUSDT", "VINEUSDT", "METAUSDT", "FIGHTUSDT", "INITUSDT", "BASUSDT", "NEWTUSDT", "FUNUSDT",
+    "FOLKSUSDT", "ARPAUSDT", "MOVRUSDT", "MUBARAKUSDT", "NOMUSDT", "ACTUSDT", "ZKJUSDT", "VANRYUSDT",
+    "AINUSDT", "RECALLUSDT", "MAVUSDT", "CLOUSDT", "LIGHTUSDT", "TOWNSUSDT", "BLESSUSDT", "HAEDALUSDT",
+    "4USDT", "USUSDT", "HEIUSDT", "OGUSDT",
+    "DOGEUSDT", "BCHUSDT", "ADAUSDT", "HYPEUSDT", "XMRUSDT", "LINKUSDT", "XLMUSDT", "HBARUSDT",
     "LTCUSDT", "ZECUSDT", "AVAXUSDT", "SHIBUSDT", "SUIUSDT", "TONUSDT", "WLFIUSDT", "CROUSDT",
     "UNIUSDT", "DOTUSDT", "TAOUSDT", "MUSDT", "AAVEUSDT", "ASTERUSDT", "PEPEUSDT", "BGBUSDT",
     "SKYUSDT", "ETCUSDT", "NEARUSDT", "ONDOUSDT", "POLUSDT", "ICPUSDT", "WLDUSDT", "ATOMUSDT",
@@ -238,28 +216,9 @@ WHITELIST_SYMBOLS = {
     "TOSHIUSDT", "STGUSDT", "ZILUSDT", "LYNUSDT", "APEUSDT", "KAITOUSDT", "FORMUSDT", "AZTECUSDT",
     "QUSDT", "MOVEUSDT", "MINAUSDT", "SOONUSDT", "TUSDT", "BRETTUSDT", "ACHUSDT", "TURBOUSDT",
     "NXPCUSDT", "ALCHUSDT", "ZETAUSDT", "MOCAUSDT", "CYSUSDT", "ASTRUSDT", "ENSOUSDT", "AXLUSDT",
-    
-    "UAIUSDT", "VTHOUSDT", "RAVEUSDT", "NMRUSDT", "COAIUSDT", "GWEIUSDT", "MEUSDT", "ORCAUSDT",
-    "BLURUSDT", "MERLUSDT", "MOODENGUSDT", "BIOUSDT", "SOMIUSDT", "B2USDT", "ORDIUSDT", "SPKUSDT",
-    "ZAMAUSDT", "PARTIUSDT", "1000RATSUSDT", "SSVUSDT", "BIRBUSDT", "POPCATUSDT", "GUNUSDT", "BEATUSDT",
-    "BANANAS31USDT", "LAUSDT", "LINEAUSDT", "DRIFTUSDT", "AVNTUSDT", "GRASSUSDT", "GPSUSDT", "PNUTUSDT",
-    "CELOUSDT", "LUNAUSDT", "VANAUSDT", "TRIAUSDT", "IOTXUSDT", "POLYXUSDT", "ANKRUSDT", "SAHARAUSDT",
-    "RPLUSDT", "MASKUSDT", "UMAUSDT", "TAGUSDT", "USELESSUSDT", "MEMEUSDT", "ATUSDT", "KGENUSDT",
-    "SKYAIUSDT", "ONTUSDT", "ENJUSDT", "SIGNUSDT", "CTKUSDT", "NOTUSDT", "CYBERUSDT", "GMTUSDT",
-    "FIDAUSDT", "CROSSUSDT", "STEEMUSDT", "LABUSDT", "BREVUSDT", "AUCTIONUSDT", "HOLOUSDT", "PEOPLEUSDT",
-    "CVCUSDT", "IOUSDT", "BROCCOLIUSDT", "SXTUSDT", "CLANKERUSDT", "BIGTIMEUSDT", "BLASTUSDT", "THEUSDT",
-    "XPINUSDT", "MANTAUSDT", "YGGUSDT", "WAXPUSDT", "ONGUSDT", "LAYERUSDT", "ANIMEUSDT", "BOMEUSDT",
-    "C98USDT", "API3USDT", "AGLDUSDT", "MMTUSDT", "INXUSDT", "GIGGLEUSDT", "IDOLUSDT", "ARKMUSDT",
-    "RESOLVUSDT", "EULUSDT", "METISUSDT", "SONICUSDT", "TNSRUSDT", "PROMUSDT", "SAPIENUSDT", "VELVETUSDT",
-    "FLOCKUSDT", "BANKUSDT", "ALLOUSDT", "USUALUSDT", "SLPUSDT", "ARIAUSDT", "MIRAUSDT", "MAGICUSDT",
-    "ZKCUSDT", "INUSDT", "NAORISUSDT", "MAGMAUSDT", "REZUSDT", "WCTUSDT", "FUSDT", "ELSAUSDT",
-    "SPACEUSDT", "APRUSDT", "AIXBTUSDT", "GOATUSDT", "DENTUSDT", "JCTUSDT", "XAIUSDT", "AIOUSDT",
-    "ZKPUSDT", "VINEUSDT", "METAUSDT", "FIGHTUSDT", "INITUSDT", "BASUSDT", "NEWTUSDT", "FUNUSDT",
-    "FOLKSUSDT", "ARPAUSDT", "MOVRUSDT", "MUBARAKUSDT", "NOMUSDT", "ACTUSDT", "ZKJUSDT", "VANRYUSDT",
-    "AINUSDT", "RECALLUSDT", "MAVUSDT", "CLOUSDT", "LIGHTUSDT", "TOWNSUSDT", "BLESSUSDT", "HAEDALUSDT",
-    "4USDT", "USUSDT", "HEIUSDT", "OGUSDT", 
-   
 }
+
+MANUAL_EXCLUDE = set()
 
 GRAN_MAP = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
 
@@ -267,39 +226,42 @@ SECTOR_MAP = {
     "DEFI": [
         "SNXUSDT","ENSOUSDT","SIRENUSDT","CRVUSDT","CVXUSDT","COMPUSDT",
         "AAVEUSDT","UNIUSDT","DYDXUSDT","COWUSDT","PENDLEUSDT","MORPHOUSDT",
-        "FLUIDUSDT","SSVUSDT","LRCUSDT","RSRUSDT","NMRUSDT","UMAUSDT","BALUSDT",
-        "LDOUSDT","ENSUSDT",
+        "FLUIDUSDT","SSVUSDT","RSRUSDT","NMRUSDT","UMAUSDT","LDOUSDT","ENSUSDT",
     ],
-    "ZK_PRIVACY": ["AZTECUSDT","MINAUSDT","STRKUSDT","ZORAUSDT","ZRXUSDT","POLYXUSDT"],
-    "DESCI":      ["BIOUSDT","ATHUSDT"],
-    "AI_CRYPTO":  [
+    "ZK_PRIVACY": ["AZTECUSDT","MINAUSDT","STRKUSDT","ZORAUSDT","POLYXUSDT","ZKPUSDT","ZKCUSDT","ZKJUSDT"],
+    "AI_CRYPTO": [
         "FETUSDT","RENDERUSDT","TAOUSDT","GRASSUSDT","AKTUSDT","VANAUSDT",
-        "COAIUSDT","UAIUSDT","GRTUSDT","OCEANUSDT","AGIXUSDT",
+        "COAIUSDT","UAIUSDT","GRTUSDT","AIOUSDT","AIXBTUSDT","SKYAIUSDT",
     ],
     "SOLANA_ECO": [
         "ORCAUSDT","RAYUSDT","JTOUSDT","DRIFTUSDT","WIFUSDT","JUPUSDT",
-        "1000BONKUSDT","PYTHUSDT","MEWUSDT",
+        "1000BONKUSDT","PYTHUSDT",
     ],
     "LAYER1": [
         "APTUSDT","SUIUSDT","SEIUSDT","INJUSDT","KASUSDT","BERAUSDT",
         "MOVEUSDT","KAIAUSDT","TIAUSDT","EGLDUSDT","NEARUSDT","TONUSDT",
         "ALGOUSDT","HBARUSDT","STEEMUSDT","XTZUSDT","ZILUSDT","VETUSDT",
-        "ESPUSDT","TRXUSDT",
+        "ESPUSDT","SONICUSDT","INITUSDT",
     ],
-    "LAYER2": ["ARBUSDT","OPUSDT","CELOUSDT","STRKUSDT","LDOUSDT","POLUSDT","LINEAUSDT"],
+    "LAYER2": ["ARBUSDT","OPUSDT","CELOUSDT","STRKUSDT","LDOUSDT","POLUSDT","LINEAUSDT","MANTAUSDT","BLASTUSDT"],
     "GAMING": [
         "AXSUSDT","GALAUSDT","IMXUSDT","SANDUSDT","APEUSDT","SUPERUSDT",
-        "CHZUSDT","ENJUSDT","GLMUSDT",
-    ],
-    "LOW_CAP": [
-        "VVVUSDT","POWERUSDT","ARCUSDT","AGLDUSDT","VIRTUALUSDT","SPXUSDT",
-        "ONDOUSDT","ENAUSDT","EIGENUSDT","STXUSDT","RUNEUSDT","ORDIUSDT",
-        "SKRUSDT","BRETTUSDT","AVNTUSDT","AEROUSDT",
+        "CHZUSDT","ENJUSDT","GLMUSDT","BIGTIMEUSDT","MAGICUSDT","YGGUSDT",
     ],
     "MEME": [
         "PEPEUSDT","SHIBUSDT","FLOKIUSDT","BRETTUSDT","FARTCOINUSDT",
         "MEMEUSDT","TURBOUSDT","PNUTUSDT","POPCATUSDT","MOODENGUSDT",
-        "1000BONKUSDT","TRUMPUSDT","WIFUSDT","TOSHIUSDT",
+        "1000BONKUSDT","TRUMPUSDT","WIFUSDT","TOSHIUSDT","BROCCOLIUSDT",
+        "BANANAS31USDT","NOTUSDT","GMTUSDT","PEOPLEUSDT",
+    ],
+    "ORDI_BTC": [
+        "ORDIUSDT","1000RATSUSDT","1000SATSUSDT","SPKUSDT",
+    ],
+    "LOW_CAP": [
+        "VVVUSDT","POWERUSDT","ARCUSDT","VIRTUALUSDT","SPXUSDT",
+        "ONDOUSDT","ENAUSDT","EIGENUSDT","STXUSDT","RUNEUSDT",
+        "SKRUSDT","AVNTUSDT","AEROUSDT","GRASSUSDT","BIOUSDT",
+        "VANAUSDT","GOATUSDT","PNUTUSDT","GUNUSDT",
     ],
 }
 SECTOR_LOOKUP = {coin: sec for sec, coins in SECTOR_MAP.items() for coin in coins}
@@ -307,8 +269,6 @@ SECTOR_LOOKUP = {coin: sec for sec, coins in SECTOR_MAP.items() for coin in coin
 BITGET_BASE    = "https://api.bitget.com"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 _cache         = {}
-
-EXCLUDED_KEYWORDS = ["XAU","PAXG","BTC","ETH","USDC","DAI","BUSD","UST","LUNC","LUNA"]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -356,18 +316,11 @@ def save_oi_snapshot(symbol, oi_value):
     except:
         pass
 
-
-# ══════════════════════════════════════════════════════════════
-#  🔴 v9.9 BUG #1 FIX: get_oi_changes() — OI-valid Gate
-# ══════════════════════════════════════════════════════════════
 def get_oi_changes(symbol, current_oi):
-    """v9.9 FIX BUG #1: OI-valid Gate diperbaiki."""
     snaps = load_oi_snapshots()
     hist  = snaps.get(symbol, [])
-
     if len(hist) < 2:
         return 0, 0, False
-
     now = time.time()
 
     def nearest(target_ts, tolerance=1800):
@@ -384,9 +337,7 @@ def get_oi_changes(symbol, current_oi):
 
     chg1h  = (current_oi - old1h["oi"])  / old1h["oi"]  * 100 if old1h  and old1h["oi"]  else 0
     chg24h = (current_oi - old24h["oi"]) / old24h["oi"] * 100 if old24h and old24h["oi"] else 0
-
     oi_valid = (old1h is not None)
-
     return chg1h, chg24h, oi_valid
 
 
@@ -404,7 +355,7 @@ def set_cooldown(sym):
 # ══════════════════════════════════════════════════════════════
 #  🌐  HTTP UTILITIES
 # ══════════════════════════════════════════════════════════════
-def safe_get(url, params=None, timeout=30):
+def safe_get(url, params=None, timeout=12):
     for attempt in range(2):
         try:
             r = requests.get(url, params=params, timeout=timeout)
@@ -531,12 +482,10 @@ def get_trades(symbol, limit=500):
         trades = []
         for t in data.get("data", []):
             try:
-                ts_ms = int(t.get("fillTime", t.get("cTime", t.get("ts", 0))))
                 trades.append({
                     "price": float(t["price"]),
                     "size":  float(t["size"]),
                     "side":  t.get("side", "").lower(),
-                    "ts_ms": ts_ms,
                 })
             except:
                 pass
@@ -564,19 +513,17 @@ def get_orderbook(symbol, levels=50):
 def get_liquidations(symbol):
     data = safe_get(
         f"{BITGET_BASE}/api/v2/mix/market/liquidation-orders",
-        params={"symbol": symbol, "productType": "usdt-futures",
-                "pageSize": "100"},
+        params={"symbol": symbol, "productType": "usdt-futures", "pageSize": "100"},
     )
     if not data or data.get("code") != "00000":
         return 0, 0
     try:
-        orders = data.get("data", {}).get("liquidationOrderList", [])
-        now_ms = int(time.time() * 1000)
-        cutoff = now_ms - CONFIG["liq_window_min"] * 60 * 1000
-        long_liq  = 0.0
-        short_liq = 0.0
+        orders  = data.get("data", {}).get("liquidationOrderList", [])
+        now_ms  = int(time.time() * 1000)
+        cutoff  = now_ms - CONFIG["liq_window_min"] * 60 * 1000
+        long_liq = short_liq = 0.0
         for o in orders:
-            ts   = int(o.get("cTime", 0))
+            ts  = int(o.get("cTime", 0))
             if ts < cutoff:
                 continue
             usd  = float(o.get("size", 0)) * float(o.get("fillPrice", 0))
@@ -605,8 +552,7 @@ def get_rsi(candles, period=14):
         avg_l = (avg_l * (period - 1) + losses[i]) / period
     if avg_l == 0:
         return 100.0
-    rs = avg_g / avg_l
-    return 100 - (100 / (1 + rs))
+    return 100 - (100 / (1 + avg_g / avg_l))
 
 def get_cg_trending():
     key = "cg_trend"
@@ -691,11 +637,9 @@ def calc_poc(candles):
 def find_resistance_targets(candles_1h, cur):
     if len(candles_1h) < 24:
         return cur * 1.10, cur * 1.18
-
     recent = candles_1h[-168:]
     resistance_levels = []
     min_t = cur * (1 + CONFIG["min_target_pct"] / 100)
-
     for i in range(2, len(recent) - 2):
         h = recent[i]["high"]
         if h <= min_t:
@@ -706,11 +650,8 @@ def find_resistance_targets(candles_1h, cur):
         )
         if touches >= 2:
             resistance_levels.append((h, touches, recent[i]["volume_usd"]))
-
     if not resistance_levels:
-        atr = calc_atr(candles_1h[-24:]) or cur * 0.02
         return round(cur * 1.10, 8), round(cur * 1.18, 8)
-
     resistance_levels.sort(key=lambda x: x[0])
     t1 = resistance_levels[0][0]
     t2 = resistance_levels[1][0] if len(resistance_levels) > 1 else t1 * 1.08
@@ -738,7 +679,7 @@ def calc_rvol(candles_1h):
 def calc_volume_spike_ratio(candles_1h):
     if len(candles_1h) < 24:
         return 1.0, 1.0
-    vols    = [c["volume_usd"] for c in candles_1h]
+    vols     = [c["volume_usd"] for c in candles_1h]
     baseline = sorted(vols[:-6])[:int(len(vols) * 0.6)]
     base_avg = sum(baseline) / len(baseline) if baseline else 1
     if base_avg <= 0:
@@ -755,7 +696,7 @@ def calc_volume_irregularity(candles_1h):
     mean = sum(vols) / len(vols)
     if mean <= 0:
         return 0.0
-    std  = math.sqrt(sum((v - mean) ** 2 for v in vols) / len(vols))
+    std = math.sqrt(sum((v - mean) ** 2 for v in vols) / len(vols))
     return std / mean
 
 def calc_normalized_atr(candles_1h):
@@ -792,7 +733,6 @@ def calc_cvd_signal(candles_1h):
     p_start   = window[0]["close"]
     p_end     = window[-1]["close"]
     price_chg = (p_end - p_start) / p_start * 100 if p_start > 0 else 0
-
     if cvd_rising and price_chg < 1.5:
         if price_chg < -1.5:
             return 15, f"🔍 CVD Divergence KUAT: harga {price_chg:+.1f}% tapi buy pressure dominan"
@@ -802,13 +742,12 @@ def calc_cvd_signal(candles_1h):
             return 8,  f"🔍 CVD naik, harga flat — hidden accumulation"
     elif cvd_rising and 1.5 <= price_chg <= 5.0:
         return 5, f"CVD bullish, harga naik sehat ({price_chg:+.1f}%)"
-
     if not cvd_rising and price_chg > 1.5:
-        return -12, f"⚠️ CVD turun saat harga naik {price_chg:+.1f}% — distribusi tersembunyi"
+        return -12, f"⚠️ CVD turun saat harga naik {price_chg:+.1f}% — distribusi"
     elif not cvd_rising and -1.5 <= price_chg <= 1.5:
         return -8, f"⚠️ CVD turun, harga flat — tekanan jual tersembunyi"
     elif not cvd_rising and price_chg < -1.5:
-        return -5, f"⚠️ CVD turun saat harga {price_chg:+.1f}% — tren jual berlanjut"
+        return -5, f"⚠️ CVD turun saat harga {price_chg:+.1f}%"
     return 0, ""
 
 def calc_short_term_cvd(candles_1h):
@@ -816,7 +755,6 @@ def calc_short_term_cvd(candles_1h):
         return 0, ""
     recent = candles_1h[-6:]
     prev   = candles_1h[-12:-6]
-
     def cvd_delta(candles):
         delta = 0.0
         for c in candles:
@@ -824,21 +762,19 @@ def calc_short_term_cvd(candles_1h):
             buy_ratio = (c["close"] - c["low"]) / rng if rng > 0 else 0.5
             delta += (buy_ratio * 2 - 1) * c["volume_usd"]
         return delta
-
     recent_d = cvd_delta(recent)
     prev_d   = cvd_delta(prev)
     cur      = candles_1h[-1]["close"]
     p6h      = candles_1h[-6]["close"] if len(candles_1h) >= 6 else cur
     price_chg_6h = (cur - p6h) / p6h * 100 if p6h > 0 else 0
-
     if recent_d < 0 and recent_d < prev_d * 0.8:
         if price_chg_6h > -2:
-            return -10, f"⚠️ CVD 6h memburuk — tekanan jual meningkat ({price_chg_6h:+.1f}% 6h)"
-        return -5, f"⚠️ CVD 6h negatif — distribusi aktif"
+            return -10, f"⚠️ CVD 6h memburuk — tekanan jual meningkat ({price_chg_6h:+.1f}%)"
+        return -5, f"⚠️ CVD 6h negatif"
     if recent_d > 0 and recent_d > prev_d * 1.2:
         if price_chg_6h < 2:
-            return 8, f"✅ CVD 6h membaik — akumulasi baru ({price_chg_6h:+.1f}% 6h)"
-        return 4, f"CVD 6h positif — buying momentum"
+            return 8, f"✅ CVD 6h membaik — akumulasi baru ({price_chg_6h:+.1f}%)"
+        return 4, f"CVD 6h positif"
     return 0, ""
 
 def detect_higher_lows(candles):
@@ -886,34 +822,221 @@ def candle_quality_score(candles_1h):
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔬  PUMP PROBABILITY MODEL
+#  🆕 v10.0 — FUNGSI BARU [J1] StdRushOrder
+# ══════════════════════════════════════════════════════════════
+def calc_rush_orders(trades, vol_24h=0):
+    """
+    Menghitung StdRushOrder dari recent trades [J1].
+    Rush order = cluster market buy orders pada harga yang sama.
+    Threshold: > 12.8 (normal), > 6.4 (micro-cap < $500K vol).
+    """
+    if not trades or len(trades) < 20:
+        return 0, 0.5, 0, 0, []
+
+    buy_trades  = [t for t in trades if t["side"] == "buy"]
+    sell_trades = [t for t in trades if t["side"] == "sell"]
+    if not buy_trades:
+        return 0, 0.5, 0, 0, []
+
+    # Cluster harga sebagai proxy rush order
+    price_buckets = {}
+    for t in buy_trades:
+        key = round(t["price"], 4)
+        if key not in price_buckets:
+            price_buckets[key] = []
+        price_buckets[key].append(t["size"])
+
+    cluster_counts = [len(v) for v in price_buckets.values()]
+    if len(cluster_counts) < 3:
+        return 0, 0.5, 0, 0, []
+
+    std_rush = float(np.std(cluster_counts))
+
+    # Rasio buy vs sell rush
+    sell_clusters   = {}
+    for t in sell_trades:
+        key = round(t["price"], 4)
+        sell_clusters[key] = sell_clusters.get(key, 0) + 1
+    total_buy_rush  = len(price_buckets)
+    total_sell_rush = len(sell_clusters)
+    buy_rush_ratio  = total_buy_rush / (total_buy_rush + total_sell_rush + 1e-8)
+
+    # Spike ratio: late vs early trades
+    mid          = len(buy_trades) // 2
+    early_clust  = len(set(round(t["price"], 4) for t in buy_trades[:mid])) if mid > 0 else 1
+    late_clust   = len(set(round(t["price"], 4) for t in buy_trades[mid:])) if mid > 0 else 1
+    spike_ratio  = late_clust / (early_clust + 1e-8)
+
+    is_micro    = (vol_24h > 0 and vol_24h < CONFIG["rush_micro_vol_usd"])
+    threshold   = CONFIG["rush_std_micro_threshold"] if is_micro else CONFIG["rush_std_threshold"]
+    micro_tag   = " [micro]" if is_micro else ""
+
+    rush_score  = 0
+    rush_signals = []
+
+    if std_rush >= threshold * 1.5:
+        rush_score += 20
+        rush_signals.append(f"⚡ StdRushOrder {std_rush:.1f} — koordinasi KUAT{micro_tag} [J1]")
+    elif std_rush >= threshold:
+        rush_score += 14
+        rush_signals.append(f"⚡ StdRushOrder {std_rush:.1f} — buy rush terdeteksi{micro_tag} [J1]")
+    elif std_rush >= threshold * 0.6:
+        rush_score += 7
+        rush_signals.append(f"Rush orders membangun ({std_rush:.1f}){micro_tag}")
+
+    if spike_ratio >= 10:
+        rush_score += 10
+        rush_signals.append(f"🚀 Rush spike {spike_ratio:.1f}x — aktivitas tiba-tiba [J1]")
+    elif spike_ratio >= 5:
+        rush_score += 6
+        rush_signals.append(f"Rush spike {spike_ratio:.1f}x")
+
+    return std_rush, buy_rush_ratio, spike_ratio, min(rush_score, 20), rush_signals
+
+
+# ══════════════════════════════════════════════════════════════
+#  🆕 v10.0 — FUNGSI BARU [J2] On-The-Spot Pump Detector
+# ══════════════════════════════════════════════════════════════
+def detect_on_the_spot_pump(candles_1h):
+    """
+    Mendeteksi On-The-Spot pump — 30.7% pump event tidak punya pre-accumulation [J2].
+    Ciri: volume 4h sebelumnya RENDAH, lalu volume 1h terakhir SPIKE tiba-tiba.
+    """
+    if len(candles_1h) < 24:
+        return 0, "unknown", []
+
+    vols    = [c["volume_usd"] for c in candles_1h]
+    closes  = [c["close"]      for c in candles_1h]
+    avg_vol = sum(vols[-24:]) / 24
+
+    if avg_vol <= 0:
+        return 0, "unknown", []
+
+    vol_4h_before   = sum(vols[-5:-1]) / 4 if len(vols) >= 5 else avg_vol
+    vol_last_1h     = vols[-1]
+    price_change_1h = ((closes[-1] - closes[-2]) / closes[-2]
+                       if len(closes) >= 2 and closes[-2] > 0 else 0)
+
+    no_accumulation = vol_4h_before < avg_vol * CONFIG["ots_no_accum_vol_ratio"]
+    sudden_spike    = vol_last_1h   > avg_vol * CONFIG["ots_spike_vol_ratio"]
+    price_rising    = price_change_1h > CONFIG["ots_price_change_min"]
+
+    ots_score   = 0
+    ots_type    = "unknown"
+    ots_signals = []
+
+    if no_accumulation and sudden_spike and price_rising:
+        ots_type   = "on_the_spot"
+        spike_mult = vol_last_1h / (avg_vol + 1e-8)
+        ots_score  = 25
+        ots_signals.append(
+            f"🎯 ON-THE-SPOT PUMP: spike {spike_mult:.1f}x, "
+            f"harga +{price_change_1h*100:.1f}% 1h, tanpa pre-accum [J2]"
+        )
+    elif no_accumulation and sudden_spike:
+        ots_type   = "on_the_spot_early"
+        spike_mult = vol_last_1h / (avg_vol + 1e-8)
+        ots_score  = 12
+        ots_signals.append(
+            f"👀 Early on-the-spot: vol spike {spike_mult:.1f}x tanpa akumulasi [J2]"
+        )
+    else:
+        vol_spikes      = sum(1 for v in vols[-24:] if v > avg_vol * 3)
+        price_range_24h = 0
+        if len(candles_1h) >= 24:
+            h24 = max(c["high"] for c in candles_1h[-24:])
+            l24 = min(c["low"]  for c in candles_1h[-24:])
+            price_range_24h = (h24 - l24) / l24 * 100 if l24 > 0 else 99
+        if vol_spikes >= 2 and price_range_24h < 5:
+            ots_type = "pre_accumulation"
+            ots_signals.append(
+                f"📦 Pre-Accumulation: {vol_spikes}x vol spike, range {price_range_24h:.1f}% [J2]"
+            )
+
+    return ots_score, ots_type, ots_signals
+
+
+# ══════════════════════════════════════════════════════════════
+#  🆕 v10.0 — FUNGSI BARU [J3] Volume 60-Minute Signal
+# ══════════════════════════════════════════════════════════════
+def calc_vol60m_signal(candles_1h):
+    """
+    Volume 60m terakhir vs baseline = insider buying signal [J3].
+    [J3]: unusual volume bisa muncul 60 menit sebelum public announcement.
+    """
+    if len(candles_1h) < 12:
+        return 0, 1.0, []
+
+    vol_60m          = candles_1h[-1]["volume_usd"]
+    baseline_candles = candles_1h[-24:-1] if len(candles_1h) >= 24 else candles_1h[:-1]
+    if not baseline_candles:
+        return 0, 1.0, []
+
+    baseline_avg = sum(c["volume_usd"] for c in baseline_candles) / len(baseline_candles)
+    if baseline_avg <= 0:
+        return 0, 1.0, []
+
+    vol60m_ratio    = vol_60m / baseline_avg
+    price_change_1h = 0
+    if len(candles_1h) >= 2 and candles_1h[-2]["close"] > 0:
+        price_change_1h = abs(
+            (candles_1h[-1]["close"] - candles_1h[-2]["close"])
+            / candles_1h[-2]["close"]
+        )
+
+    vol60m_score   = 0
+    vol60m_signals = []
+
+    if vol60m_ratio >= CONFIG["vol60m_ratio_threshold"]:
+        if price_change_1h < 0.02:
+            vol60m_score = 15
+            vol60m_signals.append(
+                f"🔍 Vol 60m {vol60m_ratio:.1f}x baseline + harga flat — insider buying [J3]"
+            )
+        else:
+            vol60m_score = 10
+            vol60m_signals.append(f"📈 Vol 60m {vol60m_ratio:.1f}x baseline [J3]")
+    elif vol60m_ratio >= CONFIG["vol60m_accum_ratio"]:
+        vol60m_score = 6
+        vol60m_signals.append(f"Vol 60m {vol60m_ratio:.1f}x baseline")
+    elif vol60m_ratio < 0.3:
+        vol60m_score = -5
+        vol60m_signals.append(f"⚠️ Vol 60m {vol60m_ratio:.1f}x — aktivitas menurun")
+
+    return vol60m_score, vol60m_ratio, vol60m_signals
+
+
+# ══════════════════════════════════════════════════════════════
+#  🔬  PUMP PROBABILITY MODEL v10.0
 # ══════════════════════════════════════════════════════════════
 def compute_pump_probability(candles_1h, whale_score=0):
+    """
+    v10.0: Bobot diperbarui dari RF feature importance [J3].
+    irr: 0.20→0.26 | slope: 0.13→0.20 | spike: 0.28→0.22 | atr: 0.22→0.17
+    """
     if len(candles_1h) < 24:
         return {"probability_score": 0.3, "classification": "Data Kurang", "metrics": {}}
 
     max_spike, avg_spike = calc_volume_spike_ratio(candles_1h)
-    irr       = calc_volume_irregularity(candles_1h)
-    norm_atr  = calc_normalized_atr(candles_1h)
-    slope     = calc_price_slope(candles_1h)
+    irr      = calc_volume_irregularity(candles_1h)
+    norm_atr = calc_normalized_atr(candles_1h)
+    slope    = calc_price_slope(candles_1h)
 
     def clamp(v, lo, hi):
         return max(0.0, min(1.0, (v - lo) / (hi - lo))) if hi > lo else 0.5
 
-    n_mvs   = clamp(max_spike,  1.0, 10.0)
-    n_irr   = clamp(irr,        0.5,  3.5)
-    n_avs   = clamp(avg_spike,  0.5,  2.0)
-    n_atr   = 1.0 - clamp(norm_atr, 0.05, 3.0)
-    n_slp   = 1.0 - clamp(slope, -0.001, 0.002)
-    n_whale = whale_score / 100.0
+    n_mvs = clamp(max_spike,  1.0, 10.0)
+    n_irr = clamp(irr,        0.5,  3.5)
+    n_avs = clamp(avg_spike,  0.5,  2.0)
+    n_atr = 1.0 - clamp(norm_atr, 0.05, 3.0)
+    n_slp = 1.0 - clamp(slope, -0.001, 0.002)
 
     score = max(0.0, min(1.0,
-        n_mvs   * 0.28 +
-        n_irr   * 0.20 +
-        n_avs   * 0.12 +
-        n_atr   * 0.22 +
-        n_slp   * 0.13 +
-        n_whale * 0.05
+        n_mvs * 0.22 +   # [J3] 0.28→0.22
+        n_irr * 0.26 +   # [J1] 0.20→0.26 StdRushOrder proxy
+        n_avs * 0.15 +   # tetap
+        n_atr * 0.17 +   # [J3] 0.22→0.17
+        n_slp * 0.20     # [J3] 0.13→0.20
     ))
 
     if score < 0.30:   cls = "Noise"
@@ -938,13 +1061,13 @@ def compute_pump_probability(candles_1h, whale_score=0):
 # ══════════════════════════════════════════════════════════════
 #  🏗️  LAYER SCORING
 # ══════════════════════════════════════════════════════════════
-
 def layer_volume_intelligence(candles_1h):
+    """v10.0: Tambah On-The-Spot [J2] + Vol60m [J3]."""
     score, sigs = 0, []
     rvol = calc_rvol(candles_1h)
 
     if rvol >= 4.0:
-        score += 16; sigs.append(f"🔥🔥 RVOL {rvol:.1f}x — volume MASIF vs historis!")
+        score += 16; sigs.append(f"🔥🔥 RVOL {rvol:.1f}x — volume MASIF!")
     elif rvol >= 2.8:
         score += 13; sigs.append(f"🔥 RVOL {rvol:.1f}x — volume spike signifikan")
     elif rvol >= 2.0:
@@ -960,7 +1083,7 @@ def layer_volume_intelligence(candles_1h):
     if irr >= 2.5:
         score += 10; sigs.append(f"📈 Vol Irregularity {irr:.2f} — whale masuk tidak merata")
     elif irr >= 1.8:
-        score += 6;  sigs.append(f"Vol Irregularity {irr:.2f} — aktivitas whale")
+        score += 6;  sigs.append(f"Vol Irregularity {irr:.2f}")
     elif irr >= 1.3:
         score += 3
 
@@ -974,11 +1097,20 @@ def layer_volume_intelligence(candles_1h):
         if stcvd_check <= -10:
             penalty = min(int(rvol * 0.4), 12)
             score  -= penalty
-            sigs.append(f"⚠️ RVOL {rvol:.1f}x + CVD negatif kuat — distribusi/likuidasi")
+            sigs.append(f"⚠️ RVOL {rvol:.1f}x + CVD negatif — distribusi/likuidasi")
         elif stcvd_check < 0:
             penalty = min(int(rvol * 0.2), 6)
             score  -= penalty
-            sigs.append(f"RVOL {rvol:.1f}x + CVD negatif ringan — pantau distribusi")
+
+    # ── v10.0 NEW: On-The-Spot Pump Detector [J2] ────────────────────
+    ots_score, ots_type, ots_sigs = detect_on_the_spot_pump(candles_1h)
+    score += ots_score
+    sigs.extend(ots_sigs)
+
+    # ── v10.0 NEW: Volume 60-Minute Signal [J3] ──────────────────────
+    vol60m_sc, vol60m_ratio, vol60m_sigs = calc_vol60m_signal(candles_1h)
+    score += vol60m_sc
+    sigs.extend(vol60m_sigs)
 
     return min(score, CONFIG["max_vol_score"]), sigs, rvol
 
@@ -996,9 +1128,9 @@ def layer_flat_accumulation(candles_1h):
         range24_pct = 99
 
     if range24_pct < 3:
-        score += 15; sigs.append(f"🎯 Range 24h sangat sempit ({range24_pct:.1f}%) — zona akumulasi tight")
+        score += 15; sigs.append(f"🎯 Range 24h sangat sempit ({range24_pct:.1f}%) — akumulasi tight")
     elif range24_pct < 6:
-        score += 10; sigs.append(f"🎯 Range 24h sempit ({range24_pct:.1f}%) — akumulasi aktif")
+        score += 10; sigs.append(f"🎯 Range 24h sempit ({range24_pct:.1f}%)")
     elif range24_pct < 10:
         score += 5;  sigs.append(f"Range 24h terbatas ({range24_pct:.1f}%)")
     elif range24_pct < 15:
@@ -1008,7 +1140,7 @@ def layer_flat_accumulation(candles_1h):
 
     slope = calc_price_slope(candles_1h)
     if slope < -0.0003:
-        score += 8; sigs.append(f"📉 Harga turun perlahan ({slope*1e4:.2f}‱/h) — bahan bakar squeeze")
+        score += 8; sigs.append(f"📉 Harga turun perlahan — bahan bakar squeeze")
     elif abs(slope) <= 0.0003:
         score += 5; sigs.append(f"➡️ Harga sangat flat — akumulasi tersembunyi")
     elif slope < 0.001:
@@ -1048,7 +1180,7 @@ def layer_structure(candles_1h):
         else:
             break
     if coiling >= 18:
-        score += 5; sigs.append(f"Coiling {coiling}h — energi terkumpul lama")
+        score += 5; sigs.append(f"Coiling {coiling}h — energi terkumpul")
     elif coiling >= 10:
         score += 3; sigs.append(f"Coiling {coiling}h")
     elif coiling >= 5:
@@ -1066,16 +1198,13 @@ def layer_positioning(symbol, funding, oi_chg1h):
     elif -0.0004 < funding <= -0.00001:
         score += 6;  sigs.append(f"💰 Funding {funding:.5f} — short squeeze setup")
     elif abs(funding) < 0.00001:
-        score += 4;  sigs.append(f"Funding {funding:.5f} — benar-benar netral")
+        score += 4;  sigs.append(f"Funding {funding:.5f} — netral")
     elif 0.00001 <= funding <= 0.0001:
         score += 1
-    elif 0.0001 < funding <= 0.0003:
-        score += 0
     elif funding > 0.0003:
-        score -= 5;  sigs.append(f"⚠️ Funding {funding:.5f} — long overcrowded, risiko dump")
+        score -= 5;  sigs.append(f"⚠️ Funding {funding:.5f} — long overcrowded")
 
-    if (funding <= CONFIG["squeeze_funding_max"]
-            and oi_chg1h > CONFIG["squeeze_oi_change_min"]):
+    if funding <= CONFIG["squeeze_funding_max"] and oi_chg1h > CONFIG["squeeze_oi_change_min"]:
         score += 10
         sigs.append(f"🔥 SHORT SQUEEZE: funding negatif, OI 1h +{oi_chg1h:.1f}%")
 
@@ -1093,22 +1222,21 @@ def layer_positioning(symbol, funding, oi_chg1h):
         elif 1.15 < ls <= 1.3:
             ls_score = -5;  sigs.append(f"L/S {ls:.2f} — longs mulai dominan")
         elif 1.3 < ls <= 1.6:
-            ls_score = -10; sigs.append(f"⚠️ L/S {ls:.2f} — longs dominan, squeeze fuel habis")
+            ls_score = -10; sigs.append(f"⚠️ L/S {ls:.2f} — longs dominan")
         elif 1.6 < ls <= 2.0:
-            ls_score = -16; sigs.append(f"⚠️⚠️ L/S {ls:.2f} — longs sangat dominan, pump sangat sulit")
+            ls_score = -16; sigs.append(f"⚠️⚠️ L/S {ls:.2f} — longs sangat dominan")
         elif 2.0 < ls <= 2.5:
             ls_score = -20; sigs.append(f"🚨 L/S {ls:.2f} — long overcrowded berat")
         elif 2.5 < ls <= 3.0:
             ls_score = -25; sigs.append(f"🚨 L/S {ls:.2f} — long overcrowded ekstrem")
         elif ls > 3.0:
-            ls_score  = -30
+            ls_score = -30
             ls_block  = True
-            sigs.append(f"🚨🚨 L/S {ls:.2f} — long overcrowded KRITIS, hard block aktif")
-
+            sigs.append(f"🚨🚨 L/S {ls:.2f} — long overcrowded KRITIS, hard block")
         if 1.3 < ls <= 2.0 and funding <= -0.0003:
             override = min(abs(ls_score) * 0.4, 8)
             ls_score += int(override)
-            sigs.append(f"⚡ Mitigasi: funding {funding:.5f} kurangi dampak L/S tinggi")
+            sigs.append(f"⚡ Mitigasi: funding {funding:.5f} kurangi dampak L/S")
 
     return min(score + ls_score, CONFIG["max_pos_score"]), sigs, ls, ls_block
 
@@ -1159,7 +1287,8 @@ def layer_context(symbol, tickers_dict):
     return min(sec_score + soc_score, CONFIG["max_ctx_score"]), sigs, sector
 
 
-def calc_whale(symbol, candles_15m, funding):
+def calc_whale(symbol, candles_15m, funding, vol_24h=0):
+    """v10.0: Tambah StdRushOrder scoring [J1]."""
     ws, ev = 0, []
     cur = candles_15m[-1]["close"] if candles_15m else 0
 
@@ -1196,6 +1325,18 @@ def calc_whale(symbol, candles_15m, funding):
                 if len(at_lvl) >= 14 and avg_ice < thr * 0.25 and tot_ice > thr * 2.5:
                     ws += 20; ev.append(f"✅ Iceberg: {len(at_lvl)} tx kecil (${tot_ice:,.0f})")
 
+        # ── v10.0 NEW: StdRushOrder [J1] ─────────────────────────────
+        std_rush, buy_rush_ratio, spike_ratio, rush_sc, rush_sigs = calc_rush_orders(
+            trades, vol_24h
+        )
+        ws += rush_sc
+        ev.extend(rush_sigs)
+
+        # Sell rush dominance sebagai pengurang score (gate ada di master_score)
+        if buy_rush_ratio < 0.50 and std_rush > 5:
+            ws -= 10
+            ev.append(f"⚠️ Sell rush {1-buy_rush_ratio:.0%} dari total — potensi panic [J1]")
+
     if candles_15m and len(candles_15m) >= 16:
         p4h  = candles_15m[-16]["close"]
         pchg = abs((cur - p4h) / p4h * 100) if p4h else 99
@@ -1228,7 +1369,7 @@ def get_time_mult():
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔴 GC-2: LIQUIDATION CASCADE DETECTOR
+#  GC-2: LIQUIDATION CASCADE DETECTOR
 # ══════════════════════════════════════════════════════════════
 def layer_liquidation(symbol, candles_1h):
     long_liq, short_liq = get_liquidations(symbol)
@@ -1237,46 +1378,42 @@ def layer_liquidation(symbol, candles_1h):
 
     if long_liq > CONFIG["liq_long_block_usd"] * 3:
         should_block = True
-        sigs.append(f"🚨 Long liq masif ${long_liq/1e3:.0f}K dalam 30m — pump aborted!")
+        sigs.append(f"🚨 Long liq masif ${long_liq/1e3:.0f}K — pump aborted!")
     elif long_liq > CONFIG["liq_long_block_usd"]:
         score -= 15
-        sigs.append(f"⚠️ Long liq ${long_liq/1e3:.0f}K — posisi longs baru saja dihancurkan")
+        sigs.append(f"⚠️ Long liq ${long_liq/1e3:.0f}K — posisi longs dihancurkan")
     elif long_liq > CONFIG["liq_long_block_usd"] * 0.5:
         score -= 7
-        sigs.append(f"Long liq ${long_liq/1e3:.0f}K — tekanan jual terindikasi")
 
     if short_liq > CONFIG["liq_short_bonus_usd"] * 2:
         score += 20
         sigs.append(f"🔥🔥 Short liq ${short_liq/1e3:.0f}K — SHORT SQUEEZE AKTIF!")
     elif short_liq > CONFIG["liq_short_bonus_usd"]:
         score += 12
-        sigs.append(f"🔥 Short liq ${short_liq/1e3:.0f}K — tekanan squeeze meningkat")
+        sigs.append(f"🔥 Short liq ${short_liq/1e3:.0f}K — squeeze meningkat")
     elif short_liq > CONFIG["liq_short_bonus_usd"] * 0.5:
         score += 6
-        sigs.append(f"Short liq ${short_liq/1e3:.0f}K — short mulai kena squeeze")
 
     return score, sigs, long_liq, short_liq, should_block
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔴 GC-3: LINEA SIGNATURE LAYER
+#  GC-3: LINEA SIGNATURE LAYER
 # ══════════════════════════════════════════════════════════════
 def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
                            ls_ratio, funding, chg_24h):
     score, sigs, components = 0, [], 0
 
-    # GRUP A: OI-INDEPENDENT
     if ls_ratio is not None:
         if ls_ratio < 0.75:
             score += 6; components += 1
-            sigs.append(f"✅ [Linea-LS] L/S {ls_ratio:.2f} — short sangat dominan = fuel besar")
+            sigs.append(f"✅ [Linea-LS] L/S {ls_ratio:.2f} — short sangat dominan")
         elif ls_ratio <= CONFIG["linea_ls_max"]:
             score += 3; components += 1
-            sigs.append(f"[Linea-LS] L/S {ls_ratio:.2f} — short dominan")
 
     if chg_24h < -3:
         score += 5; components += 1
-        sigs.append(f"✅ [Linea-P] Harga {chg_24h:+.1f}% — tertekan, siap reversal")
+        sigs.append(f"✅ [Linea-P] Harga {chg_24h:+.1f}% — siap reversal")
     elif chg_24h <= CONFIG["linea_price_max_chg"]:
         score += 2; components += 1
 
@@ -1287,52 +1424,42 @@ def layer_linea_signature(candles_1h, oi_chg1h, oi_chg24h, oi_valid,
     elif stcvd_sc > 0:
         score += 2
 
-    # GRUP B: OI-DEPENDENT
-    oi_1h_ok = False
-    oi_24h_ok = False
     if oi_valid:
-        oi_1h_ok = oi_chg1h >= CONFIG["linea_oi_1h_min"]
+        oi_1h_ok  = oi_chg1h  >= CONFIG["linea_oi_1h_min"]
+        oi_24h_ok = oi_chg24h >= CONFIG["linea_oi_24h_min"]
+
         if oi_chg1h >= 8.0:
             score += 8; components += 1
             sigs.append(f"✅ [Linea-OI1h] OI 1h +{oi_chg1h:.1f}% — posisi baru masuk MASIF")
         elif oi_chg1h >= 4.0:
             score += 5; components += 1
-            sigs.append(f"✅ [Linea-OI1h] OI 1h +{oi_chg1h:.1f}% — posisi baru masuk")
+            sigs.append(f"✅ [Linea-OI1h] OI 1h +{oi_chg1h:.1f}%")
         elif oi_1h_ok:
             score += 3; components += 1
 
-        oi_24h_ok = oi_chg24h >= CONFIG["linea_oi_24h_min"]
         if oi_chg24h >= 10.0:
             score += 6; components += 1
-            sigs.append(f"✅ [Linea-OI24h] OI 24h +{oi_chg24h:.1f}% — akumulasi berlanjut")
+            sigs.append(f"✅ [Linea-OI24h] OI 24h +{oi_chg24h:.1f}%")
         elif oi_24h_ok:
             score += 3; components += 1
 
         if oi_1h_ok and oi_24h_ok and chg_24h < 0:
             score += 8; components += 1
-            sigs.append(
-                f"⭐ [Linea-DIV] OI naik + Harga {chg_24h:+.1f}% — "
-                f"DIVERGENCE BULLISH! (pola LINEA)"
-            )
+            sigs.append(f"⭐ [Linea-DIV] OI naik + Harga {chg_24h:+.1f}% — DIVERGENCE BULLISH!")
         elif oi_1h_ok and chg_24h <= CONFIG["linea_price_max_chg"]:
             score += 4; components += 1
-            sigs.append(f"[Linea-DIV] OI naik + Harga flat — akumulasi tersembunyi")
 
     if components >= 4:
         score += 5
-        sigs.append(f"⭐ FULL LINEA SIGNATURE ({components} komponen) — pre-pump template!")
+        sigs.append(f"⭐ FULL LINEA SIGNATURE ({components}/5) — pre-pump template!")
     elif components >= 3:
-        sigs.append(f"[Linea] {components} komponen aktif — setup berkembang")
+        sigs.append(f"[Linea] {components} komponen aktif")
 
     return min(score, CONFIG["max_linea_score"]), sigs, components
 
 
 # ══════════════════════════════════════════════════════════════
-#  💰  ENTRY ZONE CALCULATOR
-# ══════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════
-#  🔴 GC-5: MICRO-CAP OI ACCELERATION DETECTOR (v9.8)
+#  GC-5: MICRO-CAP OI ACCELERATION DETECTOR
 # ══════════════════════════════════════════════════════════════
 def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
     score, sigs = 0, []
@@ -1350,14 +1477,13 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
     if oi_value <= 0:
         return 0, [], accel
 
-    is_micro = oi_value < CONFIG["oi_accel_micro_thresh"]
+    is_micro  = oi_value < CONFIG["oi_accel_micro_thresh"]
     is_dormant = vol_24h < CONFIG["oi_accel_dormant_vol"]
     accel["is_micro_cap"] = is_micro
     accel["is_dormant"]   = is_dormant
 
     snaps = load_oi_snapshots()
     hist  = snaps.get(symbol, [])
-
     if len(hist) < 2:
         return 0, [], accel
 
@@ -1386,25 +1512,19 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
 
     multiplier = 1.5 if is_micro else 1.0
     extra_tag  = " [MICRO]" if is_micro else ""
-
     primary_gr = gr_1h if gr_1h is not None else gr_3h
 
     if primary_gr is not None:
         if primary_gr >= CONFIG["oi_accel_extreme"] * multiplier:
-            score += 20
-            sigs.append(f"🚀 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — AKUMULASI EKSTREM!")
+            score += 20; sigs.append(f"🚀 OI +{primary_gr:.0f}%/1h{extra_tag} — AKUMULASI EKSTREM!")
         elif primary_gr >= CONFIG["oi_accel_strong"] * multiplier:
-            score += 14
-            sigs.append(f"🔥 OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — akumulasi sangat kuat")
+            score += 14; sigs.append(f"🔥 OI +{primary_gr:.0f}%/1h{extra_tag} — akumulasi sangat kuat")
         elif primary_gr >= CONFIG["oi_accel_medium"]:
-            score += 9
-            sigs.append(f"OI tumbuh +{primary_gr:.0f}%/1h{extra_tag} — akumulasi signifikan")
+            score += 9;  sigs.append(f"OI +{primary_gr:.0f}%/1h{extra_tag} — akumulasi signifikan")
         elif primary_gr >= CONFIG["oi_accel_weak"]:
-            score += 4
-            sigs.append(f"OI tumbuh +{primary_gr:.0f}%/1h — awal akumulasi")
+            score += 4;  sigs.append(f"OI +{primary_gr:.0f}%/1h — awal akumulasi")
         elif primary_gr < -CONFIG["oi_accel_weak"]:
-            score -= 8
-            sigs.append(f"⚠️ OI turun {primary_gr:.0f}%/1h — distribusi cepat")
+            score -= 8;  sigs.append(f"⚠️ OI {primary_gr:.0f}%/1h — distribusi cepat")
 
     if gr_1h is not None and gr_3h is not None and gr_3h != 0:
         rate_1h_per_h = gr_1h
@@ -1413,28 +1533,19 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
             accel_ratio = rate_1h_per_h / rate_3h_per_h
             accel["acceleration"] = round(accel_ratio, 2)
             score += 6
-            sigs.append(f"⚡ OI akselerasi {accel_ratio:.1f}x lebih cepat dari rata-rata 3h")
+            sigs.append(f"⚡ OI akselerasi {accel_ratio:.1f}x lebih cepat dari avg 3h")
         elif rate_3h_per_h > 0 and rate_1h_per_h > rate_3h_per_h * 1.2:
             score += 3
-            sigs.append("OI momentum membangun — pertumbuhan makin cepat")
 
     price_flat = abs(chg_24h) <= CONFIG["oi_accel_div_price_max"]
     oi_growing  = (primary_gr or 0) >= CONFIG["oi_accel_weak"]
-
     if oi_growing and price_flat:
         accel["divergence"] = True
         if chg_24h < 0 and (primary_gr or 0) >= CONFIG["oi_accel_medium"]:
             score += 10
-            sigs.append(
-                f"⭐ OI DIVERGENCE: OI +{primary_gr:.0f}% saat harga {chg_24h:+.1f}% "
-                f"— akumulasi tersembunyi KUAT"
-            )
+            sigs.append(f"⭐ OI DIVERGENCE: OI +{primary_gr:.0f}% saat harga {chg_24h:+.1f}%")
         elif price_flat and (primary_gr or 0) >= CONFIG["oi_accel_medium"]:
             score += 6
-            sigs.append(
-                f"OI divergence: OI +{primary_gr:.0f}% tapi harga flat "
-                f"({chg_24h:+.1f}%)"
-            )
 
     if is_dormant and is_micro and gr_6h is not None:
         snap_6h_val = snap_6h["oi"] if snap_6h else None
@@ -1442,233 +1553,17 @@ def layer_oi_acceleration(symbol, oi_value, chg_24h, vol_24h):
             awakening_mult = oi_value / snap_6h_val
             if awakening_mult >= CONFIG["oi_dormant_baseline_mult"] * 2:
                 score += 12
-                sigs.append(
-                    f"🌅 DORMANT AWAKENING: OI {awakening_mult:.1f}x dalam 6h pada "
-                    f"coin tidur (vol ${vol_24h/1e3:.0f}K)"
-                )
+                sigs.append(f"🌅 DORMANT AWAKENING: OI {awakening_mult:.1f}x dalam 6h")
             elif awakening_mult >= CONFIG["oi_dormant_baseline_mult"]:
                 score += 7
-                sigs.append(f"🌅 OI awakening {awakening_mult:.1f}x dari baseline tidur")
+                sigs.append(f"🌅 OI awakening {awakening_mult:.1f}x dari baseline")
 
     return min(score, CONFIG["max_oi_accel_score"]), sigs, accel
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔴 GC-6: MULTI-TF NET FLOW LAYER (v9.10)
+#  ENTRY CALCULATOR
 # ══════════════════════════════════════════════════════════════
-def _candle_net_flow(candles):
-    """Hitung net flow dari list candle."""
-    buy_usd  = 0.0
-    sell_usd = 0.0
-    for c in candles:
-        rng = c["high"] - c["low"]
-        buy_ratio = (c["close"] - c["low"]) / rng if rng > 0 else 0.5
-        b = buy_ratio * c["volume_usd"]
-        s = (1.0 - buy_ratio) * c["volume_usd"]
-        buy_usd  += b
-        sell_usd += s
-    total  = buy_usd + sell_usd
-    net    = buy_usd - sell_usd
-    net_pct = net / total * 100 if total > 0 else 0.0
-    return net, net_pct, buy_usd, sell_usd
-
-
-def _tick_net_flow(trades, window_minutes=15):
-    """Hitung net flow dari trade ticks."""
-    if not trades:
-        return 0.0, 0.0, 0.0, 0.0, 0
-    now_ms  = int(time.time() * 1000)
-    cutoff  = now_ms - window_minutes * 60 * 1000
-    has_ts  = any(t.get("ts_ms", 0) > 0 for t in trades)
-    recent  = [t for t in trades if t.get("ts_ms", 0) > cutoff] if has_ts else trades
-    if not recent:
-        recent = trades
-    buy_usd  = sum(t["size"] * t["price"] for t in recent if "buy"  in t.get("side", ""))
-    sell_usd = sum(t["size"] * t["price"] for t in recent if "sell" in t.get("side", ""))
-    total    = buy_usd + sell_usd
-    net      = buy_usd - sell_usd
-    net_pct  = net / total * 100 if total > 0 else 0.0
-    return net, net_pct, buy_usd, sell_usd, len(recent)
-
-
-def _classify_flow(net_pct):
-    """Klasifikasi net_pct menjadi label."""
-    if net_pct > CONFIG["nf_strong_buy"]:  return "STRONG_BUY"
-    if net_pct > CONFIG["nf_buy"]:         return "BUY"
-    if net_pct > -CONFIG["nf_neutral_max"]: return "NEUTRAL"
-    if net_pct > CONFIG["nf_strong_sell"]: return "SELL"
-    return "STRONG_SELL"
-
-
-def layer_net_flow(candles_1h, candles_15m, trades):
-    """GC-6: Multi-TF Net Flow Layer."""
-    score, sigs = 0, []
-    flow_data   = {
-        "72h": {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
-        "24h": {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
-        "6h":  {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
-        "3h":  {"net_pct": 0, "net_usd": 0, "label": "NO_DATA"},
-        "15m": {"net_pct": 0, "net_usd": 0, "label": "NO_DATA", "count": 0},
-        "has_data": False,
-    }
-    should_block = False
-
-    pct_72h = pct_24h = pct_6h = pct_3h = None
-
-    if len(candles_1h) >= 72:
-        net, pct, buy, sell = _candle_net_flow(candles_1h[-72:])
-        pct_72h = pct
-        flow_data["72h"] = {
-            "net_pct": round(pct, 1), "net_usd": round(net),
-            "buy_usd": round(buy),   "sell_usd": round(sell),
-            "label":   _classify_flow(pct),
-        }
-
-    if len(candles_1h) >= 24:
-        net, pct, buy, sell = _candle_net_flow(candles_1h[-24:])
-        pct_24h = pct
-        flow_data["24h"] = {
-            "net_pct": round(pct, 1), "net_usd": round(net),
-            "buy_usd": round(buy),   "sell_usd": round(sell),
-            "label":   _classify_flow(pct),
-        }
-
-    if len(candles_1h) >= 6:
-        net, pct, buy, sell = _candle_net_flow(candles_1h[-6:])
-        pct_6h = pct
-        flow_data["6h"] = {
-            "net_pct": round(pct, 1), "net_usd": round(net),
-            "buy_usd": round(buy),   "sell_usd": round(sell),
-            "label":   _classify_flow(pct),
-        }
-
-    if candles_15m and len(candles_15m) >= 12:
-        net, pct, buy, sell = _candle_net_flow(candles_15m[-12:])
-        pct_3h = pct
-        flow_data["3h"] = {
-            "net_pct": round(pct, 1), "net_usd": round(net),
-            "buy_usd": round(buy),   "sell_usd": round(sell),
-            "label":   _classify_flow(pct),
-        }
-
-    pct_15m = None
-    if trades:
-        net, pct, buy, sell, cnt = _tick_net_flow(trades, window_minutes=15)
-        pct_15m = pct
-        flow_data["15m"] = {
-            "net_pct": round(pct, 1), "net_usd": round(net),
-            "buy_usd": round(buy),    "sell_usd": round(sell),
-            "label":   _classify_flow(pct), "count": cnt,
-        }
-
-    flow_data["has_data"] = (pct_24h is not None)
-
-    if not flow_data["has_data"]:
-        return 0, [], flow_data, False
-
-    # GATE: Distribusi Sistematis
-    if (pct_72h is not None
-            and pct_72h < CONFIG["nf_gate_72h"]
-            and pct_24h < CONFIG["nf_gate_24h"]
-            and pct_6h  < CONFIG["nf_gate_6h"]):
-        should_block = True
-        sigs.append(
-            f"🚨 NET FLOW DISTRIBUSI: 72h={pct_72h:+.1f}% "
-            f"24h={pct_24h:+.1f}% 6h={pct_6h:+.1f}% — whale keluar semua TF"
-        )
-        return score, sigs, flow_data, should_block
-
-    # SCORING: Whale Accumulation Funnel
-    if (pct_72h is not None
-            and CONFIG["nf_whale_72h_min"] <= pct_72h <= CONFIG["nf_whale_72h_max"]
-            and pct_24h is not None and pct_24h >= CONFIG["nf_whale_24h_min"]
-            and pct_6h  is not None and pct_6h  >= CONFIG["nf_whale_6h_min"]):
-        score += 20
-        sigs.append(
-            f"🐋 WHALE FUNNEL: 72h={pct_72h:+.1f}% → 24h={pct_24h:+.1f}% → "
-            f"6h={pct_6h:+.1f}% — akumulasi 3 hari terkonfirmasi!"
-        )
-
-    elif (pct_72h is not None and pct_72h > CONFIG["nf_buy"]
-            and pct_24h is not None and pct_24h > CONFIG["nf_buy"]
-            and pct_6h  is not None and pct_6h  > CONFIG["nf_buy"]):
-        score += 15
-        sigs.append(
-            f"✅ NET FLOW BULLISH: 72h={pct_72h:+.1f}% "
-            f"24h={pct_24h:+.1f}% 6h={pct_6h:+.1f}% — semua TF buy dominan"
-        )
-
-    else:
-        if (pct_24h is not None and pct_24h > CONFIG["nf_buy"]
-                and pct_6h is not None and pct_6h > CONFIG["nf_buy"]):
-            score += 10
-            sigs.append(
-                f"✅ Net Flow 24h={pct_24h:+.1f}% & 6h={pct_6h:+.1f}% positif — "
-                f"akumulasi mid-term"
-            )
-
-        elif pct_6h is not None and pct_6h > CONFIG["nf_strong_buy"]:
-            score += 7
-            sigs.append(
-                f"Net Flow 6h={pct_6h:+.1f}% — buying pressure naik tiba-tiba"
-            )
-        elif pct_6h is not None and pct_6h > CONFIG["nf_buy"]:
-            score += 4
-            sigs.append(f"Net Flow 6h={pct_6h:+.1f}% — sedikit buy dominant")
-
-        if (pct_72h is not None and CONFIG["nf_strong_sell"] < pct_72h < 0
-                and pct_24h is not None and pct_24h > CONFIG["nf_buy"]):
-            score += 5
-            sigs.append(
-                f"📈 Flow shifting: 72h={pct_72h:+.1f}% → 24h={pct_24h:+.1f}% "
-                f"— whale mulai akumulasi"
-            )
-
-    if pct_72h is not None:
-        if pct_72h < CONFIG["nf_strong_sell"]:
-            score -= 12
-            sigs.append(f"⚠️ Net Flow 72h={pct_72h:+.1f}% — distribusi besar 3 hari")
-        elif pct_72h < CONFIG["nf_sell"]:
-            score -= 6
-            sigs.append(f"Net Flow 72h={pct_72h:+.1f}% — tekanan jual 3 hari")
-
-    if pct_24h is not None:
-        if pct_24h < CONFIG["nf_strong_sell"]:
-            score -= 10
-            sigs.append(f"⚠️ Net Flow 24h={pct_24h:+.1f}% — distribusi aktif hari ini")
-        elif pct_24h < CONFIG["nf_sell"]:
-            score -= 5
-
-    if pct_6h is not None and pct_24h is not None:
-        rate_6h_daily  = pct_6h  * 4
-        rate_24h_daily = pct_24h
-        if rate_6h_daily > rate_24h_daily + 10 and pct_6h > 0:
-            score += 3
-            sigs.append(
-                f"⚡ Flow akselerasi: 6h={pct_6h:+.1f}% >> 24h={pct_24h:+.1f}% "
-                f"— tekanan beli makin kencang"
-            )
-
-    if pct_15m is not None and flow_data["15m"]["count"] >= 10:
-        if pct_15m > CONFIG["nf_strong_buy"]:
-            score += 4
-            sigs.append(
-                f"✅ Ticks 15m={pct_15m:+.1f}% ({flow_data['15m']['count']} trades) "
-                f"— beli dominan real-time"
-            )
-        elif pct_15m > CONFIG["nf_buy"]:
-            score += 2
-        elif pct_15m < CONFIG["nf_strong_sell"]:
-            score -= 5
-            sigs.append(
-                f"⚠️ Ticks 15m={pct_15m:+.1f}% — jual dominan sekarang"
-            )
-        elif pct_15m < CONFIG["nf_sell"]:
-            score -= 2
-
-    return min(score, CONFIG["max_netflow_score"]), sigs, flow_data, should_block
-
-
 def calc_entry(candles_1h):
     cur  = candles_1h[-1]["close"]
     atr  = calc_atr(candles_1h, 14) or cur * 0.02
@@ -1686,7 +1581,6 @@ def calc_entry(candles_1h):
         support = cur * (1 - max_dist + 0.02)
     entry  = min(support * 1.002, cur * 0.998)
     sl     = max(entry - CONFIG["atr_sl_mult"] * atr, entry * 0.88)
-
     t1_res, t2_res = find_resistance_targets(candles_1h, cur)
     t1_atr         = entry + CONFIG["atr_t1_mult"] * atr
     t1             = t1_res if t1_res > cur * 1.05 else t1_atr
@@ -1715,27 +1609,26 @@ def calc_entry(candles_1h):
 
 
 # ══════════════════════════════════════════════════════════════
-#  🛡️  GATE: SUDAH PUMP (BUG-D FIX)
+#  GATE: SUDAH PUMP
 # ══════════════════════════════════════════════════════════════
 def is_already_pumped(oi_chg24h, vol_chg24h_pct, chg_24h, oi_valid):
     if not oi_valid:
         if chg_24h > 15 and vol_chg24h_pct > 150:
-            return True, f"Harga +{chg_24h:.0f}% + Volume +{vol_chg24h_pct:.0f}% — pump sudah terjadi"
+            return True, f"Harga +{chg_24h:.0f}% + Volume +{vol_chg24h_pct:.0f}%"
         return False, ""
-
     if oi_chg24h > 35 and chg_24h > 3:
-        return True, f"OI 24h +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}% — TERLAMBAT (post-pump)"
+        return True, f"OI 24h +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}% — TERLAMBAT"
     if oi_chg24h > 25 and chg_24h > 5:
-        return True, f"OI 24h +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}% — pump sudah berjalan"
+        return True, f"OI 24h +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}%"
     if oi_chg24h > 15 and chg_24h > 10:
-        return True, f"OI +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}% — momentum sudah habis"
+        return True, f"OI +{oi_chg24h:.0f}% + Harga +{chg_24h:.0f}%"
     if vol_chg24h_pct > 200 and chg_24h > 8:
-        return True, f"Volume +{vol_chg24h_pct:.0f}% + Harga +{chg_24h:.0f}% — crowd sudah masuk"
+        return True, f"Volume +{vol_chg24h_pct:.0f}% + Harga +{chg_24h:.0f}%"
     return False, ""
 
 
 # ══════════════════════════════════════════════════════════════
-#  🧠  MASTER SCORE
+#  🧠  MASTER SCORE v10.0
 # ══════════════════════════════════════════════════════════════
 def master_score(symbol, ticker, tickers_dict):
     c1h  = get_candles(symbol, "1h",  CONFIG["candle_1h"])
@@ -1745,17 +1638,13 @@ def master_score(symbol, ticker, tickers_dict):
     if len(c1h) < 48 or len(c15m) < 20:
         return None
 
-    # v9.9 BUG #2 FIX: DEAD ACTIVITY GATE
+    # ── Dead Activity Gate (v9.9) ──────────────────────────────────────
     if len(c1h) >= 7:
-        last_vol     = c1h[-1]["volume_usd"]
-        avg_vol_6h   = sum(c["volume_usd"] for c in c1h[-7:-1]) / 6
+        last_vol   = c1h[-1]["volume_usd"]
+        avg_vol_6h = sum(c["volume_usd"] for c in c1h[-7:-1]) / 6
         if avg_vol_6h > 0:
-            activity_ratio = last_vol / avg_vol_6h
-            if activity_ratio < CONFIG["dead_activity_threshold"]:
-                log.info(
-                    f"  {symbol}: GATE dead activity "
-                    f"(last_1h=${last_vol:.0f} = {activity_ratio:.1%} avg_6h=${avg_vol_6h:.0f})"
-                )
+            if last_vol / avg_vol_6h < CONFIG["dead_activity_threshold"]:
+                log.info(f"  {symbol}: GATE dead activity")
                 return None
 
     funding = get_funding(symbol)
@@ -1800,10 +1689,38 @@ def master_score(symbol, ticker, tickers_dict):
             vol_change_24h = (vol_24h_now - vol_24h_prev) / vol_24h_prev * 100
 
     if vol_change_24h < -60:
-        log.info(f"  {symbol}: GATE volume exhaustion ({vol_change_24h:.0f}% 24h)")
+        log.info(f"  {symbol}: GATE volume exhaustion ({vol_change_24h:.0f}%)")
         return None
-    elif vol_change_24h < -45:
-        log.info(f"  {symbol}: Volume turun {vol_change_24h:.0f}% — penalti aktif")
+
+    # ── v10.0 NEW Gate A: Sell Rush Dominance Gate [J1] ───────────────
+    # Block jika sell rush orders > 30% dari total — indikasi panic selling
+    _trades_gate = get_trades(symbol, 200)
+    if _trades_gate and len(_trades_gate) >= 20:
+        buy_rush_vol  = sum(t["size"] * t["price"] for t in _trades_gate if t["side"] == "buy")
+        sell_rush_vol = sum(t["size"] * t["price"] for t in _trades_gate if t["side"] == "sell")
+        total_rush    = buy_rush_vol + sell_rush_vol
+        if total_rush > 0:
+            sell_ratio = sell_rush_vol / total_rush
+            if sell_ratio > CONFIG["rush_sell_fp_ratio"]:
+                log.info(
+                    f"  {symbol}: GATE sell rush dominance "
+                    f"({sell_ratio:.0%} sell) — panic selling [J1]"
+                )
+                return None
+
+    # ── v10.0 NEW Gate C: On-The-Spot Weak Signal Gate [J2] ───────────
+    # Jika tidak ada akumulasi TAPI spike juga tidak cukup kuat → skip
+    if len(c1h) >= 5:
+        vols      = [c["volume_usd"] for c in c1h]
+        avg_vol_g = sum(vols[-24:]) / min(24, len(vols))
+        if avg_vol_g > 0:
+            vol_4h_bef = sum(vols[-5:-1]) / 4
+            vol_last   = vols[-1]
+            no_accum   = vol_4h_bef < avg_vol_g * CONFIG["ots_no_accum_vol_ratio"]
+            not_strong = vol_last    < avg_vol_g * CONFIG["ots_confirm_vol_ratio"]
+            if no_accum and not_strong:
+                log.info(f"  {symbol}: GATE OTS weak — tidak ada akumulasi + spike lemah [J2]")
+                return None
 
     if len(c1h) >= 6:
         pre6       = c1h[-6:]
@@ -1816,21 +1733,26 @@ def master_score(symbol, ticker, tickers_dict):
 
     score, sigs, bd = 0, [], {}
 
+    # Layer 1: Volume Intelligence (includes OTS + Vol60m)
     v_sc, v_sigs, rvol = layer_volume_intelligence(c1h)
     score += v_sc;  sigs += v_sigs;  bd["vol"] = v_sc
 
+    # Short-term CVD
     stcvd_sc, stcvd_sig = calc_short_term_cvd(c1h)
     score += stcvd_sc
     if stcvd_sig:
         sigs.append(stcvd_sig)
     bd["stcvd"] = stcvd_sc
 
+    # Layer 2: Flat Accumulation
     fa_sc, fa_sigs = layer_flat_accumulation(c1h)
     score += fa_sc;  sigs += fa_sigs;  bd["flat"] = fa_sc
 
+    # Layer 3: Structure
     st_sc, st_sigs, bbw_val, bbw_pct, coiling = layer_structure(c1h)
     score += st_sc;  sigs += st_sigs;  bd["struct"] = st_sc
 
+    # Stealth bonus
     stealth_bonus = 0
     if (avg_vol_6h < CONFIG["stealth_max_vol"]
             and coiling > CONFIG["stealth_min_coiling"]
@@ -1839,26 +1761,29 @@ def master_score(symbol, ticker, tickers_dict):
         sigs.append(f"🕵️ STEALTH PATTERN: vol ${avg_vol_6h:.0f}/h coiling {coiling}h")
     score += stealth_bonus;  bd["stealth"] = stealth_bonus
 
-    oi_value   = get_open_interest(symbol)
-    oi_chg1h   = 0
-    oi_chg24h  = 0
-    oi_valid   = False
+    # OI
+    oi_value  = get_open_interest(symbol)
+    oi_chg1h  = oi_chg24h = 0
+    oi_valid  = False
     if oi_value > 0:
         save_oi_snapshot(symbol, oi_value)
         oi_chg1h, oi_chg24h, oi_valid = get_oi_changes(symbol, oi_value)
 
+    # Gate already pumped
     vol_chg_proxy = oi_chg24h * 3 if oi_valid else 0
     pumped, pump_reason = is_already_pumped(oi_chg24h, vol_chg_proxy, chg_24h, oi_valid)
     if pumped:
         log.info(f"  {symbol}: GATE already pumped — {pump_reason}")
         return None
 
+    # Layer 4: Positioning
     pos_sc, pos_sigs, ls_ratio, ls_block = layer_positioning(symbol, funding, oi_chg1h)
     if ls_block:
-        log.info(f"  {symbol}: GATE L/S overcrowded kritis (L/S={ls_ratio:.2f})")
+        log.info(f"  {symbol}: GATE L/S overcrowded kritis")
         return None
     score += pos_sc;  sigs += pos_sigs;  bd["pos"] = pos_sc
 
+    # Layer 5: Multi-TF 4H
     tf4h_sc = 0
     if c4h:
         tf4h_sc, tf4h_sig = calc_4h_confluence(c4h)
@@ -1866,12 +1791,15 @@ def master_score(symbol, ticker, tickers_dict):
             sigs.append(tf4h_sig)
     score += tf4h_sc;  bd["tf4h"] = tf4h_sc
 
+    # Layer 6: Context
     ctx_sc, ctx_sigs, sector = layer_context(symbol, tickers_dict)
     score += ctx_sc;  sigs += ctx_sigs;  bd["ctx"] = ctx_sc
 
-    ws, whale_bonus, wev = calc_whale(symbol, c15m, funding)
+    # Layer 7: Whale (v10.0 includes StdRushOrder)
+    ws, whale_bonus, wev = calc_whale(symbol, c15m, funding, vol_24h)
     score += whale_bonus;  bd["whale"] = whale_bonus
 
+    # GC-2: Liquidation
     liq_sc, liq_sigs, long_liq, short_liq, liq_block = layer_liquidation(symbol, c1h)
     if liq_block:
         log.info(f"  {symbol}: GATE liquidation — long flush baru saja terjadi")
@@ -1880,107 +1808,81 @@ def master_score(symbol, ticker, tickers_dict):
 
     rsi_1h = get_rsi(c1h[-48:] if len(c1h) >= 48 else c1h)
 
+    # GC-3: Linea Signature
     linea_sc, linea_sigs, linea_components = layer_linea_signature(
-        c1h, oi_chg1h, oi_chg24h, oi_valid,
-        ls_ratio, funding, chg_24h
+        c1h, oi_chg1h, oi_chg24h, oi_valid, ls_ratio, funding, chg_24h
     )
     if linea_components >= 2 and rsi_1h < CONFIG["linea_rsi_max"]:
         linea_sc += 5
-        linea_sigs.append(f"✅ [Linea-4] RSI {rsi_1h:.1f} — oversold, siap reversal")
+        linea_sigs.append(f"✅ [Linea-RSI] {rsi_1h:.1f} — oversold, siap reversal")
     score += linea_sc;  sigs += linea_sigs;  bd["linea"] = linea_sc
 
+    # GC-5: OI Acceleration
     oi_accel_sc, oi_accel_sigs, oi_accel_data = layer_oi_acceleration(
         symbol, oi_value, chg_24h, vol_24h
     )
     score += oi_accel_sc;  sigs += oi_accel_sigs;  bd["oi_accel"] = oi_accel_sc
 
-    trades_for_flow = get_trades(symbol, 500)
-    nf_sc, nf_sigs, nf_data, nf_block = layer_net_flow(c1h, c15m, trades_for_flow)
-    if nf_block:
-        log.info(
-            f"  {symbol}: GATE net flow distribusi sistematis "
-            f"(72h={nf_data['72h']['net_pct']:+.1f}% "
-            f"24h={nf_data['24h']['net_pct']:+.1f}% "
-            f"6h={nf_data['6h']['net_pct']:+.1f}%)"
-        )
-        return None
-    score += nf_sc;  sigs += nf_sigs;  bd["netflow"] = nf_sc
-
+    # OI adjustments
     if oi_value > 0:
         if oi_valid:
             if rvol > 4.0 and oi_chg24h < -20:
-                log.info(f"  {symbol}: GATE distribusi ekstrem (RVOL {rvol:.1f}x, OI 24h {oi_chg24h:.1f}%)")
+                log.info(f"  {symbol}: GATE distribusi ekstrem")
                 return None
-
             if oi_chg24h < -20:
-                score -= 25; sigs.append(f"⚠️ OI 24h turun {oi_chg24h:.1f}% — distribusi masif")
+                score -= 25; sigs.append(f"⚠️ OI 24h {oi_chg24h:.1f}% — distribusi masif")
             elif oi_chg24h < -10:
-                score -= 15; sigs.append(f"⚠️ OI 24h turun {oi_chg24h:.1f}% — distribusi signifikan")
+                score -= 15; sigs.append(f"⚠️ OI 24h {oi_chg24h:.1f}% — distribusi signifikan")
             elif oi_chg24h < -5:
-                score -= 10; sigs.append(f"OI 24h turun {oi_chg24h:.1f}% — distribusi terindikasi")
+                score -= 10; sigs.append(f"OI 24h {oi_chg24h:.1f}% — distribusi terindikasi")
             elif oi_chg24h < -3:
-                score -= 5;  sigs.append(f"OI 24h {oi_chg24h:.1f}% — sedikit berkurang")
-
+                score -= 5
             if oi_chg1h < -8:
-                score -= 20; sigs.append(f"🚨 OI 1h turun {oi_chg1h:.1f}% — distribusi CEPAT!")
+                score -= 20; sigs.append(f"🚨 OI 1h {oi_chg1h:.1f}% — distribusi CEPAT!")
             elif oi_chg1h < -5:
-                score -= 12; sigs.append(f"⚠️ OI 1h turun {oi_chg1h:.1f}% — tekanan jual 1 jam")
+                score -= 12; sigs.append(f"⚠️ OI 1h {oi_chg1h:.1f}% — tekanan jual 1h")
             elif oi_chg1h < -2:
-                score -= 6;  sigs.append(f"OI 1h {oi_chg1h:.1f}% — mulai berkurang")
+                score -= 6
             elif oi_chg1h > 5:
-                score += 5;  sigs.append(f"✅ OI 1h naik {oi_chg1h:.1f}% — posisi baru masuk")
-
+                score += 5;  sigs.append(f"✅ OI 1h +{oi_chg1h:.1f}% — posisi baru masuk")
             if oi_chg24h < -3 and oi_chg1h < -2:
-                log.info(f"  {symbol}: GATE multi-TF OI decline ({oi_chg24h:.1f}%/{oi_chg1h:.1f}%)")
+                log.info(f"  {symbol}: GATE multi-TF OI decline")
                 return None
-
             if oi_chg24h < -1.0 and oi_chg1h < -0.5:
                 score -= 12
                 sigs.append(f"⚠️ OI turun semua TF (24h:{oi_chg24h:.1f}% 1h:{oi_chg1h:.1f}%)")
-
             if rvol > 1.5 and oi_chg24h < -15:
-                score -= 18; sigs.append(f"🚨 Vol spike ({rvol:.1f}x) + OI {oi_chg24h:.1f}% — distribusi kuat")
+                score -= 18; sigs.append(f"🚨 Vol spike + OI {oi_chg24h:.1f}% — distribusi kuat")
             elif rvol > 1.5 and oi_chg24h < -10:
-                score -= 12; sigs.append(f"⚠️ Vol naik tapi OI {oi_chg24h:.1f}% — distribusi")
+                score -= 12
             elif rvol > 1.5 and oi_chg24h > 5:
                 score += 8;  sigs.append(f"✅ Vol naik + OI naik — akumulasi kuat")
-
         else:
-            sigs.append("ℹ️ OI history belum tersedia (run pertama — akan aktif mulai run ke-2)")
-
+            sigs.append("ℹ️ OI history belum tersedia (run pertama)")
             if oi_value > 0 and vol_24h > 0:
                 oi_to_vol = oi_value / vol_24h
                 if oi_to_vol < 0.05:
                     score -= 10
-                    sigs.append(f"⚠️ OI/Vol ratio sangat rendah ({oi_to_vol:.3f}) — posisi tidak dibangun")
-
             if vol_change_24h < -40:
                 score -= 15
-                sigs.append(f"⚠️ Volume 24h {vol_change_24h:.0f}% + OI unknown — distribusi tidak dapat dikonfirmasi")
             elif vol_change_24h < -25:
                 score -= 8
-                sigs.append(f"Volume 24h {vol_change_24h:.0f}% — interest menurun")
-
             if ls_ratio is not None and ls_ratio > 1.3:
                 score -= 8
-                sigs.append(f"⚠️ L/S {ls_ratio:.2f} + OI unknown — distribusi long tidak dapat dikonfirmasi")
-
             if funding > 0.0003:
                 score -= 5
-                sigs.append(f"Funding {funding:.5f} + OI unknown — longs dominan tanpa validasi OI")
-
             score -= 10
-            sigs.append("⚠️ Run pertama: OI baseline belum ada — -10 poin konservatif")
+            sigs.append("⚠️ Run pertama: -10 poin konservatif")
 
         if len(c1h) >= 24:
             vol_24h_candles  = [c["volume_usd"] for c in c1h[-24:]]
-            avg_vol_24h_base = sum(vol_24h_candles) / len(vol_24h_candles) if vol_24h_candles else 0
+            avg_vol_24h_base = sum(vol_24h_candles) / len(vol_24h_candles)
             if avg_vol_24h_base > 0 and avg_vol_6h > 0:
                 vol_momentum = avg_vol_6h / avg_vol_24h_base
                 if vol_momentum < 0.50:
                     score -= 10; sigs.append(f"⚠️ Volume 6h hanya {vol_momentum:.0%} avg 24h")
                 elif vol_momentum < 0.70:
-                    score -= 5;  sigs.append(f"Volume 6h menurun ({vol_momentum:.0%})")
+                    score -= 5
 
         bd["oi_change"]    = round(oi_chg24h, 1)
         bd["oi_change_1h"] = round(oi_chg1h, 1)
@@ -1990,7 +1892,7 @@ def master_score(symbol, ticker, tickers_dict):
         bd["oi_valid"]  = False
 
     if chg_7d > CONFIG["gate_chg_7d_max"]:
-        score -= 15; sigs.append(f"⚠️ Overbought ({chg_7d:+.1f}% 7d)")
+        score -= 15
 
     if len(c1h) >= 24:
         high24 = max(c["high"] for c in c1h[-24:])
@@ -1999,7 +1901,6 @@ def master_score(symbol, ticker, tickers_dict):
             range24 = (high24 - low24) / low24 * 100
             if range24 > 55:
                 score = max(0, score - 10)
-                sigs.append(f"⚠️ Range 24h {range24:.0f}% — pump sudah berjalan?")
 
     tmult, tsig = get_time_mult()
     raw_score = int(score * tmult)
@@ -2023,42 +1924,44 @@ def master_score(symbol, ticker, tickers_dict):
     if not entry or entry["liq_pct"] < CONFIG["min_target_pct"]:
         return None
 
+    # Ambil pump type dari OTS detector
+    _, ots_type, _ = detect_on_the_spot_pump(c1h)
+
     price_now = float(ticker.get("lastPr", 0)) or c1h[-1]["close"]
 
     return {
-        "symbol":          symbol,
-        "score":           raw_score,
-        "composite_score": composite,
-        "signals":         sigs,
-        "ws":              ws,
-        "wev":             wev,
-        "entry":           entry,
-        "sector":          sector,
-        "funding":         funding,
-        "bd":              bd,
-        "price":           price_now,
-        "chg_24h":         chg_24h,
-        "vol_24h":         vol_24h,
-        "rvol":            rvol,
-        "ls_ratio":        ls_ratio,
-        "chg_7d":          chg_7d,
-        "avg_vol_6h":      avg_vol_6h,
-        "range_6h":        range_6h,
-        "coiling":         coiling,
-        "bbw_val":         bbw_val,
-        "oi_change_24h":   bd.get("oi_change", 0),
-        "oi_change_1h":    bd.get("oi_change_1h", 0),
-        "prob_score":      prob["probability_score"],
-        "prob_class":      prob["classification"],
-        "prob_metrics":    prob.get("metrics", {}),
-        "rsi_1h":          rsi_1h,
-        "long_liq":        long_liq,
-        "short_liq":       short_liq,
+        "symbol":           symbol,
+        "score":            raw_score,
+        "composite_score":  composite,
+        "signals":          sigs,
+        "ws":               ws,
+        "wev":              wev,
+        "entry":            entry,
+        "sector":           sector,
+        "funding":          funding,
+        "bd":               bd,
+        "price":            price_now,
+        "chg_24h":          chg_24h,
+        "vol_24h":          vol_24h,
+        "rvol":             rvol,
+        "ls_ratio":         ls_ratio,
+        "chg_7d":           chg_7d,
+        "avg_vol_6h":       avg_vol_6h,
+        "range_6h":         range_6h,
+        "coiling":          coiling,
+        "bbw_val":          bbw_val,
+        "oi_change_24h":    bd.get("oi_change", 0),
+        "oi_change_1h":     bd.get("oi_change_1h", 0),
+        "prob_score":       prob["probability_score"],
+        "prob_class":       prob["classification"],
+        "prob_metrics":     prob.get("metrics", {}),
+        "rsi_1h":           rsi_1h,
+        "long_liq":         long_liq,
+        "short_liq":        short_liq,
         "linea_components": linea_components,
-        "oi_accel_score":  oi_accel_sc,
-        "oi_accel_data":   oi_accel_data,
-        "nf_data":         nf_data,
-        "nf_score":        nf_sc,
+        "oi_accel_score":   oi_accel_sc,
+        "oi_accel_data":    oi_accel_data,
+        "pump_type":        ots_type,
     }
 
 
@@ -2080,21 +1983,29 @@ def build_alert(r, rank=None):
     pm       = r.get("prob_metrics", {})
     bd       = r.get("bd", {})
 
+    # Pump type indicator [J2]
+    pump_type = r.get("pump_type", "unknown")
+    pump_icons = {
+        "on_the_spot":       "🎯 On-The-Spot",
+        "on_the_spot_early": "👀 Early OTS",
+        "pre_accumulation":  "📦 Pre-Accumulation",
+        "unknown":           "❓ Unknown",
+    }
+    pump_type_str = f"<b>Pump Type  :</b> {pump_icons.get(pump_type, pump_type)}\n"
+
     linea_str = ""
     if r.get("linea_components", 0) >= 3:
-        linea_str = f"<b>Linea Sig :</b> ⭐ {r['linea_components']}/5 komponen!\n"
+        linea_str = f"<b>Linea Sig  :</b> ⭐ {r['linea_components']}/5 komponen!\n"
 
     accel_str = ""
     ad = r.get("oi_accel_data", {})
-    accel_sc = r.get("oi_accel_score", 0)
-    if accel_sc > 0:
-        div_tag = " 📈DIV" if ad.get("divergence") else ""
+    if r.get("oi_accel_score", 0) > 0:
+        div_tag   = " 📈DIV" if ad.get("divergence") else ""
         micro_tag = " [MICRO]" if ad.get("is_micro_cap") else ""
         accel_str = (
-            f"<b>OI Accel  :</b> +{accel_sc}poin{micro_tag}{div_tag} | "
-            f"1h:{ad.get('growth_rate_1h', 0):+.1f}% "
-            f"3h:{ad.get('growth_rate_3h', 0):+.1f}% "
-            f"6h:{ad.get('growth_rate_6h', 0):+.1f}%\n"
+            f"<b>OI Accel   :</b> +{r['oi_accel_score']}pt{micro_tag}{div_tag} | "
+            f"1h:{ad.get('growth_rate_1h',0):+.1f}% "
+            f"3h:{ad.get('growth_rate_3h',0):+.1f}%\n"
         )
 
     liq_str = ""
@@ -2102,39 +2013,18 @@ def build_alert(r, rank=None):
         liq_str = (f"<b>Liquidation:</b> Long ${r.get('long_liq',0)/1e3:.0f}K | "
                    f"Short ${r.get('short_liq',0)/1e3:.0f}K (30m)\n")
 
-    nf_str = ""
-    nfd = r.get("nf_data", {})
-    if nfd.get("has_data"):
-        def _flow_icon(label):
-            return {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "NEUTRAL": "⚪",
-                    "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(label, "⚪")
-
-        f72 = nfd.get("72h", {}); f24 = nfd.get("24h", {})
-        f6  = nfd.get("6h",  {}); f15 = nfd.get("15m", {})
-        nf72_icon = _flow_icon(f72.get("label", "NO_DATA"))
-        nf24_icon = _flow_icon(f24.get("label", "NO_DATA"))
-        nf6_icon  = _flow_icon(f6.get("label",  "NO_DATA"))
-        nf15_icon = _flow_icon(f15.get("label", "NO_DATA"))
-        nf_score  = r.get("nf_score", 0)
-        nf_str = (
-            f"<b>Net Flow   :</b> [{nf_score:+d}poin]\n"
-            f"  {nf72_icon}72h:{f72.get('net_pct',0):+.1f}%  "
-            f"{nf24_icon}24h:{f24.get('net_pct',0):+.1f}%  "
-            f"{nf6_icon}6h:{f6.get('net_pct',0):+.1f}%  "
-            f"{nf15_icon}15m:{f15.get('net_pct',0):+.1f}%\n"
-        )
-
     oi_warning = ""
     if not bd.get("oi_valid", True):
         oi_warning = "⚠️ <i>OI baseline belum tersedia (run pertama)</i>\n"
 
     msg = (
-        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v9.10-FULL</b>\n\n"
-        f"<b>Symbol    :</b> {r['symbol']}\n"
-        f"<b>Composite :</b> {comp}/100  {bar}\n"
+        f"🚨 <b>PRE-PUMP SIGNAL {rk}— v10.0</b>\n\n"
+        f"<b>Symbol     :</b> {r['symbol']}\n"
+        f"<b>Composite  :</b> {comp}/100  {bar}\n"
         f"<b>Layer Score:</b> {sc}/100\n"
         f"<b>Prob Model :</b> {prob_pct:.1f}% ({prob_cls})\n"
         f"<b>RSI 1h     :</b> {r.get('rsi_1h', 0):.1f}\n"
+        f"{pump_type_str}"
         f"{linea_str}"
         f"{accel_str}"
         f"{oi_warning}"
@@ -2143,9 +2033,8 @@ def build_alert(r, rank=None):
         f"<b>Vol 24h    :</b> {vol} | RVOL: {r['rvol']:.1f}x{ls}\n"
         f"<b>6h Vol     :</b> ${r['avg_vol_6h']:.0f}/h  | 6h Range: {r['range_6h']:.1f}%\n"
         f"<b>Coiling    :</b> {r['coiling']}h  | BBW: {r['bbw_val']:.1f}%\n"
-        f"<b>OI 24h/1h :</b> {r['oi_change_24h']:+.1f}% / {r.get('oi_change_1h',0):+.1f}%"
+        f"<b>OI 24h/1h  :</b> {r['oi_change_24h']:+.1f}% / {r.get('oi_change_1h',0):+.1f}%"
         f"  [valid:{bd.get('oi_valid','?')}]\n"
-        f"{nf_str}"
         f"{liq_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🐋 <b>WHALE SCORE: {r['ws']}/100</b>\n"
@@ -2168,7 +2057,7 @@ def build_alert(r, rank=None):
         )
 
     msg += f"\n━━━━━━━━━━━━━━━━━━━━\n📊 <b>SINYAL AKTIF</b>\n"
-    for s in r["signals"][:10]:
+    for s in r["signals"][:12]:
         msg += f"  • {s}\n"
 
     msg += (
@@ -2178,18 +2067,19 @@ def build_alert(r, rank=None):
         f"4H:{bd.get('tf4h',0)} Ctx:{bd.get('ctx',0)} "
         f"Whale:{bd.get('whale',0)} Liq:{bd.get('liq',0)} "
         f"Linea:{bd.get('linea',0)} Accel:{bd.get('oi_accel',0)} "
-        f"Flow:{bd.get('netflow',0)} Stealth:{bd.get('stealth',0)}\n"
-        f"  OI valid:{bd.get('oi_valid','?')} RSI:{bd.get('rsi_1h','?')} "
+        f"Stealth:{bd.get('stealth',0)}\n"
+        f"  OI:{bd.get('oi_valid','?')} RSI:{bd.get('rsi_1h','?')} "
+        f"PumpType:{pump_type} "
         f"[Prob] MVS:{pm.get('max_vol_spike','?')}x "
-        f"Irr:{pm.get('vol_irregularity','?')} "
-        f"ATR:{pm.get('norm_atr_pct','?')}%\n\n"
+        f"Irr:{pm.get('vol_irregularity','?')}\n\n"
         f"📡 Funding:{r['funding']:.5f}  🕐 {utc_now()}\n"
         f"<i>⚠️ Bukan financial advice. Manage risk ketat.</i>"
     )
     return msg
 
+
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v9.10-FULL — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v10.0 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         comp     = r.get("composite_score", r["score"])
         bar      = "█" * int(comp / 10) + "░" * (10 - int(comp / 10))
@@ -2201,130 +2091,62 @@ def build_summary(results):
         rsi      = r.get("rsi_1h", 0)
         linea    = f" ⭐L{r.get('linea_components',0)}" if r.get("linea_components", 0) >= 2 else ""
         oi_tag   = " ⚠️OI?" if not r.get("bd", {}).get("oi_valid", True) else ""
+        ptype    = r.get("pump_type", "")[:3].upper()
         msg += (
             f"{i}. <b>{r['symbol']}</b> [C:{comp} S:{r['score']} {bar}]{linea}{oi_tag}\n"
             f"   🐋{r['ws']} | RVOL:{r['rvol']:.1f}x | {vol} | "
-            f"T1:+{t1p:.0f}% | {prob:.0f}% {prob_cls} | RSI:{rsi:.0f}\n"
+            f"T1:+{t1p:.0f}% | {prob:.0f}% {prob_cls} | RSI:{rsi:.0f} | {ptype}\n"
         )
     return msg
 
 
 # ══════════════════════════════════════════════════════════════
-#  🔍  v9.10-FULL-WHITELIST: BUILD CANDIDATE LIST
+#  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════
 def build_candidate_list(tickers):
     """
-    v9.10-FULL-WHITELIST: Scan SEMUA 324 coin whitelist.
-    
-    MODIFIKASI dari v9.10 original:
-    - Hapus stratified bucketing (Bucket A/B/C)
-    - Return SEMUA coin whitelist yang pass basic filter
-    - Expected: ~310-320 coin per run (semua whitelist aktif di Bitget)
-    - Runtime: ~5-7 menit (vs ~2 menit original)
+    v10.0: Scan langsung semua coin di WHITELIST (tanpa stratified bucket).
+    Whitelist sudah dipilih manual oleh user → tidak perlu random sampling.
     """
-    all_candidates = []
-    not_found = []
-    filtered_stats = {
-        "cooldown": 0,
-        "manual_exclude": 0,
-        "vol_too_low": 0,
-        "vol_too_high": 0,
-        "change_extreme": 0,
-        "invalid_price": 0,
-        "parse_error": 0,
-    }
-    
-    log.info("=" * 70)
-    log.info("🔍 SCANNING MODE: FULL WHITELIST (ALL 324 COINS)")
-    log.info("=" * 70)
-    
-    for sym in WHITELIST_SYMBOLS:
+    candidates = []
+    not_found  = []
+
+    for sym in sorted(WHITELIST_SYMBOLS):
         if sym in MANUAL_EXCLUDE:
-            filtered_stats["manual_exclude"] += 1
             continue
-        
         if is_cooldown(sym):
-            filtered_stats["cooldown"] += 1
             continue
-        
         if sym not in tickers:
             not_found.append(sym)
             continue
-        
-        ticker = tickers[sym]
-        
+        t = tickers[sym]
         try:
-            vol   = float(ticker.get("quoteVolume", 0))
-            chg   = float(ticker.get("change24h", 0)) * 100
-            price = float(ticker.get("lastPr", 0))
+            vol   = float(t.get("quoteVolume", 0))
+            chg   = float(t.get("change24h",   0)) * 100
+            price = float(t.get("lastPr",       0))
         except:
-            filtered_stats["parse_error"] += 1
             continue
-        
-        if vol < CONFIG["pre_filter_vol"]:
-            filtered_stats["vol_too_low"] += 1
-            continue
-        
-        if vol > CONFIG["max_vol_24h"]:
-            filtered_stats["vol_too_high"] += 1
-            continue
-        
-        if abs(chg) > CONFIG["gate_chg_24h_max"]:
-            filtered_stats["change_extreme"] += 1
-            continue
-        
-        if price <= 0:
-            filtered_stats["invalid_price"] += 1
-            continue
-        
-        all_candidates.append((sym, ticker))
-    
-    total = len(WHITELIST_SYMBOLS)
-    will_scan = len(all_candidates)
-    filtered = total - will_scan
-    
-    log.info("")
-    log.info("📊 SCAN SUMMARY:")
-    log.info(f"   Whitelist total: {total} coins")
-    log.info(f"   ✅ Will scan:     {will_scan} coins ({will_scan/total*100:.1f}%)")
-    log.info(f"   ❌ Filtered:      {filtered} coins ({filtered/total*100:.1f}%)")
-    log.info("")
-    log.info("📋 Filter breakdown:")
-    log.info(f"   Not in Bitget:  {len(not_found)}")
-    log.info(f"   Cooldown:       {filtered_stats['cooldown']}")
-    log.info(f"   Manual exclude: {filtered_stats['manual_exclude']}")
-    log.info(f"   Vol < $1K:      {filtered_stats['vol_too_low']}")
-    log.info(f"   Vol > $50M:     {filtered_stats['vol_too_high']}")
-    log.info(f"   Chg > ±30%:     {filtered_stats['change_extreme']}")
-    log.info(f"   Invalid price:  {filtered_stats['invalid_price']}")
-    log.info(f"   Parse error:    {filtered_stats['parse_error']}")
-    
-    if not_found and len(not_found) <= 30:
-        log.info(f"\n⚠️  Missing from Bitget: {', '.join(not_found)}")
-    elif not_found:
-        log.info(f"\n⚠️  {len(not_found)} coins missing from Bitget")
-        log.info(f"     First 10: {', '.join(not_found[:10])}")
-    
-    log.info(f"\n⏱️  Est. scan time: {will_scan * CONFIG['sleep_coins']:.0f}s (~{will_scan * CONFIG['sleep_coins']/60:.1f} min)")
-    log.info("=" * 70)
-    log.info("")
-    
-    return all_candidates
+        if vol   < CONFIG["pre_filter_vol"]:      continue
+        if vol   > CONFIG["max_vol_24h"]:         continue
+        if abs(chg) > CONFIG["gate_chg_24h_max"]: continue
+        if price <= 0:                             continue
+        candidates.append((sym, t))
+
+    if not_found:
+        log.debug(f"Tidak ditemukan di Bitget: {len(not_found)} coin")
+    log.info(f"Kandidat aktif: {len(candidates)}/{len(WHITELIST_SYMBOLS)} coin")
+    return candidates
 
 
-# ══════════════════════════════════════════════════════════════
-#  🚀  MAIN SCAN
-# ══════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v9.10-FULL-WHITELIST — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v10.0 — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
         send_telegram("⚠️ Scanner Error: Gagal ambil data Bitget")
         return
 
-    log.info(f"Total ticker: {len(tickers)}")
-
+    log.info(f"Total ticker Bitget: {len(tickers)}")
     candidates = build_candidate_list(tickers)
 
     results = []
@@ -2347,12 +2169,11 @@ def run_scan():
                 prob_cls = res["prob_class"]
                 linea    = res.get("linea_components", 0)
                 rsi      = res.get("rsi_1h", 0)
-                oi_v     = res.get("bd", {}).get("oi_valid", "?")
+                ptype    = res.get("pump_type", "?")
                 log.info(
                     f"  Score={res['score']} Comp={comp} W={res['ws']} "
                     f"RVOL={res['rvol']:.1f}x Prob={prob:.0f}% ({prob_cls}) "
-                    f"Linea={linea}/5 RSI={rsi:.0f} "
-                    f"OI_valid={oi_v} "
+                    f"Linea={linea}/5 RSI={rsi:.0f} PumpType={ptype} "
                     f"T1=+{res['entry']['liq_pct']:.1f}%"
                 )
                 if (comp >= CONFIG["min_composite_alert"]
@@ -2361,9 +2182,9 @@ def run_scan():
                 else:
                     reason = ""
                     if comp < CONFIG["min_composite_alert"]:
-                        reason += f"comp={comp}<{CONFIG['min_composite_alert']}"
+                        reason += f"comp={comp}<{CONFIG['min_composite_alert']} "
                     if res["prob_score"] < CONFIG["min_prob_alert"]:
-                        reason += f" prob={prob:.0f}%<50%({prob_cls})"
+                        reason += f"prob={prob:.0f}%<{CONFIG['min_prob_alert']*100:.0f}%"
                     if reason:
                         log.info(f"  SKIP: {reason.strip()}")
         except Exception as ex:
@@ -2406,7 +2227,7 @@ def run_scan():
                 f"✅ Alert #{rank}: {r['symbol']} "
                 f"S={r['score']} C={r['composite_score']} W={r['ws']} "
                 f"Prob={r['prob_score']*100:.0f}% Linea={r.get('linea_components',0)}/5 "
-                f"OI_valid={r.get('bd',{}).get('oi_valid','?')}"
+                f"PumpType={r.get('pump_type','?')}"
             )
         time.sleep(2)
 
@@ -2418,14 +2239,14 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔═══════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v9.10-FULL-WHITELIST           ║")
-    log.info("║  Scan SEMUA 324 coin whitelist setiap run        ║")
-    log.info("║  GC-6: Multi-TF Net Flow (72h/24h/6h/15m)        ║")
-    log.info("║  Whale Funnel Pattern + Distribusi Gate           ║")
+    log.info("║  PRE-PUMP SCANNER v10.0                           ║")
+    log.info("║  [J1] StdRushOrder + Sell Rush Gate               ║")
+    log.info("║  [J2] On-The-Spot Pump Detector                   ║")
+    log.info("║  [J3] RF Feature Importance Weights               ║")
     log.info("╚═══════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
-        log.error("FATAL: BOT_TOKEN / CHAT_ID tidak ditemukan di environment!")
+        log.error("FATAL: BOT_TOKEN / CHAT_ID tidak ditemukan!")
         exit(1)
 
     run_scan()
