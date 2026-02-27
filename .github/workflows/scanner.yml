@@ -1,30 +1,23 @@
-name: Pre-Pump Scanner
+
+
+        name: Pre-Pump Scanner
 
 on:
   schedule:
-    # Jalankan setiap 15 menit
-     - cron: '0 */1 * * *'
-  workflow_dispatch:
-    # Tombol "Run manually" di GitHub
+    - cron: '*/30 * * * *'   # setiap 30 menit (sesuaikan)
+  workflow_dispatch:          # bisa dijalankan manual
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-      - name: Checkout kode
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: pip install requests
-
-      - name: Jalankan scanner
+        run: pip install ccxt pandas numpy requests
+      - name: Run scanner
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
