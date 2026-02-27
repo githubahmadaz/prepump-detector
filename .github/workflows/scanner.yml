@@ -1,6 +1,4 @@
-
-
-        name: Pre-Pump Scanner
+ name: Pre-Pump Scanner
 
 on:
   schedule:
@@ -17,7 +15,7 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install ccxt pandas numpy requests
-      - name: Run scanner
+      - name: Jalankan scanner
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
