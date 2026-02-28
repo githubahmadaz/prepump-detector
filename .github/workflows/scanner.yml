@@ -2,21 +2,50 @@ name: Pre-Pump Scanner
 
 on:
   schedule:
-    - cron: '*/* 8 * * *'   # setiap 30 menit (sesuaikan)
-  workflow_dispatch:          # bisa dijalankan manual
+    - cron: '*/30 * * * *'   # setiap 30 menit
+  workflow_dispatch:
+
+permissions:
+  contents: write   # diperlukan untuk git push cooldown.json
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: pip install ccxt pandas numpy requests
+
       - name: Run scanner
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python scanner.py
+
+      # ─────────────────────────────────────────────────────────────
+      # KRITIS: Simpan cooldown.json ke repo setelah scan selesai.
+      # Tanpa langkah ini, cooldown RESET setiap run karena
+      # GitHub Actions menggunakan fresh container setiap kali.
+      # ─────────────────────────────────────────────────────────────
+      - name: Save cooldown state
+        if: always()   # tetap jalankan meski scanner error
+        run: |
+          git config user.name  "scanner-bot"
+          git config user.email "scanner-bot@noreply"
+          # Hanya commit jika cooldown.json berubah
+          if git diff --quiet cooldown.json 2>/dev/null || [ ! -f cooldown.json ]; then
+            echo "Tidak ada perubahan cooldown.json, skip commit."
+          else
+            git add cooldown.json
+            git commit -m "chore: update cooldown [skip ci]"
+            git push
+          fi
