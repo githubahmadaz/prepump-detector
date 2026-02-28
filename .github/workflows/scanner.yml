@@ -2,28 +2,37 @@ name: Pre-Pump Scanner
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # setiap 2 jam sekali (menit 0)
+   - cron: '0 */2 * * *'   # setiap 2 jam sekali (menit 0)
   workflow_dispatch:
-
-permissions:
-  contents: write   # diperlukan untuk git push file state
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # ──────────────────────────────────────────────────────────────
+      # [FIX L] PERSISTENT COOLDOWN — restore dari run sebelumnya
+      # Tanpa ini: runner baru tiap 30 menit = cooldown.json hilang
+      # = koin yang sama di-alert berulang (lihat: IOTX scan #1 & #2)
+      # ──────────────────────────────────────────────────────────────
+      - name: Restore cooldown cache
+        uses: actions/cache@v4
+        with:
+          path: cooldown.json
+          key: scanner-cooldown-${{ github.run_id }}
+          restore-keys: |
+            scanner-cooldown-
+
       - name: Install dependencies
-        run: pip install requests
+        run: pip install ccxt pandas numpy requests
 
       - name: Run scanner
         env:
@@ -31,28 +40,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python scanner.py
 
-      # ─────────────────────────────────────────────────────────────
-      # Simpan file state (cooldown & funding) ke repo agar persisten
-      # Pastikan di skrip CONFIG["cooldown_file"] dan 
-      # CONFIG["funding_snapshot_file"] menggunakan path "./*.json"
-      # ─────────────────────────────────────────────────────────────
-      - name: Save state files
-        if: always()
-        run: |
-          git config user.name "scanner-bot"
-          git config user.email "scanner-bot@noreply"
-          
-          # Tambahkan file-file state jika ada
-          for file in cooldown.json funding.json; do
-            if [ -f "$file" ]; then
-              git add "$file"
-            fi
-          done
-          
-          # Commit hanya jika ada perubahan
-          if git diff --cached --quiet; then
-            echo "Tidak ada perubahan pada state files, skip commit."
-          else
-            git commit -m "chore: update scanner state [skip ci]"
-            git push
-          fi
+      # actions/cache otomatis menyimpan cooldown.json yang baru
+      # ke cache setelah job selesai — tidak perlu step tambahan
+
+
