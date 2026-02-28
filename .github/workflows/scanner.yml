@@ -2,11 +2,11 @@ name: Pre-Pump Scanner
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # setiap 30 menit
+    - cron: '0 */2 * * *'   # setiap 2 jam sekali (menit 0)
   workflow_dispatch:
 
 permissions:
-  contents: write   # diperlukan untuk git push cooldown.json
+  contents: write   # diperlukan untuk git push file state
 
 jobs:
   scan:
@@ -23,7 +23,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install ccxt pandas numpy requests
+        run: pip install requests
 
       - name: Run scanner
         env:
@@ -32,20 +32,27 @@ jobs:
         run: python scanner.py
 
       # ─────────────────────────────────────────────────────────────
-      # KRITIS: Simpan cooldown.json ke repo setelah scan selesai.
-      # Tanpa langkah ini, cooldown RESET setiap run karena
-      # GitHub Actions menggunakan fresh container setiap kali.
+      # Simpan file state (cooldown & funding) ke repo agar persisten
+      # Pastikan di skrip CONFIG["cooldown_file"] dan 
+      # CONFIG["funding_snapshot_file"] menggunakan path "./*.json"
       # ─────────────────────────────────────────────────────────────
-      - name: Save cooldown state
-        if: always()   # tetap jalankan meski scanner error
+      - name: Save state files
+        if: always()
         run: |
-          git config user.name  "scanner-bot"
+          git config user.name "scanner-bot"
           git config user.email "scanner-bot@noreply"
-          # Hanya commit jika cooldown.json berubah
-          if git diff --quiet cooldown.json 2>/dev/null || [ ! -f cooldown.json ]; then
-            echo "Tidak ada perubahan cooldown.json, skip commit."
+          
+          # Tambahkan file-file state jika ada
+          for file in cooldown.json funding.json; do
+            if [ -f "$file" ]; then
+              git add "$file"
+            fi
+          done
+          
+          # Commit hanya jika ada perubahan
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan pada state files, skip commit."
           else
-            git add cooldown.json
-            git commit -m "chore: update cooldown [skip ci]"
+            git commit -m "chore: update scanner state [skip ci]"
             git push
           fi
