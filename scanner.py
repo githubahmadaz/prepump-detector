@@ -78,8 +78,8 @@ CONFIG = {
     "alert_cooldown_sec":       1800,
     "sleep_coins":               0.8,
     "sleep_error":               3.0,
-    "cooldown_file":    "/tmp/v13_cooldown.json",
-    "funding_snapshot_file":"/tmp/v13_funding.json",
+    "cooldown_file":    "./cooldown.json",           # disimpan di repo
+    "funding_snapshot_file":"./funding.json",        # disimpan di repo
 
     # ── Bobot skor (utama) ────────────────────────────────────
     "score_bbw_12":              5,
@@ -186,12 +186,6 @@ def load_cooldown():
     return {}
 
 def save_cooldown(state):
-  CONFIG = {
-    # ... (konfigurasi lain)
-    "cooldown_file": "./cooldown.json",           # bukan di /tmp
-    "funding_snapshot_file": "./funding.json",    # bukan di /tmp
-    # ...
-}
     try:
         with open(CONFIG["cooldown_file"], "w") as f:
             json.dump(state, f)
@@ -435,9 +429,7 @@ def calc_macd(candles, fast=12, slow=26, signal=9):
             ema_val = alpha * closes[i] + (1 - alpha) * ema_val
         return ema_val
     macd_line = ema(fast, -1) - ema(slow, -1)
-    signal_line = ema(signal, -1)  # sebenarnya signal dari MACD, tapi sederhana
-    # Alternatif: hitung signal dari MACD line
-    # Untuk sederhana, kita gunakan EMA dari macd line
+    # hitung signal line sebagai EMA dari MACD line selama signal periode
     macd_vals = [ema(fast, i) - ema(slow, i) for i in range(-signal, 0)]
     signal_line = sum(macd_vals) / signal
     hist = macd_line - signal_line
