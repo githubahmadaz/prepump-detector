@@ -2,7 +2,7 @@ name: Pre-Pump Scanner
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # setiap 30 menit (sesuaikan)
+    - cron: '*/* 8 * * *'   # setiap 30 menit (sesuaikan)
   workflow_dispatch:          # bisa dijalankan manual
 
 jobs:
