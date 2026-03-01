@@ -54,7 +54,7 @@ from pathlib import Path
 TIMEFRAME         = '5m'
 CANDLE_LIMIT      = 300     # [FIX B] Fetch lebih banyak
 CANDLE_MIN_VALID  = 200     # [FIX B] Min candle tersedia (>= 16 jam)
-CANDLE_MIN_AGE_H  = 72      # [FIX F] Min usia: 72 jam = 3 hari
+CANDLE_MIN_AGE_H  = 24     # [FIX F] Min usia: 72 jam = 3 hari
 FUNDING_LIMIT     = 100
 
 MIN_VOLUME_USDT   = 500_000  # [FIX E] Naik dari 100K
