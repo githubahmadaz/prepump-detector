@@ -54,7 +54,7 @@ from pathlib import Path
 TIMEFRAME         = '5m'
 CANDLE_LIMIT      = 300     # [FIX B] Fetch lebih banyak
 CANDLE_MIN_VALID  = 200     # [FIX B] Min candle tersedia (>= 16 jam)
-CANDLE_MIN_AGE_H  = 24     # [FIX F] Min usia: 72 jam = 3 hari
+CANDLE_MIN_AGE_H  = 24      # Min usia: 24 jam (coin bisa baru di Bitget tapi coin lama)
 FUNDING_LIMIT     = 100
 
 MIN_VOLUME_USDT   = 500_000  # [FIX E] Naik dari 100K
@@ -571,42 +571,126 @@ def compute_score(funding: dict, df: pd.DataFrame, coin_ctx: dict):
 
 
 # =============================================================================
-# ENTRY ZONE
+# ENTRY ZONE — Fibonacci Extension Method
 # =============================================================================
-def compute_entry_zone(df: pd.DataFrame, price: float) -> dict:
-    last    = df.iloc[-1]
-    vwap    = last.get('vwap', price)
-    ema20   = last.get('ema20', price)
-    ema50   = last.get('ema50', price)
-    entry   = max(vwap, ema20) * 1.001
-    if abs(entry - price) / price > 0.02:
-        entry = price
+# Filosofi:
+#   Target kita adalah pump 15-50% dalam beberapa jam (short squeeze setup).
+#   TP berbasis persentase flat (+1.8%, +3.7%) TIDAK MASUK AKAL untuk target ini.
+#
+#   Metode baru:
+#   A = swing_low  (support terkuat dalam N candle terakhir)
+#   B = swing_high (resistance/puncak terakhir dalam N candle)
+#   C = entry      (harga saat ini = titik retracement/akumulasi)
+#
+#   SL: di bawah swing_low dengan buffer 1% (struktur invalidated jika tembus)
+#       → Min SL distance: 3% dari entry (noise filter)
+#       → Max SL distance: 8% dari entry (lebih dari ini = setup terlalu berisiko)
+#
+#   TP: Fibonacci Extension dari range A-B, diproyeksikan dari C
+#       TP1 = C + (B-A) × 0.618   →  target ~5-12%  (partial, aman ambil profit)
+#       TP2 = C + (B-A) × 1.000   →  target ~15-25% (target utama)
+#       TP3 = C + (B-A) × 1.618   →  target ~25-40% (ambitious, hold lebih lama)
+#
+#   Jika range A-B terlalu kecil (<8% dari A), fallback ke target minimum:
+#       TP1 = +8%, TP2 = +18%, TP3 = +30%
+#       (menjamin target 15%+ tetap visible bahkan di koin konsolidasi ketat)
+#
+#   Setup DIBATALKAN (return None) jika R:R ke TP2 < 2.0
+#   Artinya: setup tidak layak masuk, skip dan jangan kirim alert.
+# =============================================================================
+def compute_entry_zone(df: pd.DataFrame, price: float) -> dict | None:
+    """
+    Hitung entry/SL/TP berbasis Fibonacci Extension dari swing A-B.
+    Return None jika setup tidak memenuhi syarat R:R minimum.
+    """
+    # ── 1. Identifikasi swing low (A) dan swing high (B) ──────────────────
+    # Gunakan 50 candle terakhir untuk menemukan range yang relevan
+    lookback   = min(60, len(df) - 5)
+    window     = df.tail(lookback)
+    swing_low  = float(window['low'].min())
+    swing_high = float(window['high'].max())
+    range_ab   = swing_high - swing_low
 
-    sl_base = df['low'].tail(3).min()
-    sl      = sl_base * 0.997
-    # [FIX P] SL WAJIB di bawah entry — jika sl >= entry (koin breakout ketat),
-    # gunakan SL berbasis persentase harga. Max SL distance 3%, min 0.5%
+    # ── 2. Entry = harga saat ini (scanner deteksi momentum, masuk ASAP) ──
+    entry = float(price)
+
+    # Sanity: entry tidak boleh terlalu jauh dari swing range
+    if entry > swing_high * 1.05:
+        entry = swing_high * 1.02  # harga sudah overtake → adjust
+
+    # ── 3. SL: di bawah swing_low dengan buffer 1% ────────────────────────
+    sl_structural = swing_low * 0.99   # tepat di bawah support struktur
+    sl_dist_pct   = (entry - sl_structural) / entry if entry > 0 else 0.05
+
+    if sl_dist_pct < 0.03:
+        # Swing low terlalu dekat dengan harga → gunakan 3% flat
+        sl = entry * 0.97
+    elif sl_dist_pct > 0.10:
+        # Swing low terlalu jauh → SL max 8% (lebih = terlalu berisiko)
+        sl = entry * 0.92
+    else:
+        sl = sl_structural
+
+    # Pastikan sl < entry (selalu)
     if sl >= entry:
-        sl = entry * 0.98     # fallback: 2% di bawah entry
-    if (entry - sl) > entry * 0.04:
-        sl = entry * 0.97     # cap SL max 3% di bawah entry
+        sl = entry * 0.95
 
-    tp1 = entry * 1.008
-    tp2 = entry * 1.018
-    tp3 = entry * 1.037
+    # ── 4. TP: Fibonacci Extension dari A-B, diproyeksikan dari C ─────────
+    range_pct = range_ab / swing_low if swing_low > 0 else 0
 
-    sl_dist = max(entry - sl, entry * 0.001)   # min 0.1% agar tidak bagi nol
-    rr      = (tp2 - entry) / sl_dist
-    rr      = min(rr, 20.0)   # clamp max R:R = 20 (lebih tidak realistis)
+    if range_pct >= 0.08:
+        # Range cukup signifikan → pakai Fibonacci Extension
+        tp1 = entry + range_ab * 0.618   # 61.8% extension
+        tp2 = entry + range_ab * 1.000   # 100% extension
+        tp3 = entry + range_ab * 1.618   # 161.8% extension
+        method = "Fib Ext"
+    else:
+        # Range terlalu kecil → fallback ke minimum guarantee
+        # Pastikan TP2 minimal +15% agar sesuai target user
+        tp1 = entry * 1.08    # +8%
+        tp2 = entry * 1.18    # +18%
+        tp3 = entry * 1.30    # +30%
+        method = "Min Target"
+
+    # ── 5. Pastikan TP2 minimal +12% dari entry ───────────────────────────
+    # (kita ingin 15%, tapi 12% masih acceptable dengan R:R baik)
+    if (tp2 - entry) / entry < 0.12:
+        scale = (entry * 0.15) / (tp2 - entry)  # scale up ke 15%
+        tp1   = entry + (tp1 - entry) * scale
+        tp2   = entry * 1.15
+        tp3   = entry + (tp3 - entry) * scale
+
+    # ── 6. Hitung R:R dan validasi ────────────────────────────────────────
+    sl_dist = max(entry - sl, entry * 0.001)  # hindari div by zero
+    rr_tp1  = (tp1 - entry) / sl_dist
+    rr_tp2  = (tp2 - entry) / sl_dist
+    rr_tp3  = (tp3 - entry) / sl_dist
+
+    # Setup tidak layak jika R:R ke TP2 < 2.0
+    # Artinya risiko lebih besar dari setengah potensi profit → SKIP
+    if rr_tp2 < 2.0:
+        return None
+
+    tp1_pct = (tp1 - entry) / entry * 100
+    tp2_pct = (tp2 - entry) / entry * 100
+    tp3_pct = (tp3 - entry) / entry * 100
+    sl_pct  = (entry - sl) / entry * 100
 
     return {
-        'entry'   : round(entry, 8),
-        'sl'      : round(sl, 8),
-        'sl_ema50': round(ema50 * 0.998, 8),
-        'tp1'     : round(tp1, 8),
-        'tp2'     : round(tp2, 8),
-        'tp3'     : round(tp3, 8),
-        'rr_tp2'  : round(rr, 2),
+        'entry'      : round(entry, 8),
+        'sl'         : round(sl, 8),
+        'sl_pct'     : round(sl_pct, 2),
+        'swing_low'  : round(swing_low, 8),
+        'swing_high' : round(swing_high, 8),
+        'tp1'        : round(tp1, 8),
+        'tp2'        : round(tp2, 8),
+        'tp3'        : round(tp3, 8),
+        'tp1_pct'    : round(tp1_pct, 1),
+        'tp2_pct'    : round(tp2_pct, 1),
+        'tp3_pct'    : round(tp3_pct, 1),
+        'rr_tp2'     : round(rr_tp2, 1),
+        'rr_tp3'     : round(rr_tp3, 1),
+        'method'     : method,
     }
 
 
@@ -618,43 +702,47 @@ def send_telegram_alert(symbol, score, signals, price, funding, entry_ez, alert_
         log.warning("BOT_TOKEN/CHAT_ID belum di-set")
         return
 
-    icon = "KUAT" if alert_lvl == "STRONG" else "ALERT"
-    ts   = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    icon      = "KUAT" if alert_lvl == "STRONG" else "ALERT"
+    ts        = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    sym_clean = symbol.replace('/USDT:USDT', '').replace('/USDT', '')
 
-    # Format plain text (lebih aman, hindari MarkdownV2 parse error)
     lines = [
-        f"PRE-PUMP SCANNER v14.2 | {icon}",
-        f"",
-        f"Symbol : {symbol}",
-        f"Score  : {score}/32",
+        f"[{icon}] PRE-PUMP DETECTED",
+        f"Coin   : {sym_clean}  |  Score: {score}/32",
         f"Harga  : ${price:.8g}",
         f"",
-        f"[Funding]",
-        f"  Streak : {funding.get('neg_streak',0)}x negatif beruntun",
-        f"  Neg%   : {funding.get('neg_pct',0):.1f}%",
-        f"  Cumul  : {funding.get('cumulative',0):.5f}",
+        f"[Funding Negatif]",
+        f"  Streak : {funding.get('neg_streak',0)}x beruntun",
+        f"  Neg%   : {funding.get('neg_pct',0):.0f}% dari 100 periode",
+        f"  Cumul  : {funding.get('cumulative',0):.4f}",
         f"",
-        f"[Sinyal Aktif ({len(signals)})]",
+        f"[Sinyal ({len(signals)})]",
     ]
-    for s in signals[:8]:
-        lines.append(f"  - {s}")
-    if len(signals) > 8:
-        lines.append(f"  + {len(signals)-8} sinyal lainnya")
+    for s in signals[:6]:
+        lines.append(f"  + {s}")
 
     if entry_ez:
-        rr = entry_ez.get('rr_tp2', 0)
-        rr_flag = "OK" if rr >= 1.5 else "tipis"
+        rr2 = entry_ez.get('rr_tp2', 0)
+        rr3 = entry_ez.get('rr_tp3', 0)
+        met = entry_ez.get('method', 'Fib Ext')
         lines += [
             f"",
-            f"[Entry Zone - indikatif]",
+            f"[Entry Plan - {met}]",
             f"  Entry : ${entry_ez['entry']:.8g}",
-            f"  SL    : ${entry_ez['sl']:.8g}",
-            f"  TP1   : ${entry_ez['tp1']:.8g}  (+0.8%)",
-            f"  TP2   : ${entry_ez['tp2']:.8g}  (+1.8%) R:R={rr:.1f} [{rr_flag}]",
-            f"  TP3   : ${entry_ez['tp3']:.8g}  (+3.7%)",
+            f"  SL    : ${entry_ez['sl']:.8g}  (-{entry_ez['sl_pct']:.1f}%)",
+            f"",
+            f"  TP1   : ${entry_ez['tp1']:.8g}  (+{entry_ez['tp1_pct']:.1f}%)",
+            f"  TP2   : ${entry_ez['tp2']:.8g}  (+{entry_ez['tp2_pct']:.1f}%)  R:R={rr2:.1f}x  << TARGET",
+            f"  TP3   : ${entry_ez['tp3']:.8g}  (+{entry_ez['tp3_pct']:.1f}%)  R:R={rr3:.1f}x",
+            f"",
+            f"  Basis : Swing {entry_ez['swing_low']:.8g} -- {entry_ez['swing_high']:.8g}",
         ]
 
-    lines += ["", f"{ts}", "Bukan financial advice. DYOR."]
+    lines += [
+        f"",
+        f"{ts}",
+        f"Bukan financial advice. DYOR.",
+    ]
     msg = "\n".join(lines)
 
     try:
@@ -666,7 +754,6 @@ def send_telegram_alert(symbol, score, signals, price, funding, entry_ez, alert_
         r.raise_for_status()
         log.info(f"Alert terkirim: {symbol} [{alert_lvl}] score={score}")
     except Exception as e:
-        # [FIX Q] Log respons detail agar mudah diagnosa (CHAT_ID salah, bot tidak di grup, dll)
         try:
             body = r.text[:300] if 'r' in dir() else '(no response)'
         except Exception:
@@ -906,19 +993,32 @@ def main():
             )
 
     # Kirim alert
-    alert_count = 0
+    alert_count  = 0
+    skipped_rr   = 0
     for cand in candidates:
         if cand['score'] < SCORE_ALERT:
             continue
 
         lvl = "STRONG" if cand['score'] >= SCORE_STRONG else "ALERT"
         ez  = compute_entry_zone(cand['df'], cand['price'])
-        rr  = ez.get('rr_tp2', 0)
+
+        # Jika setup tidak memenuhi R:R minimum (return None) → skip
+        if ez is None:
+            log.info(
+                f"  {cand['symbol']} [{lvl}] score={cand['score']} → "
+                f"SKIP: R:R < 2.0 setelah Fibonacci, setup tidak layak"
+            )
+            skipped_rr += 1
+            continue
 
         log.info(
             f"\n  {cand['symbol']} [{lvl}] score={cand['score']}\n"
-            f"  entry={ez['entry']:.8g}  SL={ez['sl']:.8g}  "
-            f"TP2={ez['tp2']:.8g}  R:R={rr:.1f}"
+            f"  entry={ez['entry']:.8g}  SL={ez['sl']:.8g} (-{ez['sl_pct']:.1f}%)\n"
+            f"  TP1={ez['tp1']:.8g} (+{ez['tp1_pct']:.1f}%) | "
+            f"TP2={ez['tp2']:.8g} (+{ez['tp2_pct']:.1f}%) | "
+            f"TP3={ez['tp3']:.8g} (+{ez['tp3_pct']:.1f}%)\n"
+            f"  R:R ke TP2={ez['rr_tp2']:.1f}x | ke TP3={ez['rr_tp3']:.1f}x | "
+            f"Metode: {ez['method']}"
         )
 
         send_telegram_alert(
@@ -936,6 +1036,9 @@ def main():
         if alert_count >= MAX_ALERTS_PER_SCAN:
             log.info(f"Batas {MAX_ALERTS_PER_SCAN} alert per sesi tercapai.")
             break
+
+    if skipped_rr > 0:
+        log.info(f"  ({skipped_rr} kandidat dilewati karena R:R < 2.0)")
 
     log.info(f"\n{'='*65}")
     log.info(f"SELESAI — {alert_count} alert terkirim dari {len(candidates)} kandidat")
