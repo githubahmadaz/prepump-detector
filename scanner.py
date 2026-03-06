@@ -76,7 +76,7 @@ _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v14.1 — log aktif: /tmp/scanner_v14.log")
+log.info("Scanner v14.2 — log aktif: /tmp/scanner_v14.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -116,13 +116,33 @@ CONFIG = {
     "gate_bb_pos_max":          1.05,   # > upper band + 5% = sangat overbought
 
 
-    # ── Funding Gate WAJIB (diperketat sesuai riset) ──────────────────────────
-    # Riset: pump coins avg = -0.0006, threshold riset = -0.0005
-    # Sebelumnya: -0.0001 (terlalu longgar)
-    "funding_gate_avg":        -0.0005,
-    # Riset: threshold cumulative = -0.05
-    # Sebelumnya: -0.02 (terlalu longgar)
-    "funding_gate_cumul":      -0.05,
+    # ── Funding Gate WAJIB ────────────────────────────────────────────────────
+    # ANALISIS LOG: 213 dari 228 coin gagal funding gate.
+    # Root cause: scanner baru berjalan 2-3 kali → snapshot hanya 2 data points.
+    # Dengan 2 data, cumul = avg * 2, sehingga:
+    #   avg=-0.000400 → cumul=-0.00080 (jauh dari threshold -0.05 lama)
+    # Threshold lama (-0.0005 avg / -0.05 cumul) hanya cocok untuk snapshot
+    # yang sudah akumulasi 20 data (setelah ~10 jam running).
+    #
+    # SOLUSI: longgarkan threshold, kompensasi dengan indikator teknikal lain.
+    # RISIKO melonggarkan:
+    #   ⚠️  Coin dengan funding netral (-0.0002 s/d 0) bisa lolos — artinya
+    #       belum ada tekanan short squeeze yang kuat. Probabilitas pump lebih
+    #       rendah dibanding coin dengan funding sangat negatif (-0.0005+).
+    #   ⚠️  Lebih banyak false signal, terutama saat market sedang sideways.
+    #   ✅  Mitigasi: gate teknikal lain (uptrend_age, RSI, VWAP) tetap aktif.
+    #   ✅  Coin yang lolos tampil dengan label BTC_CORR untuk risk management.
+    #
+    # THRESHOLD BARU: avg < -0.0002 ATAU cumul < -0.001
+    # Dari analisis log: menambah 29 coin masuk pipeline (vs 0 sebelumnya).
+    # Equivalent dengan funding negatif ~2 periode berturut-turut.
+    "funding_gate_avg":        -0.0002,   # longgar dari -0.0005 (analisis log)
+    "funding_gate_cumul":      -0.001,    # longgar dari -0.050 (proporsional 2 snap)
+
+    # Threshold BONUS SKOR (untuk coin yang funding-nya sangat negatif)
+    # Coin yang melewati threshold ini dapat skor ekstra (konfirmasi kuat)
+    "funding_bonus_avg":       -0.0005,   # threshold riset asli = konfirmasi kuat
+    "funding_bonus_cumul":     -0.005,    # = 5 snapshot negatif ~ 2.5 jam running
 
     # ── Candle limits ─────────────────────────────────────────────────────────
     "candle_1h":                168,
@@ -283,6 +303,7 @@ def set_cooldown(sym):
 # Semua snapshot disimpan di memori selama scan, baru ditulis ke disk di akhir.
 # Sebelumnya: baca+tulis disk untuk setiap coin = 648 disk I/O per scan.
 _funding_snapshots = {}
+_btc_candles_cache = {"ts": 0, "data": []}   # Cache candle BTCUSDT shared
 
 def load_funding_snapshots():
     """Load semua snapshot ke memori di awal scan."""
@@ -409,6 +430,21 @@ def get_funding(symbol):
         except Exception:
             pass
     return 0.0
+
+
+def get_btc_candles_cached(limit=48):
+    """
+    Ambil candle BTCUSDT 1h dengan cache 5 menit agar tidak di-fetch
+    ulang untuk setiap coin dalam satu run scan.
+    Shared satu kali per run — hemat ~200 API call per scan.
+    """
+    global _btc_candles_cache
+    if time.time() - _btc_candles_cache["ts"] < 300 and _btc_candles_cache["data"]:
+        return _btc_candles_cache["data"]
+    candles = get_candles("BTCUSDT", "1h", limit)
+    if candles:
+        _btc_candles_cache = {"ts": time.time(), "data": candles}
+    return candles
 
 def get_funding_stats(symbol):
     """
@@ -607,6 +643,92 @@ def higher_low_detected(candles):
         return False
     lows = [c["low"] for c in candles[-6:]]
     return lows[-1] > min(lows[:-1])
+
+def calc_btc_correlation(coin_candles, btc_candles, lookback=24):
+    """
+    Hitung korelasi pergerakan harga coin vs BTC dalam N candle terakhir.
+
+    Metode: Pearson correlation antara pct_change coin dan pct_change BTC.
+    Kedua series disejajarkan berdasarkan urutan candle (bukan timestamp exact)
+    karena kita asumsi keduanya diambil dengan granularitas dan limit yang sama.
+
+    Interpretasi:
+      corr >= 0.75 → CORRELATED  : coin mengikuti BTC kuat
+      corr  0.4-0.74 → MODERATE  : sebagian mengikuti BTC
+      corr < 0.40  → INDEPENDENT : coin bergerak sendiri (lebih ideal untuk pump)
+
+    Return dict:
+      correlation : float -1.0 s/d 1.0
+      label       : "CORRELATED" / "MODERATE" / "INDEPENDENT"
+      emoji       : ikon untuk alert
+      lookback    : jumlah candle yang dipakai
+      risk_note   : pesan peringatan jika BTC dump
+    """
+    if not coin_candles or not btc_candles or len(coin_candles) < 5:
+        return {"correlation": None, "label": "UNKNOWN", "emoji": "❓",
+                "lookback": 0, "risk_note": "Data tidak cukup"}
+
+    # Ambil lookback candle terakhir dari masing-masing
+    n   = min(lookback, len(coin_candles), len(btc_candles))
+    c_c = coin_candles[-n:]
+    c_b = btc_candles[-n:]
+
+    # Hitung pct_change per candle
+    def pct_changes(candles):
+        changes = []
+        for i in range(1, len(candles)):
+            prev = candles[i-1]["close"]
+            if prev > 0:
+                changes.append((candles[i]["close"] - prev) / prev)
+        return changes
+
+    cc = pct_changes(c_c)
+    cb = pct_changes(c_b)
+
+    # Sejajarkan panjang
+    mn = min(len(cc), len(cb))
+    if mn < 5:
+        return {"correlation": None, "label": "UNKNOWN", "emoji": "❓",
+                "lookback": mn, "risk_note": "Data tidak cukup"}
+
+    cc, cb = cc[-mn:], cb[-mn:]
+
+    # Pearson correlation
+    n2   = len(cc)
+    mc   = sum(cc) / n2
+    mb   = sum(cb) / n2
+    num  = sum((x - mc) * (y - mb) for x, y in zip(cc, cb))
+    sd_c = (sum((x - mc)**2 for x in cc)) ** 0.5
+    sd_b = (sum((y - mb)**2 for y in cb)) ** 0.5
+
+    if sd_c < 1e-10 or sd_b < 1e-10:
+        corr = 0.0
+    else:
+        corr = num / (sd_c * sd_b)
+        corr = max(-1.0, min(1.0, corr))
+
+    # Interpretasi
+    if corr >= 0.75:
+        label     = "CORRELATED"
+        emoji     = "🔗"
+        risk_note = "⚠️ Ikuti BTC! Jika BTC dump → exit cepat"
+    elif corr >= 0.40:
+        label     = "MODERATE"
+        emoji     = "〰️"
+        risk_note = "🔶 Sebagian ikuti BTC — pantau jika BTC turun"
+    else:
+        label     = "INDEPENDENT"
+        emoji     = "🚀"
+        risk_note = "✅ Pergerakan independen — lebih tahan dump BTC"
+
+    return {
+        "correlation": round(corr, 3),
+        "label":       label,
+        "emoji":       emoji,
+        "lookback":    mn,
+        "risk_note":   risk_note,
+    }
+
 
 def calc_uptrend_age(candles):
     """
@@ -1013,6 +1135,8 @@ def master_score(symbol, ticker):
     vol_consistent = check_volume_consistent(c1h)
     uptrend      = calc_uptrend_age(c1h)
     sr           = calc_support_resistance(c1h)
+    btc_candles  = get_btc_candles_cached(48)
+    btc_corr     = calc_btc_correlation(c1h, btc_candles, lookback=24)
 
     # ── GATE 3: Uptrend tidak terlalu tua (anti-late-pump) ───────────────────
     # Coin yang sudah naik > 10 jam berturut-turut = kemungkinan distribusi,
@@ -1107,21 +1231,33 @@ def master_score(symbol, ticker):
         score += CONFIG["score_rsi_55"]
         signals.append(f"RSI {rsi:.1f} ≥ 55 — bullish")
 
-    # 8. Funding bonus
+    # 8. Funding bonus — dibedakan antara "lolos gate longgar" vs "konfirmasi kuat"
     if fstats["neg_pct"] >= 70:
         score += CONFIG["score_funding_neg_pct"]
-        signals.append(f"Funding negatif {fstats['neg_pct']:.0f}% dari 6 periode terakhir")
+        signals.append(f"Funding negatif {fstats['neg_pct']:.0f}% dari {fstats['sample_count']} periode")
 
     if fstats["streak"] >= CONFIG["funding_streak_min"]:
         score += CONFIG["score_funding_streak"]
         signals.append(
-            f"Funding streak negatif {fstats['streak']} periode berturut "
+            f"Funding streak negatif {fstats['streak']}x berturut "
             f"(dari {fstats['sample_count']} total data)"
         )
 
-    if fstats["cumulative"] <= -0.05:
+    # Bonus kuat: funding melewati threshold riset asli (bukan hanya gate longgar)
+    if fstats["avg"] <= CONFIG["funding_bonus_avg"]:
         score += CONFIG["score_funding_cumul"]
-        signals.append(f"Funding kumulatif {fstats['cumulative']:.4f} — ekstrem negatif")
+        signals.append(
+            f"⭐ Funding avg {fstats['avg']:.6f} — sangat negatif (short squeeze setup kuat)"
+        )
+    elif fstats["cumulative"] <= CONFIG["funding_bonus_cumul"]:
+        score += 1
+        signals.append(f"Funding kumulatif {fstats['cumulative']:.4f} — akumulasi negatif")
+    else:
+        # Lolos gate longgar tapi belum kuat — tandai sebagai early/weak signal
+        signals.append(
+            f"⚠️ Funding lemah (avg={fstats['avg']:.6f}) — lolos gate awal, "
+            f"konfirmasi teknikal lebih penting"
+        )
 
     # 9. Volume — hanya dihitung jika konsisten (anti-manipulasi)
     if vol_ratio > CONFIG["vol_ratio_threshold"]:
@@ -1195,6 +1331,7 @@ def master_score(symbol, ticker):
             "vol_consistent": vol_consistent,
             "uptrend_age":    uptrend["age_hours"],
             "sr":             sr,
+            "btc_corr":       btc_corr,
         }
     else:
         log.info(f"  {symbol}: Skor {score} < {CONFIG['min_score_alert']} — dilewati")
@@ -1207,13 +1344,21 @@ def build_alert(r, rank=None):
     level_icon = "🔥" if r["alert_level"] == "HIGH" else "📡"
     e = r["entry"]
 
-    msg  = f"{level_icon} <b>PRE-PUMP SIGNAL #{rank} — v14.1</b>\n\n"
+    msg  = f"{level_icon} <b>PRE-PUMP SIGNAL #{rank} — v14.2</b>\n\n"
     msg += f"<b>Symbol    :</b> {r['symbol']}\n"
     msg += f"<b>Alert     :</b> {r['alert_level']} — {r['pump_type']}\n"
     msg += f"<b>Score     :</b> {r['score']}\n"
     msg += f"<b>Harga     :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h)\n"
     msg += f"<b>VWAP      :</b> ${r['vwap']:.6g}\n"
     msg += f"<b>Trend Age :</b> {r['uptrend_age']}h naik berturut 🕐\n"
+    # BTC Correlation
+    bc = r.get("btc_corr", {})
+    if bc.get("correlation") is not None:
+        msg += (
+            f"<b>BTC Corr  :</b> {bc['emoji']} {bc['label']} "
+            f"(r={bc['correlation']:.2f}, {bc['lookback']}h)\n"
+            f"  {bc['risk_note']}\n"
+        )
     msg += "\n"
     msg += f"<b>EMA Gap   :</b> {r['ema_gap']:.3f} {'✅ ≥1.0' if r['ema_gap'] >= 1.0 else '❌ <1.0'}\n"
     msg += f"<b>RSI 14    :</b> {r['rsi']}\n"
@@ -1263,7 +1408,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v14.1 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v14.2 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
@@ -1364,7 +1509,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v14.1 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v14.2 — {utc_now()} ===")
 
     # Load semua funding snapshot ke memori sebelum scan dimulai
     load_funding_snapshots()
