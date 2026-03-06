@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.2                                                      ║
+║  PRE-PUMP SCANNER v15.3                                                      ║
 ║                                                                              ║
 ║  PERUBAHAN DARI v15.0 — 3 Perbaikan Kritis:                                 ║
 ║                                                                              ║
@@ -85,7 +85,7 @@ _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v15.2 — log aktif: /tmp/scanner_v15.log")
+log.info("Scanner v15.3 — log aktif: /tmp/scanner_v15.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -107,13 +107,13 @@ CONFIG = {
 
     # ── Gate perubahan harga ──────────────────────────────────────────────────
     "gate_chg_24h_max":         12.0,
-    # PERUBAHAN v15.2: -5% → -15% (longgarkan, hapus no_momentum filter)
+    # PERUBAHAN v15.3: -5% → -15% (longgarkan, hapus no_momentum filter)
     # Filter lama membuang coin yang sideways/sedikit merah tapi sedang
     # dalam fase accumulation (OI naik, volume naik, harga ditahan).
     # Pump besar sering muncul dari coin "membosankan" ini.
     "gate_chg_24h_min":        -15.0,   # DILONGGARKAN dari -5.0 → hanya skip dump besar
 
-    # ── VWAP Gate Tolerance (BARU v15.2) ─────────────────────────────────────
+    # ── VWAP Gate Tolerance (BARU v15.3) ─────────────────────────────────────
     # Dari: price > vwap (strict)
     # Ke  : price > vwap * 0.97 (toleransi 3% di bawah VWAP)
     # Alasan: fase accumulation dan liquidity sweep sering terjadi justru
@@ -122,7 +122,7 @@ CONFIG = {
     # Gate lama membuang exactly setup terbaik ini.
     "vwap_gate_tolerance":      0.97,   # BARU: price > vwap * 0.97
 
-    # ── Energy Build-Up Detector (BARU v15.2) ────────────────────────────────
+    # ── Energy Build-Up Detector (BARU v15.3) ────────────────────────────────
     # Pola: OI Build + Volume Build + Price Stuck
     # = Market maker/whale sedang membangun inventori (absorption)
     # Ketika kompresi ini dilepas → expansion sangat cepat
@@ -146,13 +146,13 @@ CONFIG = {
     # ── Gate BB Position ──────────────────────────────────────────────────────
     "gate_bb_pos_max":          1.05,
 
-    # ── Funding — SCORING ONLY (v15.2, hard gate DINONAKTIFKAN) ──────────────
+    # ── Funding — SCORING ONLY (v15.3, hard gate DINONAKTIFKAN) ──────────────
     # LOG ANALYSIS: dari 104 coin, mayoritas gagal funding gate meski funding
     # sudah negatif (IOTXUSDT -0.000041, KASUSDT -0.000012, UNIUSDT -0.000005).
     # Di market bearish/sideways, rata-rata funding mendekati 0, bukan -0.0005.
     # Hard gate funding = scanner tidak berguna di kondisi pasar saat ini.
     #
-    # SOLUSI v15.2: funding jadi SCORING, bukan gate.
+    # SOLUSI v15.3: funding jadi SCORING, bukan gate.
     #   Funding sangat negatif  → bonus skor (short squeeze setup)
     #   Funding sangat positif  → penalti skor (coin sudah overbought)
     #   Funding netral/sedikit  → tidak ada efek (normal di early accumulation)
@@ -396,7 +396,7 @@ def safe_get(url, params=None, timeout=12):
 def send_telegram(msg):
     """
     Kirim pesan ke Telegram dengan error logging yang proper.
-    v15.2: tambah log error detail agar masalah pengiriman terdeteksi.
+    v15.3: tambah log error detail agar masalah pengiriman terdeteksi.
     Telegram membatasi pesan maksimum 4096 karakter — potong jika perlu.
     """
     if not BOT_TOKEN or not CHAT_ID:
@@ -1187,97 +1187,142 @@ def find_swing_low_sl(candles, lookback=12):
     swing_low   = min(recent_lows)
     return swing_low * (1.0 - CONFIG["sl_swing_buffer"])
 
-def calc_entry(candles, bos_level, alert_level, vwap, price_now, atr_abs_val=None):
+def calc_entry(candles, bos_level, alert_level, vwap, price_now, atr_abs_val=None, sr=None):
     """
-    Entry & SL & Target calculation — v15.2
+    Entry & SL & Target — v15.3
 
-    FIX BUG KRITIS: Deep entry model sebelumnya menghasilkan T1 hanya 2-3%
-    karena:
-    1. Entry = VWAP - 0.5*ATR → sering DI BAWAH harga sekarang
-    2. TP = entry + 2*ATR → dengan ATR 1%, TP cuma 2% di atas entry
-    3. Fibonacci juga dihitung dari entry yang salah
+    Entry:
+      HIGH  → tepat di atas BOS level (konfirmasi breakout)
+      MEDIUM → pullback VWAP (harga dekat VWAP = optimal entry)
+               Jika harga sudah jauh di atas VWAP (>2%), pakai market price.
 
-    SOLUSI v15.2:
-    - Entry tetap menggunakan model konservatif (dekat harga sekarang)
-    - Target menggunakan proyeksi MINIMUM 15-20% berdasarkan swing range
-    - SL dari swing low struktur (bukan flat ATR)
-    - T1 = minimum 15% dari entry (target pump realistis)
-    - T2 = minimum 25% dari entry
+    SL:
+      Dari swing low struktur 12 candle terakhir.
+      Clamp ke 1.5x–3x ATR agar tidak terlalu sempit atau terlalu lebar.
 
-    Logika target:
-    Swing range terbesar dalam 168 candle → proyeksi 100% extension
-    Jika swing range > 15% → gunakan itu
-    Jika swing range < 15% → fallback ke +15% dan +25% flat
+    Target (per-coin, dinamis — bukan flat persentase):
+      1. Prioritas: level resistance terdekat dari pivot 48–168 candle
+         → T1 = R1 (resistance terdekat di atas entry)
+         → T2 = R2 (resistance kedua) atau R1 * 1.272 (fib ext)
+
+      2. Jika tidak ada pivot resistance:
+         → Gunakan swing high range sebagai proyeksi
+         → T1 = entry + range * 0.618 (fib 61.8% extension)
+         → T2 = entry + range * 1.000 (fib 100% extension)
+
+      3. Minimum floor: T1 ≥ entry * 1.08, T2 ≥ entry * 1.15
+         (ini minimum pump yang wajar, bukan target flat 15%)
+
+    Semua angka desimal diformat str agar tidak muncul sebagai tag HTML di Telegram.
     """
     if atr_abs_val is None:
         atr_abs_val = calc_atr_abs(candles)
 
-    # ── Entry: gunakan harga pasar + buffer kecil ─────────────────────────────
-    # Tidak lagi "VWAP - ATR" karena itu entry LIMIT yang sering tidak terisi
-    # dan kalau terisi berarti coin sedang turun (bukan pre-pump)
-    if alert_level == "HIGH" and bos_level > 0:
-        # HIGH: entry tepat di atas BOS level
-        entry = bos_level * (1.0 + 0.001)
-    else:
-        # MEDIUM: entry di atas VWAP atau harga sekarang (mana yang lebih tinggi)
-        entry = max(vwap * 1.001, price_now * 1.001)
+    # ── Entry ─────────────────────────────────────────────────────────────────
+    gap_to_vwap_pct = (price_now - vwap) / vwap * 100 if vwap > 0 else 0
 
-    # Jika entry masih di bawah harga sekarang, pakai market price
+    if alert_level == "HIGH" and bos_level > 0 and bos_level < price_now * 1.05:
+        # HIGH: beli dekat BOS level (konfirmasi)
+        entry = bos_level * 1.0005
+        entry_reason = "BOS breakout"
+    elif gap_to_vwap_pct <= 2.0:
+        # Harga dekat VWAP → entry di VWAP (pullback optimal)
+        entry = max(vwap, price_now)
+        entry_reason = "VWAP pullback"
+    else:
+        # Harga sudah jauh di atas VWAP → entry market price
+        entry = price_now * 1.001
+        entry_reason = "market price"
+
+    # Pastikan entry tidak di bawah harga sekarang
     if entry < price_now:
         entry = price_now * 1.001
 
-    # ── SL: dari swing low struktur ──────────────────────────────────────────
+    # ── SL: swing low 12 candle ───────────────────────────────────────────────
     sl_swing = find_swing_low_sl(candles, lookback=12)
     if sl_swing is None or sl_swing >= entry:
-        sl_swing = entry - atr_abs_val * 2.0   # fallback 2x ATR
+        sl_swing = entry - atr_abs_val * 2.0
 
-    # Clamp SL ke range yang wajar
-    sl_atr_min = entry - atr_abs_val * 0.5   # minimum: 0.5x ATR
-    sl_atr_max = entry - atr_abs_val * 3.0   # maximum: 3x ATR
+    sl_floor = entry - atr_abs_val * 3.0   # max loss = 3x ATR
+    sl_ceil  = entry - atr_abs_val * 1.0   # min loss = 1x ATR
 
     sl = sl_swing
-    if sl > sl_atr_min:
-        sl = sl_atr_min
-    if sl < sl_atr_max:
-        sl = sl_atr_max
+    sl = max(sl, sl_floor)
+    sl = min(sl, sl_ceil)
 
-    # Hard limits
-    sl = max(sl, entry * (1.0 - 0.08))   # max 8% SL
-    sl = min(sl, entry * (1.0 - 0.005))  # min 0.5% SL
+    # Hard absolute limits
+    sl = max(sl, entry * 0.92)   # max SL 8%
+    sl = min(sl, entry * 0.995)  # min SL 0.5%
 
     if sl >= entry:
-        sl = entry * 0.995
+        sl = entry * 0.98
 
-    # ── Target: proyeksi swing range untuk pump ≥15-20% ─────────────────────
-    # Hitung swing range terbesar dalam 168 candle (1 minggu)
-    lookback = min(168, len(candles))
-    recent   = candles[-lookback:]
+    # ── Target: resistance-based, per-coin ───────────────────────────────────
+    # Kumpulkan semua resistance yang valid di atas entry
+    res_levels = []
 
-    # Swing low dan high dari keseluruhan periode
-    swing_low_val  = min(c["low"]  for c in recent)
-    swing_high_val = max(c["high"] for c in recent)
+    # 1. Dari sr (pivot resistance) yang sudah dihitung sebelumnya
+    if sr and sr.get("resistance"):
+        for rv in sr["resistance"]:
+            if rv["level"] > entry * 1.005:
+                res_levels.append(rv["level"])
+
+    # 2. Scan ulang pivot dari candle untuk resistance lebih jauh (168 candle)
+    lookback_long = min(168, len(candles))
+    recent_long   = candles[-lookback_long:]
+    pivot_highs   = []
+    for i in range(2, len(recent_long) - 2):
+        h = recent_long[i]["high"]
+        if (h > recent_long[i-1]["high"] and h > recent_long[i-2]["high"] and
+                h > recent_long[i+1]["high"] and h > recent_long[i+2]["high"]):
+            pivot_highs.append(h)
+
+    # Cluster pivot highs
+    if pivot_highs:
+        pivot_highs = sorted(set(pivot_highs))
+        clusters = []
+        cur = [pivot_highs[0]]
+        for ph in pivot_highs[1:]:
+            if (ph - cur[-1]) / cur[-1] < 0.015:
+                cur.append(ph)
+            else:
+                clusters.append(sum(cur) / len(cur))
+                cur = [ph]
+        clusters.append(sum(cur) / len(cur))
+        for c in clusters:
+            if c > entry * 1.005 and c not in res_levels:
+                res_levels.append(c)
+
+    res_levels = sorted(set(res_levels))
+
+    # 3. Swing range fallback
+    swing_low_val  = min(c["low"]  for c in recent_long)
+    swing_high_val = max(c["high"] for c in recent_long)
     swing_range    = swing_high_val - swing_low_val
 
-    # Proyeksi: 100% extension dari swing range = target pump
-    # Ini lebih realistis untuk altcoin yang bisa pump 20-40%
-    t1_proj = entry + swing_range * 0.80   # 80% dari swing range
-    t2_proj = entry + swing_range * 1.272  # 127.2% dari swing range (fib)
+    if res_levels:
+        # Ada resistance → gunakan sebagai target
+        t1 = res_levels[0]   # R1 = resistance terdekat
+        if len(res_levels) >= 2:
+            t2 = res_levels[1]   # R2 = resistance kedua
+        else:
+            # Hanya 1 level → proyeksikan dari R1
+            t2 = t1 * 1.272  # 27.2% di atas R1 (fib ext)
+    else:
+        # Tidak ada resistance → proyeksi dari swing range
+        t1 = entry + swing_range * 0.618
+        t2 = entry + swing_range * 1.000
 
-    # Minimum target: T1 = +15%, T2 = +25% (target pump realistis)
-    t1_min = entry * 1.15
-    t2_min = entry * 1.25
-
-    t1 = max(t1_proj, t1_min)
-    t2 = max(t2_proj, t2_min)
-
-    # Pastikan T2 > T1
+    # Floor minimum (bukan flat % — ini hanya batas bawah logis)
+    t1 = max(t1, entry * 1.07)   # minimal 7% di atas entry
+    t2 = max(t2, entry * 1.12)   # minimal 12% di atas entry
     if t2 <= t1:
         t2 = t1 * 1.10
 
-    # ── R/R calculation ───────────────────────────────────────────────────────
+    # ── R/R ───────────────────────────────────────────────────────────────────
     risk   = entry - sl
     reward = t1 - entry
-    rr     = round(reward / risk, 1) if risk > 0 else 0.0
+    rr_val = round(reward / risk, 1) if risk > 0 else 0.0
     sl_pct = round((entry - sl) / entry * 100, 2)
 
     return {
@@ -1286,14 +1331,17 @@ def calc_entry(candles, bos_level, alert_level, vwap, price_now, atr_abs_val=Non
         "sl_pct":       sl_pct,
         "t1":           round(t1, 8),
         "t2":           round(t2, 8),
-        "rr":           rr,
+        "rr":           rr_val,
+        "rr_str":       f"{rr_val:.1f}",   # string — hindari HTML tag bug Telegram
         "vwap":         round(vwap, 8),
         "bos_level":    round(bos_level, 8),
         "alert_level":  alert_level,
         "gain_t1_pct":  round((t1 - entry) / entry * 100, 1),
         "gain_t2_pct":  round((t2 - entry) / entry * 100, 1),
         "atr_abs":      round(atr_abs_val, 8),
-        "sl_method":    "swing+proj (v15.2)",
+        "sl_method":    entry_reason,
+        "used_resistance": len(res_levels) > 0,
+        "n_res_levels": len(res_levels),
     }
 
 def detect_energy_buildup(candles_1h, oi_data):
@@ -1421,7 +1469,7 @@ def master_score(symbol, ticker):
     add_funding_snapshot(symbol, funding)
     fstats  = get_funding_stats(symbol)
 
-    # v15.2: Funding snapshot belum cukup → lanjut dengan fstats kosong
+    # v15.3: Funding snapshot belum cukup → lanjut dengan fstats kosong
     # (dulu: return None → melewatkan coin bagus di run pertama)
     if fstats is None:
         fstats = {
@@ -1431,11 +1479,11 @@ def master_score(symbol, ticker):
         }
         log.info(f"  {symbol}: Funding snapshot baru (1 data) — lanjut scan")
 
-    # v15.2: Funding BUKAN lagi hard gate — hanya penalti/bonus skor
+    # v15.3: Funding BUKAN lagi hard gate — hanya penalti/bonus skor
     # Log menunjukkan bahwa funding gate memblokir hampir semua coin di pasar saat ini
     # (mayoritas funding netral ≈ 0, bukan -0.0005 seperti era bull market)
 
-    # ── GATE 2: above_vwap dengan toleransi (DIPERBARUI v15.2) ──────────────
+    # ── GATE 2: above_vwap dengan toleransi (DIPERBARUI v15.3) ──────────────
     # Dari: price > vwap  (terlalu ketat — melewatkan accumulation di bawah VWAP)
     # Ke  : price > vwap * 0.97  (toleransi 3% di bawah VWAP)
     # Fase accumulation dan liquidity sweep sering terjadi di bawah VWAP.
@@ -1469,7 +1517,7 @@ def master_score(symbol, ticker):
     htf_accum         = calc_htf_accumulation(c4h)
     liq_sweep         = detect_liquidity_sweep(c1h)
 
-    # BARU v15.2: Energy Build-Up (OI+vol naik, harga stuck)
+    # BARU v15.3: Energy Build-Up (OI+vol naik, harga stuck)
     # Deteksi dilakukan setelah oi_data tersedia
     energy            = detect_energy_buildup(c1h, oi_data)
     # Set is_strong jika funding netral/negatif (squeeze potential)
@@ -1568,7 +1616,7 @@ def master_score(symbol, ticker):
         score += CONFIG["score_rsi_55"]
         signals.append(f"RSI {rsi:.1f} ≥ 55 — bullish")
 
-    # 8. Funding — scoring system (v15.2: bukan gate, tapi bonus/penalti)
+    # 8. Funding — scoring system (v15.3: bukan gate, tapi bonus/penalti)
     f_avg = fstats["avg"]
     f_cur = fstats["current"]
 
@@ -1655,7 +1703,7 @@ def master_score(symbol, ticker):
         score += CONFIG["score_liquidity_sweep"]
         signals.append(liq_sweep["label"])
 
-    # 14. Energy Build-Up (BARU v15.2) — OI Build + Volume Build + Price Stuck
+    # 14. Energy Build-Up (BARU v15.3) — OI Build + Volume Build + Price Stuck
     # Ini adalah pola "calm before storm" yang sering diabaikan scanner biasa.
     # Pump besar hampir selalu butuh liquidity, dan liquidity dibangun via OI.
     # Jika OI + volume naik tapi harga tidak bergerak = absorption sedang terjadi.
@@ -1701,7 +1749,7 @@ def master_score(symbol, ticker):
         alert_level = "HIGH"
         pump_type   = "Liquidity Sweep + HTF Accumulation"
     elif energy["is_buildup"] and energy["is_strong"]:
-        # BARU v15.2: energy build-up kuat = absorption + funding negatif
+        # BARU v15.3: energy build-up kuat = absorption + funding negatif
         alert_level = "HIGH"
         pump_type   = "Energy Build-Up (OI+Vol+Stuck) + Short Squeeze"
     elif energy["is_buildup"]:
@@ -1721,7 +1769,7 @@ def master_score(symbol, ticker):
         pump_type   = "VWAP Momentum"
 
     # ── Entry & Target ────────────────────────────────────────────────────────
-    entry_data = calc_entry(c1h, bos_level, alert_level, vwap, price_now, atr_abs_val=atr_abs_val)
+    entry_data = calc_entry(c1h, bos_level, alert_level, vwap, price_now, atr_abs_val=atr_abs_val, sr=sr)
 
     if score >= CONFIG["min_score_alert"]:
         return {
@@ -1765,124 +1813,130 @@ def master_score(symbol, ticker):
 # ══════════════════════════════════════════════════════════════════════════════
 #  📱  TELEGRAM FORMATTER
 # ══════════════════════════════════════════════════════════════════════════════
+def _fmt_price(p):
+    """Format harga coin secara otomatis sesuai magnitudo."""
+    if p == 0:
+        return "0"
+    if p >= 100:
+        return f"{p:.2f}"
+    if p >= 1:
+        return f"{p:.4f}"
+    if p >= 0.01:
+        return f"{p:.5f}"
+    return f"{p:.8f}"
+
+
 def build_alert(r, rank=None):
+    """
+    Pesan Telegram ringkas — hanya data trading esensial.
+    v15.3 fix:
+    - Hapus semua kemungkinan angka di dalam '<>' yang Telegram baca sebagai HTML tag
+    - R/R tidak ditulis "1:X" karena "1:1.0" → "<1.0>" → HTML parse error
+    - Format angka desimal dengan _fmt_price()
+    """
     level_icon = "🔥" if r["alert_level"] == "HIGH" else "📡"
-    e = r["entry"]
-
-    msg  = f"{level_icon} <b>PRE-PUMP SIGNAL #{rank} — v15.2</b>\n\n"
-    msg += f"<b>Symbol    :</b> {r['symbol']}\n"
-    msg += f"<b>Alert     :</b> {r['alert_level']} — {r['pump_type']}\n"
-    msg += f"<b>Score     :</b> {r['score']}\n"
-    msg += f"<b>Harga     :</b> ${r['price']:.6g}  ({r['chg_24h']:+.1f}% 24h)\n"
-    msg += f"<b>VWAP      :</b> ${r['vwap']:.6g}\n"
-    msg += f"<b>Trend Age :</b> {r['uptrend_age']}h naik berturut 🕐\n"
-
-    # BTC Analysis
-    bc = r.get("btc_corr", {})
-    if bc.get("correlation") is not None:
-        msg += f"<b>BTC Regime :</b> {bc.get('btc_regime_emoji','❓')} {bc.get('btc_regime','?')} ({bc.get('btc_period_chg',0):+.1f}% / {bc['lookback']}h)\n"
-        msg += f"<b>vs BTC     :</b> {bc.get('outperform_emoji','〰️')} {bc.get('outperform_label','?')} | Coin {bc.get('coin_period_chg',0):+.1f}% | BTC {bc.get('btc_period_chg',0):+.1f}%\n"
-        msg += f"<b>Korelasi   :</b> {bc['emoji']} r={bc['correlation']:.2f} — {bc['label']}\n"
-        msg += f"  {bc.get('btc_regime_note', bc['risk_note'])}\n"
-    msg += "\n"
-
-    msg += f"<b>EMA Gap   :</b> {r['ema_gap']:.3f} {'✅ ≥1.0' if r['ema_gap'] >= 1.0 else '❌ <1.0'} (bobot diturunkan v15)\n"
-    msg += f"<b>RSI 14    :</b> {r['rsi']}\n"
-    msg += f"<b>ATR %     :</b> {r['atr_pct']:.2f}%\n"
-    msg += f"<b>BB Width  :</b> {r['bbw']:.2f}%\n"
-    msg += f"<b>BB Squeeze:</b> {'Ya ⚡' if r['bb_squeeze'] else 'Tidak'}\n"
-    msg += f"<b>BB Pos    :</b> {r['bb_pct']*100:.0f}%\n"
-    msg += f"<b>BOS Up    :</b> {'✅' if r['bos_up'] else '❌'} (level ${r['bos_level']:.6g})\n"
-    msg += f"<b>Above VWAP:</b> {r['above_vwap_rate']}% dari 6h terakhir\n"
-    msg += f"<b>Higher Low:</b> {'✅' if r['higher_low'] else '❌'}\n"
-    msg += f"<b>Volume    :</b> {r['vol_ratio']}x | accel {r['vol_accel']}% | konsisten {'✅' if r['vol_consistent'] else '⚠️'}\n"
-    msg += f"<b>Funding   :</b> avg={r['funding_stats']['avg']:.6f} | cumul={r['funding_stats']['cumulative']:.4f}\n"
-    msg += (
-        f"  streak={r['funding_stats']['streak']} | "
-        f"neg%={r['funding_stats']['neg_pct']:.0f}% | "
-        f"basis={r['funding_stats']['basis']:.3f}%\n"
-    )
-
-    # HTF Accumulation (BARU)
+    e   = r["entry"]
+    bc  = r.get("btc_corr", {})
+    sr  = r.get("sr", {})
+    en  = r.get("energy", {})
     htf = r.get("htf_accum", {})
-    if htf.get("is_htf_accum"):
-        msg += f"<b>4H HTF    :</b> 🕯️ AKUMULASI — ATR {htf['atr_ratio']:.2f}x | vol {htf['vol_ratio']:.1f}x | range {htf['range_pct']:.1f}%\n"
-    else:
-        msg += f"<b>4H HTF    :</b> — (vol {htf.get('vol_ratio',0):.1f}x, range {htf.get('range_pct',0):.1f}%)\n"
+    ls  = r.get("liq_sweep", {})
+    oi  = r.get("oi_data", {})
 
-    # Liquidity Sweep (BARU)
-    ls = r.get("liq_sweep", {})
-    if ls.get("is_sweep"):
-        msg += f"<b>Liq Sweep :</b> 🎯 DETECTED — support ${ls['support']:.6g}, low ${ls['sweep_low']:.6g}\n"
-    else:
-        msg += f"<b>Liq Sweep :</b> —\n"
+    p     = r["price"]
+    entry = e["entry"]
+    sl    = e["sl"]
+    t1    = e["t1"]
+    t2    = e["t2"]
 
-    # Energy Build-Up (BARU v15.2)
-    en = r.get("energy", {})
-    if en.get("is_buildup"):
-        strong_tag = " 🔥 STRONG" if en.get("is_strong") else ""
+    # ── Header ────────────────────────────────────────────────────────────────
+    msg  = f"{level_icon} <b>{r['symbol']} — {r['alert_level']}</b>  #{rank}\n"
+    msg += f"<b>Score:</b> {r['score']}  |  {r['pump_type']}\n"
+    msg += f"<b>Waktu scan:</b> {utc_now()}\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+
+    # ── Harga & VWAP ─────────────────────────────────────────────────────────
+    msg += f"<b>Harga :</b> <code>{_fmt_price(p)}</code>  ({r['chg_24h']:+.1f}% 24h)\n"
+    msg += f"<b>VWAP  :</b> <code>{_fmt_price(r['vwap'])}</code>"
+    gap_vwap = (p - r['vwap']) / r['vwap'] * 100 if r['vwap'] > 0 else 0
+    msg += f"  ({gap_vwap:+.1f}% vs harga)\n"
+
+    # ── Entry / SL / TP ───────────────────────────────────────────────────────
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    # Gunakan <code> agar tidak ada risiko parsing HTML pada angka
+    msg += f"📍 <b>Entry :</b> <code>{_fmt_price(entry)}</code>  [{e['sl_method']}]\n"
+    msg += f"🛑 <b>SL    :</b> <code>{_fmt_price(sl)}</code>  (-{e['sl_pct']:.2f}%)\n"
+
+    t1_tag = "resistance" if e.get("used_resistance") else "proj"
+    msg += f"🎯 <b>T1    :</b> <code>{_fmt_price(t1)}</code>  (+{e['gain_t1_pct']:.1f}%)  [{t1_tag}]\n"
+    msg += f"🎯 <b>T2    :</b> <code>{_fmt_price(t2)}</code>  (+{e['gain_t2_pct']:.1f}%)\n"
+
+    # R/R — ditulis sebagai "RR = X.X" bukan "1:X.X" untuk hindari HTML tag parse error
+    msg += f"⚖️ <b>RR    :</b> {e['rr_str']}x  |  ATR: {r['atr_pct']:.2f}%\n"
+
+    # ── Outperform BTC ────────────────────────────────────────────────────────
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    if bc.get("correlation") is not None:
         msg += (
-            f"<b>Energy    :</b> ⚡ BUILD-UP{strong_tag} — OI +{en['oi_change']:.1f}% | "
-            f"vol {en['vol_ratio']:.1f}x | range {en['range_pct']:.1f}%\n"
+            f"{bc.get('btc_regime_emoji','❓')} <b>BTC:</b> {bc.get('btc_regime','?')}"
+            f"  ({bc.get('btc_period_chg',0):+.1f}%/{bc['lookback']}h)\n"
+        )
+        op_emoji = bc.get("outperform_emoji", "〰️")
+        coin_chg = bc.get("coin_period_chg", 0)
+        btc_chg  = bc.get("btc_period_chg", 0)
+        msg += (
+            f"{op_emoji} <b>vs BTC:</b> {bc.get('outperform_label','?')} "
+            f"| Coin {coin_chg:+.1f}% vs BTC {btc_chg:+.1f}%\n"
         )
     else:
-        conds = f"OI={'✅' if en.get('oi_rising') else '❌'} vol={'✅' if en.get('vol_rising') else '❌'} stuck={'✅' if en.get('price_stuck') else '❌'}"
-        msg += f"<b>Energy    :</b> — ({conds})\n"
+        msg += "📊 <b>vs BTC:</b> data tidak tersedia\n"
 
-    msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"📍 <b>ENTRY ({e['alert_level']}) — {e['sl_method']}</b>\n"
-    msg += f"  Entry      : ${e['entry']:.6g}\n"
-    msg += f"  SL         : ${e['sl']:.6g} (-{e['sl_pct']:.2f}%)\n"
-    msg += f"  ATR 1h     : ${e['atr_abs']:.6g} ({r['atr_pct']:.2f}%)\n"
-    msg += f"  T1         : ${e['t1']:.6g} (+{e['gain_t1_pct']:.1f}%)\n"
-    msg += f"  T2         : ${e['t2']:.6g} (+{e['gain_t2_pct']:.1f}%)\n"
-    msg += f"  R/R        : 1:{e['rr']}\n"
-
-    # Market Structure
-    ac = r.get("accum", {})
-    oi = r.get("oi_data", {})
-    msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
-    msg += "🔬 <b>MARKET STRUCTURE</b>\n"
-    if ac.get("phase_score", 0) > 0:
-        msg += f"  {ac['phase_label']}\n"
-        msg += f"  Vol 4h: {ac['vol_ratio_4h']:.1f}x | Range 12h: {ac['price_range_pct']:.1f}% | ATR ratio: {ac['atr_contract']:.2f}\n"
-    else:
-        msg += f"  — | Vol 4h: {ac.get('vol_ratio_4h',0):.1f}x | Range: {ac.get('price_range_pct',0):.1f}%\n"
-
-    if oi.get("oi_now", 0) > 0:
-        ov = oi["oi_now"]
-        os_str = f"${ov/1e6:.2f}M" if ov >= 1e6 else f"${ov/1e3:.0f}K"
-        cs = f"({oi['change_pct']:+.1f}%)" if not oi["is_new"] else "(baseline)"
-        msg += f"  OI: {os_str} {cs}\n"
-    else:
-        msg += "  OI: data tidak tersedia\n"
-
-    # Support & Resistance
-    sr = r.get("sr", {})
-    msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
-    msg += "📊 <b>SUPPORT & RESISTANCE</b>\n"
+    # ── Support & Resistance ─────────────────────────────────────────────────
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
     res_list = sr.get("resistance", [])
     sup_list = sr.get("support",    [])
     if res_list:
-        for rv in res_list[:3]:
-            msg += f"  🔴 R  ${rv['level']:.6g}  ({rv['gap_pct']:+.1f}%)\n"
-    else:
-        msg += f"  🔴 R  — (tidak ada pivot di atas)\n"
-    msg += f"  ▶️  NOW ${r['price']:.6g}\n"
+        for rv in res_list[:2]:
+            msg += f"🔴 R <code>{_fmt_price(rv['level'])}</code>  ({rv['gap_pct']:+.1f}%)\n"
+    msg += f"▶ NOW <code>{_fmt_price(p)}</code>\n"
     if sup_list:
-        for sv in sup_list[:3]:
-            msg += f"  🟢 S  ${sv['level']:.6g}  ({sv['gap_pct']:+.1f}%)\n"
-    else:
-        msg += f"  🟢 S  — (tidak ada pivot di bawah)\n"
+        for sv in sup_list[:2]:
+            msg += f"🟢 S <code>{_fmt_price(sv['level'])}</code>  ({sv['gap_pct']:+.1f}%)\n"
 
-    msg += "\n━━━━━━━━━━━━━━━━━━━━\n📊 <b>SINYAL AKTIF</b>\n"
+    # ── OI ───────────────────────────────────────────────────────────────────
+    if oi.get("oi_now", 0) > 0:
+        ov     = oi["oi_now"]
+        os_str = f"${ov/1e6:.2f}M" if ov >= 1e6 else f"${ov/1e3:.0f}K"
+        cs     = f"({oi['change_pct']:+.1f}%)" if not oi.get("is_new") else "(baseline)"
+        msg += f"📈 <b>OI:</b> {os_str} {cs}\n"
+
+    # ── Sinyal aktif (ringkas) ────────────────────────────────────────────────
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    msg += "<b>Sinyal:</b>\n"
+
+    # Kumpulkan sinyal penting saja (maksimal 6)
+    priority_signals = []
     for s in r["signals"]:
-        msg += f"  • {s}\n"
-    msg += f"\n📡 {utc_now()}\n<i>⚠️ Bukan financial advice. Win rate realistis 45-60%.</i>"
+        # Skip sinyal informatif panjang, ambil sinyal teknikal kunci
+        if any(kw in s for kw in [
+            "AKUMULASI", "BUILD-UP", "Sweep", "BOS", "VWAP",
+            "Funding", "squeeze", "HTF", "Higher Low", "Compression",
+            "OI", "Volume", "ATR", "BB Width", "EMA Gap"
+        ]):
+            priority_signals.append(s)
+        if len(priority_signals) >= 6:
+            break
+
+    for s in priority_signals:
+        # Potong teks panjang agar tidak melewati limit
+        s_short = s[:80] + "…" if len(s) > 80 else s
+        msg += f"• {s_short}\n"
+
+    msg += f"\n<i>v15.3 | ⚠️ Bukan financial advice</i>"
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v15.2 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v15.3 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
@@ -1947,7 +2001,7 @@ def build_candidate_list(tickers):
             filtered_stats["change_too_high"] += 1
             continue
 
-        # PERUBAHAN v15.2: no_momentum filter DIHAPUS
+        # PERUBAHAN v15.3: no_momentum filter DIHAPUS
         # Sebelumnya: skip coin jika chg < -5% (membuang coin sideways/accumulation)
         # Sekarang  : skip hanya jika dump besar (< -15%)
         # Pump besar sering muncul dari coin yang terlihat "membosankan" dengan
@@ -1987,7 +2041,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v15.2 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v15.3 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -2059,7 +2113,7 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v15.2                             ║")
+    log.info("║  PRE-PUMP SCANNER v15.3                             ║")
     log.info("║  Focus: Energy Build-Up + VWAP tolerance + Funding  ║")
     log.info("╚══════════════════════════════════════════════════════╝")
 
