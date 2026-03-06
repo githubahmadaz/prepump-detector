@@ -1,41 +1,52 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.0                                                      ║
+║  PRE-PUMP SCANNER v15.1                                                      ║
 ║                                                                              ║
-║  OPTIMALISASI dari v14.3 — berbasis Rangkuman Final Perbaikan Scanner:      ║
+║  PERUBAHAN DARI v15.0 — 3 Perbaikan Kritis:                                 ║
 ║                                                                              ║
-║  QUICK FIX (Parameter):                                                      ║
-║  1. Volume Ratio threshold DITURUNKAN: 2.5 → 1.5 (accumulation detection)  ║
-║  2. EMA Gap score DIKURANGI: 5 → 2 (indikator momentum, bukan accumulation) ║
-║  3. Volatility Compression weight DINAIKKAN (kompensasi EMA gap)            ║
+║  #1 Funding Gate DILONGGARKAN (PALING PENTING):                              ║
+║     Dari: avg < -0.0002 ATAU cumul < -0.001                                 ║
+║     Ke  : avg < -0.00005 ATAU cumul < -0.0001                               ║
+║     Alasan: gate lama terlalu ketat → hampir semua coin gagal funding gate  ║
+║     bahkan yang punya setup bagus. -0.00005 = sekitar netral/sedikit negatif║
+║     sehingga scanner tidak melewatkan fase early accumulation.              ║
 ║                                                                              ║
-║  FITUR BARU:                                                                 ║
-║  4. HTF Accumulation Filter (4H) — deteksi build-up sebelum breakout        ║
-║  5. Liquidity Sweep Detection — identifikasi stop hunt sebelum reversal      ║
-║  6. Deep Entry Model: VWAP - 0.5*ATR, SL = entry - ATR, TP = entry + 2*ATR ║
+║  #2 VWAP Gate DILONGGARKAN:                                                  ║
+║     Dari: price > vwap                                                       ║
+║     Ke  : price > vwap * 0.97  (toleransi 3% di bawah VWAP)                ║
+║     Alasan: fase pre-pump (accumulation + liquidity sweep) sering terjadi   ║
+║     justru ketika harga sedikit di bawah VWAP. Gate ketat melewatkan setup  ║
+║     paling bagus — "calm before storm" dengan harga ditahan di bawah VWAP.  ║
 ║                                                                              ║
-║  DATASET:                                                                    ║
-║  7. Whitelist dipangkas ke top pairs (OI & volume tinggi)                   ║
-║  8. Filter OI minimum threshold                                              ║
+║  #3 NO_MOMENTUM FILTER DIHAPUS, DIGANTI ENERGY BUILD-UP FILTER:             ║
+║     Sebelumnya: skip coin jika chg_24h < -5% (no_momentum filter)           ║
+║     Sekarang  : skip coin jika chg_24h < -15% (hanya skip dump besar)       ║
+║     + Tambahkan Energy Build-Up detector:                                   ║
+║       OI_change > 5% + volume > 1.5x avg + price_range_1h < 2.5%           ║
+║       = "OI Build + Volume Build + Price Stuck" (pola inventory build)      ║
+║     Alasan: pump besar sering muncul dari coin "membosankan" yang harganya  ║
+║     sideways tetapi OI dan volume sedang dibangun (absorption oleh whale).  ║
+║     Filter lama membuang exactly coin-coin ini.                              ║
 ║                                                                              ║
-║  BOBOT SKOR — disesuaikan (fokus pre-pump, bukan momentum):                 ║
-║    htf_accumulation   : +3 (4H build-up sebelum breakout)                   ║
-║    liquidity_sweep    : +3 (stop hunt sebelum reversal)                     ║
-║    accumulation+compress: +7 (kombinasi akumulasi + kompresi)                ║
-║    atr_pct >= 1.5%    : +4 (volatility cukup untuk breakout)                ║
-║    bbw >= 0.10        : +4 (band lebar — energi terakumulasi)               ║
-║    bos+vwap           : +4 (konfirmasi struktur)                             ║
-║    bos_up saja        : +3                                                   ║
-║    ema_gap >= 1.0     : +2 (diturunkan — momentum, bukan accumulation)      ║
-║    funding_neg_pct    : +3                                                   ║
-║    funding_streak     : +3                                                   ║
-║    higher_low         : +2                                                   ║
-║    bb_squeeze         : +2                                                   ║
-║    vol_ratio (1.5x)   : +2 (accumulation detection)                         ║
-║    vol_accel          : +2                                                   ║
-║    rsi >= 65          : +2                                                   ║
-║    rsi >= 55          : +1                                                   ║
-║    price_chg >= 0.5%  : +1                                                  ║
+║  WARISAN dari v15.0:                                                         ║
+║  - Volume Ratio threshold: 2.5 → 1.5 (accumulation detection)              ║
+║  - EMA Gap score: 5 → 2 (indikator momentum, bukan accumulation)           ║
+║  - HTF Accumulation Filter (4H)                                             ║
+║  - Liquidity Sweep Detection                                                ║
+║  - Deep Entry Model (VWAP - 0.5*ATR)                                        ║
+║  - Whitelist dipangkas ke top pairs                                          ║
+║                                                                              ║
+║  BOBOT SKOR:                                                                 ║
+║    energy_buildup      : +4 (OI+vol naik, harga stuck — pola terkuat)      ║
+║    htf_accumulation    : +3 (4H build-up)                                   ║
+║    liquidity_sweep     : +3 (stop hunt sebelum reversal)                    ║
+║    accumulation+compress: +8 (kombinasi akumulasi + kompresi)               ║
+║    oi_expansion_strong : +5                                                  ║
+║    atr >= 1.5%         : +4                                                  ║
+║    bbw >= 0.10         : +4                                                  ║
+║    bos+vwap            : +4                                                  ║
+║    bos_up saja         : +3                                                  ║
+║    ema_gap >= 1.0      : +2 (diturunkan — momentum bukan pre-pump)          ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -74,7 +85,7 @@ _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v15.0 — log aktif: /tmp/scanner_v15.log")
+log.info("Scanner v15.1 — log aktif: /tmp/scanner_v15.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -96,7 +107,35 @@ CONFIG = {
 
     # ── Gate perubahan harga ──────────────────────────────────────────────────
     "gate_chg_24h_max":         12.0,
-    "gate_chg_24h_min":         -5.0,
+    # PERUBAHAN v15.1: -5% → -15% (longgarkan, hapus no_momentum filter)
+    # Filter lama membuang coin yang sideways/sedikit merah tapi sedang
+    # dalam fase accumulation (OI naik, volume naik, harga ditahan).
+    # Pump besar sering muncul dari coin "membosankan" ini.
+    "gate_chg_24h_min":        -15.0,   # DILONGGARKAN dari -5.0 → hanya skip dump besar
+
+    # ── VWAP Gate Tolerance (BARU v15.1) ─────────────────────────────────────
+    # Dari: price > vwap (strict)
+    # Ke  : price > vwap * 0.97 (toleransi 3% di bawah VWAP)
+    # Alasan: fase accumulation dan liquidity sweep sering terjadi justru
+    # ketika harga SEDIKIT DI BAWAH VWAP. "Calm before storm" dengan harga
+    # ditahan oleh market maker di bawah VWAP sambil OI + volume dibangun.
+    # Gate lama membuang exactly setup terbaik ini.
+    "vwap_gate_tolerance":      0.97,   # BARU: price > vwap * 0.97
+
+    # ── Energy Build-Up Detector (BARU v15.1) ────────────────────────────────
+    # Pola: OI Build + Volume Build + Price Stuck
+    # = Market maker/whale sedang membangun inventori (absorption)
+    # Ketika kompresi ini dilepas → expansion sangat cepat
+    #
+    # Kondisi:
+    #   1. OI naik > 5% dalam periode scan
+    #   2. Volume 1h > 1.5x rata-rata
+    #   3. Price range 1h < 2.5% (harga tidak bergerak meski ada aktivitas)
+    # Versi kuat: tambahkan funding <= 0 (mayoritas trader short/netral)
+    "energy_oi_change_min":     5.0,   # OI change % minimum untuk konfirmasi
+    "energy_vol_ratio_min":     1.5,   # volume > N x rata-rata
+    "energy_range_max_pct":     2.5,   # price range 1h < N% (harga stuck)
+    "score_energy_buildup":     4,     # skor tertinggi — ini sinyal terkuat
 
     # ── Gate uptrend usia ─────────────────────────────────────────────────────
     "gate_uptrend_max_hours":   10,
@@ -108,10 +147,20 @@ CONFIG = {
     "gate_bb_pos_max":          1.05,
 
     # ── Funding Gate ──────────────────────────────────────────────────────────
-    "funding_gate_avg":        -0.0002,
-    "funding_gate_cumul":      -0.001,
-    "funding_bonus_avg":       -0.0005,
-    "funding_bonus_cumul":     -0.005,
+    # PERUBAHAN v15.1: gate DILONGGARKAN secara signifikan
+    # Dari: avg < -0.0002 ATAU cumul < -0.001
+    # Ke  : avg < -0.00005 ATAU cumul < -0.0001
+    #
+    # Alasan: gate lama sangat ketat — hampir semua coin gagal bahkan saat
+    # punya setup teknikal bagus. -0.00005 = sedikit negatif / netral.
+    # Ini menangkap fase early accumulation sebelum funding sangat negatif.
+    # Fase "calm before storm" sering punya funding netral, bukan sangat negatif.
+    #
+    # Bonus score tetap untuk konfirmasi kuat (tidak berubah).
+    "funding_gate_avg":        -0.00005,   # DILONGGARKAN dari -0.0002
+    "funding_gate_cumul":      -0.0001,    # DILONGGARKAN dari -0.001
+    "funding_bonus_avg":       -0.0005,    # threshold konfirmasi kuat (tetap)
+    "funding_bonus_cumul":     -0.005,     # threshold konfirmasi kuat (tetap)
 
     # ── Candle limits ─────────────────────────────────────────────────────────
     "candle_1h":                168,
@@ -1229,6 +1278,92 @@ def calc_entry(candles, bos_level, alert_level, vwap, price_now, atr_abs_val=Non
         "sl_method":    sl_method,
     }
 
+def detect_energy_buildup(candles_1h, oi_data):
+    """
+    Energy Build-Up Detector — "OI Build + Volume Build + Price Stuck"
+
+    Ini adalah pola paling penting yang sering diabaikan scanner biasa.
+    Sebagian besar scanner mencari: volume spike, momentum, breakout.
+    Padahal sebelum pump besar sering terjadi:
+      - volume naik perlahan
+      - OI naik (posisi dibangun)
+      - price sideways (harga DITAHAN oleh market maker/whale)
+
+    Ini disebut absorption: market maker menyerap order agar harga stabil
+    sambil mengumpulkan posisi besar. Ketika selesai → harga dilepas cepat.
+
+    Struktur pola:
+      Time  →
+      Price : ──────────── (flat)
+      Volume: ▁▂▃▄▅ (naik)
+      OI    : ▁▂▃▄▅ (naik)
+      ATR   : ▁▁▁▁▁ (rendah)
+
+    Kondisi deteksi:
+      1. OI naik > 5% (ada posisi baru dibangun)
+      2. Volume 1h > 1.5x rata-rata (aktivitas trading tinggi)
+      3. Price range 1h < 2.5% (harga tidak bergerak meski ada aktivitas)
+
+    Versi kuat: + funding <= 0 (majoritas trader short/netral → potensi squeeze)
+
+    Return:
+      is_buildup  : True jika pola terdeteksi
+      is_strong   : True jika + funding netral/negatif (squeeze potential)
+      detail      : dict berisi nilai masing-masing kondisi
+    """
+    if len(candles_1h) < 24:
+        return {
+            "is_buildup": False, "is_strong": False,
+            "oi_change": 0.0, "vol_ratio": 0.0, "range_pct": 0.0,
+            "label": "Data tidak cukup",
+        }
+
+    # Kondisi 1: OI naik
+    oi_change = oi_data.get("change_pct", 0.0)
+    oi_rising = (not oi_data.get("is_new", True)) and oi_change >= CONFIG["energy_oi_change_min"]
+
+    # Kondisi 2: Volume naik
+    vol_1h    = candles_1h[-1]["volume_usd"]
+    avg_vol   = sum(c["volume_usd"] for c in candles_1h[-24:-1]) / 23 if len(candles_1h) >= 24 else vol_1h
+    vol_ratio = (vol_1h / avg_vol) if avg_vol > 0 else 1.0
+    vol_rising = vol_ratio >= CONFIG["energy_vol_ratio_min"]
+
+    # Kondisi 3: Harga tidak bergerak (price stuck)
+    recent_3h  = candles_1h[-3:]
+    hi3  = max(c["high"]  for c in recent_3h)
+    lo3  = min(c["low"]   for c in recent_3h)
+    mid3 = (hi3 + lo3) / 2
+    range_pct = ((hi3 - lo3) / mid3 * 100) if mid3 > 0 else 99.0
+    price_stuck = range_pct <= CONFIG["energy_range_max_pct"]
+
+    is_buildup = oi_rising and vol_rising and price_stuck
+
+    # Versi kuat: + funding netral atau negatif
+    # (Funding dikirim dari luar fungsi ini karena sudah dihitung di master_score)
+    is_strong = False  # akan di-set dari master_score jika funding <= 0
+
+    if is_buildup:
+        label = (
+            f"⚡ ENERGY BUILD-UP — OI +{oi_change:.1f}%, vol {vol_ratio:.1f}x, "
+            f"range {range_pct:.1f}% (harga ditahan, posisi dibangun)"
+        )
+    else:
+        conditions_met = sum([oi_rising, vol_rising, price_stuck])
+        label = f"— ({conditions_met}/3 kondisi terpenuhi: OI={oi_rising}, vol={vol_rising}, stuck={price_stuck})"
+
+    return {
+        "is_buildup":  is_buildup,
+        "is_strong":   is_strong,
+        "oi_change":   round(oi_change, 2),
+        "vol_ratio":   round(vol_ratio, 2),
+        "range_pct":   round(range_pct, 2),
+        "oi_rising":   oi_rising,
+        "vol_rising":  vol_rising,
+        "price_stuck": price_stuck,
+        "label":       label,
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  🧠  MASTER SCORE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1284,12 +1419,16 @@ def master_score(symbol, ticker):
         )
         return None
 
-    # ── GATE 2: above_vwap (WAJIB) ──────────────────────────────────────────
+    # ── GATE 2: above_vwap dengan toleransi (DIPERBARUI v15.1) ──────────────
+    # Dari: price > vwap  (terlalu ketat — melewatkan accumulation di bawah VWAP)
+    # Ke  : price > vwap * 0.97  (toleransi 3% di bawah VWAP)
+    # Fase accumulation dan liquidity sweep sering terjadi di bawah VWAP.
     vwap = calc_vwap(c1h, lookback=24)
-    if price_now < vwap:
+    vwap_gate_level = vwap * CONFIG["vwap_gate_tolerance"]
+    if price_now < vwap_gate_level:
         log.info(
-            f"  {symbol}: Harga di bawah VWAP — GATE GAGAL "
-            f"(${price_now:.6g} < ${vwap:.6g})"
+            f"  {symbol}: Harga terlalu jauh di bawah VWAP — GATE GAGAL "
+            f"(${price_now:.6g} < ${vwap_gate_level:.6g} = VWAP*0.97)"
         )
         return None
 
@@ -1313,6 +1452,14 @@ def master_score(symbol, ticker):
     # BARU: HTF Accumulation + Liquidity Sweep
     htf_accum         = calc_htf_accumulation(c4h)
     liq_sweep         = detect_liquidity_sweep(c1h)
+
+    # BARU v15.1: Energy Build-Up (OI+vol naik, harga stuck)
+    # Deteksi dilakukan setelah oi_data tersedia
+    energy            = detect_energy_buildup(c1h, oi_data)
+    # Set is_strong jika funding netral/negatif (squeeze potential)
+    if energy["is_buildup"] and fstats and fstats.get("current", 1) <= 0:
+        energy["is_strong"] = True
+        energy["label"] = energy["label"] + " 🔥 + funding negatif (squeeze)"
 
     atr_abs_val       = calc_atr_abs(c1h)
 
@@ -1485,6 +1632,17 @@ def master_score(symbol, ticker):
         score += CONFIG["score_liquidity_sweep"]
         signals.append(liq_sweep["label"])
 
+    # 14. Energy Build-Up (BARU v15.1) — OI Build + Volume Build + Price Stuck
+    # Ini adalah pola "calm before storm" yang sering diabaikan scanner biasa.
+    # Pump besar hampir selalu butuh liquidity, dan liquidity dibangun via OI.
+    # Jika OI + volume naik tapi harga tidak bergerak = absorption sedang terjadi.
+    if energy["is_buildup"]:
+        score += CONFIG["score_energy_buildup"]
+        signals.append(energy["label"])
+        if energy["is_strong"]:
+            score += 2   # bonus ekstra untuk kombinasi energy + funding negatif
+            signals.append("⭐ Energy Build-Up + Funding Negatif = squeeze probability tinggi")
+
     # 14. Open Interest Expansion
     if not oi_data["is_new"] and oi_data["oi_now"] > 0:
         chg = oi_data["change_pct"]
@@ -1519,6 +1677,13 @@ def master_score(symbol, ticker):
         # BARU: kombinasi sweep + 4H accumulation = setup pre-pump sangat kuat
         alert_level = "HIGH"
         pump_type   = "Liquidity Sweep + HTF Accumulation"
+    elif energy["is_buildup"] and energy["is_strong"]:
+        # BARU v15.1: energy build-up kuat = absorption + funding negatif
+        alert_level = "HIGH"
+        pump_type   = "Energy Build-Up (OI+Vol+Stuck) + Short Squeeze"
+    elif energy["is_buildup"]:
+        alert_level = "MEDIUM"
+        pump_type   = "Energy Build-Up (OI+Vol+Price Stuck)"
     elif liq_sweep["is_sweep"]:
         alert_level = "MEDIUM"
         pump_type   = "Liquidity Sweep Reversal"
@@ -1567,6 +1732,7 @@ def master_score(symbol, ticker):
             "accum":           accum,
             "htf_accum":       htf_accum,
             "liq_sweep":       liq_sweep,
+            "energy":          energy,
             "oi_data":         oi_data,
         }
     else:
@@ -1580,7 +1746,7 @@ def build_alert(r, rank=None):
     level_icon = "🔥" if r["alert_level"] == "HIGH" else "📡"
     e = r["entry"]
 
-    msg  = f"{level_icon} <b>PRE-PUMP SIGNAL #{rank} — v15.0</b>\n\n"
+    msg  = f"{level_icon} <b>PRE-PUMP SIGNAL #{rank} — v15.1</b>\n\n"
     msg += f"<b>Symbol    :</b> {r['symbol']}\n"
     msg += f"<b>Alert     :</b> {r['alert_level']} — {r['pump_type']}\n"
     msg += f"<b>Score     :</b> {r['score']}\n"
@@ -1627,6 +1793,18 @@ def build_alert(r, rank=None):
         msg += f"<b>Liq Sweep :</b> 🎯 DETECTED — support ${ls['support']:.6g}, low ${ls['sweep_low']:.6g}\n"
     else:
         msg += f"<b>Liq Sweep :</b> —\n"
+
+    # Energy Build-Up (BARU v15.1)
+    en = r.get("energy", {})
+    if en.get("is_buildup"):
+        strong_tag = " 🔥 STRONG" if en.get("is_strong") else ""
+        msg += (
+            f"<b>Energy    :</b> ⚡ BUILD-UP{strong_tag} — OI +{en['oi_change']:.1f}% | "
+            f"vol {en['vol_ratio']:.1f}x | range {en['range_pct']:.1f}%\n"
+        )
+    else:
+        conds = f"OI={'✅' if en.get('oi_rising') else '❌'} vol={'✅' if en.get('vol_rising') else '❌'} stuck={'✅' if en.get('price_stuck') else '❌'}"
+        msg += f"<b>Energy    :</b> — ({conds})\n"
 
     msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
     msg += f"📍 <b>ENTRY ({e['alert_level']}) — {e['sl_method']}</b>\n"
@@ -1681,14 +1859,15 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v15.0 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v15.1 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
         level_icon = "🔥" if r["alert_level"] == "HIGH" else "📡"
         htf_tag    = " 🕯️" if r.get("htf_accum", {}).get("is_htf_accum") else ""
         sweep_tag  = " 🎯" if r.get("liq_sweep", {}).get("is_sweep") else ""
-        msg += f"{i}. {level_icon} <b>{r['symbol']}</b> [Score:{r['score']} | {r['alert_level']}{htf_tag}{sweep_tag}]\n"
+        energy_tag = " ⚡" if r.get("energy", {}).get("is_buildup") else ""
+        msg += f"{i}. {level_icon} <b>{r['symbol']}</b> [Score:{r['score']} | {r['alert_level']}{htf_tag}{sweep_tag}{energy_tag}]\n"
         msg += (
             f"   {vol_str} | RSI:{r['rsi']} | EMAGap:{r['ema_gap']} | "
             f"T1:+{r['entry']['gain_t1_pct']}%\n"
@@ -1745,8 +1924,13 @@ def build_candidate_list(tickers):
             filtered_stats["change_too_high"] += 1
             continue
 
+        # PERUBAHAN v15.1: no_momentum filter DIHAPUS
+        # Sebelumnya: skip coin jika chg < -5% (membuang coin sideways/accumulation)
+        # Sekarang  : skip hanya jika dump besar (< -15%)
+        # Pump besar sering muncul dari coin yang terlihat "membosankan" dengan
+        # harga sideways — justru itulah "OI Build + Volume Build + Price Stuck"
         if chg < CONFIG["gate_chg_24h_min"]:
-            filtered_stats["no_momentum"] += 1
+            filtered_stats["dump_too_deep"] += 1
             continue
 
         if price <= 0:
@@ -1780,7 +1964,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v15.0 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v15.1 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -1852,8 +2036,8 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v15.0                             ║")
-    log.info("║  Optimalisasi: pre-pump accumulation phase focus    ║")
+    log.info("║  PRE-PUMP SCANNER v15.1                             ║")
+    log.info("║  Focus: Energy Build-Up + VWAP tolerance + Funding  ║")
     log.info("╚══════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
