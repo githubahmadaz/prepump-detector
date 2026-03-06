@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.1                                                      ║
+║  PRE-PUMP SCANNER v15.2                                                      ║
 ║                                                                              ║
 ║  PERUBAHAN DARI v15.0 — 3 Perbaikan Kritis:                                 ║
 ║                                                                              ║
@@ -85,7 +85,7 @@ _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v15.1 — log aktif: /tmp/scanner_v15.log")
+log.info("Scanner v15.2 — log aktif: /tmp/scanner_v15.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -107,13 +107,13 @@ CONFIG = {
 
     # ── Gate perubahan harga ──────────────────────────────────────────────────
     "gate_chg_24h_max":         12.0,
-    # PERUBAHAN v15.1: -5% → -15% (longgarkan, hapus no_momentum filter)
+    # PERUBAHAN v15.2: -5% → -15% (longgarkan, hapus no_momentum filter)
     # Filter lama membuang coin yang sideways/sedikit merah tapi sedang
     # dalam fase accumulation (OI naik, volume naik, harga ditahan).
     # Pump besar sering muncul dari coin "membosankan" ini.
     "gate_chg_24h_min":        -15.0,   # DILONGGARKAN dari -5.0 → hanya skip dump besar
 
-    # ── VWAP Gate Tolerance (BARU v15.1) ─────────────────────────────────────
+    # ── VWAP Gate Tolerance (BARU v15.2) ─────────────────────────────────────
     # Dari: price > vwap (strict)
     # Ke  : price > vwap * 0.97 (toleransi 3% di bawah VWAP)
     # Alasan: fase accumulation dan liquidity sweep sering terjadi justru
@@ -122,7 +122,7 @@ CONFIG = {
     # Gate lama membuang exactly setup terbaik ini.
     "vwap_gate_tolerance":      0.97,   # BARU: price > vwap * 0.97
 
-    # ── Energy Build-Up Detector (BARU v15.1) ────────────────────────────────
+    # ── Energy Build-Up Detector (BARU v15.2) ────────────────────────────────
     # Pola: OI Build + Volume Build + Price Stuck
     # = Market maker/whale sedang membangun inventori (absorption)
     # Ketika kompresi ini dilepas → expansion sangat cepat
@@ -146,21 +146,19 @@ CONFIG = {
     # ── Gate BB Position ──────────────────────────────────────────────────────
     "gate_bb_pos_max":          1.05,
 
-    # ── Funding Gate ──────────────────────────────────────────────────────────
-    # PERUBAHAN v15.1: gate DILONGGARKAN secara signifikan
-    # Dari: avg < -0.0002 ATAU cumul < -0.001
-    # Ke  : avg < -0.00005 ATAU cumul < -0.0001
+    # ── Funding — SCORING ONLY (v15.2, hard gate DINONAKTIFKAN) ──────────────
+    # LOG ANALYSIS: dari 104 coin, mayoritas gagal funding gate meski funding
+    # sudah negatif (IOTXUSDT -0.000041, KASUSDT -0.000012, UNIUSDT -0.000005).
+    # Di market bearish/sideways, rata-rata funding mendekati 0, bukan -0.0005.
+    # Hard gate funding = scanner tidak berguna di kondisi pasar saat ini.
     #
-    # Alasan: gate lama sangat ketat — hampir semua coin gagal bahkan saat
-    # punya setup teknikal bagus. -0.00005 = sedikit negatif / netral.
-    # Ini menangkap fase early accumulation sebelum funding sangat negatif.
-    # Fase "calm before storm" sering punya funding netral, bukan sangat negatif.
-    #
-    # Bonus score tetap untuk konfirmasi kuat (tidak berubah).
-    "funding_gate_avg":        -0.00005,   # DILONGGARKAN dari -0.0002
-    "funding_gate_cumul":      -0.0001,    # DILONGGARKAN dari -0.001
-    "funding_bonus_avg":       -0.0005,    # threshold konfirmasi kuat (tetap)
-    "funding_bonus_cumul":     -0.005,     # threshold konfirmasi kuat (tetap)
+    # SOLUSI v15.2: funding jadi SCORING, bukan gate.
+    #   Funding sangat negatif  → bonus skor (short squeeze setup)
+    #   Funding sangat positif  → penalti skor (coin sudah overbought)
+    #   Funding netral/sedikit  → tidak ada efek (normal di early accumulation)
+    "funding_penalty_avg":     0.0003,   # funding > +0.03% → penalti -2 (overbought)
+    "funding_bonus_avg":      -0.0002,   # funding < -0.02% → bonus +2 (squeeze setup)
+    "funding_bonus_cumul":    -0.001,    # funding cumul < -0.1% → bonus +1
 
     # ── Candle limits ─────────────────────────────────────────────────────────
     "candle_1h":                168,
@@ -396,16 +394,29 @@ def safe_get(url, params=None, timeout=12):
     return None
 
 def send_telegram(msg):
+    """
+    Kirim pesan ke Telegram dengan error logging yang proper.
+    v15.2: tambah log error detail agar masalah pengiriman terdeteksi.
+    Telegram membatasi pesan maksimum 4096 karakter — potong jika perlu.
+    """
     if not BOT_TOKEN or not CHAT_ID:
+        log.warning("send_telegram: BOT_TOKEN atau CHAT_ID tidak ada!")
         return False
+    # Telegram max 4096 chars — potong dan tambah marker jika terlalu panjang
+    if len(msg) > 4000:
+        msg = msg[:3900] + "\n\n<i>...[dipotong, terlalu panjang]</i>"
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"},
             timeout=15,
         )
-        return r.status_code == 200
-    except Exception:
+        if r.status_code != 200:
+            log.warning(f"Telegram gagal: HTTP {r.status_code} — {r.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        log.warning(f"Telegram exception: {e}")
         return False
 
 def utc_now():
@@ -1178,85 +1189,92 @@ def find_swing_low_sl(candles, lookback=12):
 
 def calc_entry(candles, bos_level, alert_level, vwap, price_now, atr_abs_val=None):
     """
-    Entry & SL calculation.
+    Entry & SL & Target calculation — v15.2
 
-    PERUBAHAN v15 — DEEP ENTRY MODEL (use_deep_entry=True):
-    Model baru lebih tahan manipulasi market maker:
-      entry = VWAP - 0.5 * ATR   (entry lebih murah, tunggu pullback ke VWAP)
-      SL    = entry - 1.0 * ATR  (jelas di bawah struktur)
-      TP    = entry + 2.0 * ATR  (minimal 1:2 R/R)
+    FIX BUG KRITIS: Deep entry model sebelumnya menghasilkan T1 hanya 2-3%
+    karena:
+    1. Entry = VWAP - 0.5*ATR → sering DI BAWAH harga sekarang
+    2. TP = entry + 2*ATR → dengan ATR 1%, TP cuma 2% di atas entry
+    3. Fibonacci juga dihitung dari entry yang salah
 
-    Model lama (breakout): entry di atas BOS/VWAP, mudah dimanipulasi
-    dengan false breakout oleh market maker.
+    SOLUSI v15.2:
+    - Entry tetap menggunakan model konservatif (dekat harga sekarang)
+    - Target menggunakan proyeksi MINIMUM 15-20% berdasarkan swing range
+    - SL dari swing low struktur (bukan flat ATR)
+    - T1 = minimum 15% dari entry (target pump realistis)
+    - T2 = minimum 25% dari entry
 
-    Jika use_deep_entry=False, fallback ke model breakout lama.
+    Logika target:
+    Swing range terbesar dalam 168 candle → proyeksi 100% extension
+    Jika swing range > 15% → gunakan itu
+    Jika swing range < 15% → fallback ke +15% dan +25% flat
     """
     if atr_abs_val is None:
         atr_abs_val = calc_atr_abs(candles)
 
-    if CONFIG["use_deep_entry"]:
-        # ── DEEP ENTRY MODEL ────────────────────────────────────────────────
-        # Entry: beli saat harga pullback ke dekat VWAP (lebih murah dari BOS)
-        entry = vwap - CONFIG["deep_entry_vwap_atr_mult"] * atr_abs_val
-
-        # Jika entry terlalu jauh di bawah harga sekarang (> 3%),
-        # gunakan harga sekarang - 1% sebagai entry alternatif
-        if price_now > 0 and (price_now - entry) / price_now > 0.03:
-            entry = price_now * 0.99
-
-        # SL = entry - 1.0 * ATR
-        sl = entry - CONFIG["deep_entry_sl_atr_mult"] * atr_abs_val
-
-        # TP = entry + 2.0 * ATR
-        tp_atr = entry + CONFIG["deep_entry_tp_atr_mult"] * atr_abs_val
-
-        # Tetap hitung Fibonacci target sebagai referensi
-        t1_fib, t2_fib = calc_fib_targets(entry, candles)
-
-        # Ambil target lebih konservatif (ATR atau Fibonacci, mana yang lebih dekat)
-        t1 = min(tp_atr, t1_fib) if t1_fib > entry else tp_atr
-        t2 = t2_fib if t2_fib > t1 else t1 * 1.08
-
-        sl_method = "deep_entry (VWAP-ATR)"
-
+    # ── Entry: gunakan harga pasar + buffer kecil ─────────────────────────────
+    # Tidak lagi "VWAP - ATR" karena itu entry LIMIT yang sering tidak terisi
+    # dan kalau terisi berarti coin sedang turun (bukan pre-pump)
+    if alert_level == "HIGH" and bos_level > 0:
+        # HIGH: entry tepat di atas BOS level
+        entry = bos_level * (1.0 + 0.001)
     else:
-        # ── MODEL BREAKOUT LAMA ─────────────────────────────────────────────
-        if alert_level == "HIGH":
-            entry = bos_level * (1.0 + CONFIG["entry_bos_buffer"])
-        else:
-            entry = vwap * (1.0 + CONFIG["entry_vwap_buffer"])
+        # MEDIUM: entry di atas VWAP atau harga sekarang (mana yang lebih tinggi)
+        entry = max(vwap * 1.001, price_now * 1.001)
 
-        if entry < price_now:
-            entry = price_now * 1.001
+    # Jika entry masih di bawah harga sekarang, pakai market price
+    if entry < price_now:
+        entry = price_now * 1.001
 
-        sl_swing = find_swing_low_sl(candles, lookback=CONFIG["sl_swing_lookback"])
-        if sl_swing is None or sl_swing >= entry:
-            sl_swing = entry - atr_abs_val * 1.5
+    # ── SL: dari swing low struktur ──────────────────────────────────────────
+    sl_swing = find_swing_low_sl(candles, lookback=12)
+    if sl_swing is None or sl_swing >= entry:
+        sl_swing = entry - atr_abs_val * 2.0   # fallback 2x ATR
 
-        sl_atr_min = entry - atr_abs_val * CONFIG["sl_atr_multiplier_min"]
-        sl_atr_max = entry - atr_abs_val * CONFIG["sl_atr_multiplier_max"]
+    # Clamp SL ke range yang wajar
+    sl_atr_min = entry - atr_abs_val * 0.5   # minimum: 0.5x ATR
+    sl_atr_max = entry - atr_abs_val * 3.0   # maximum: 3x ATR
 
-        sl = sl_swing
-        if sl > sl_atr_min:
-            sl = sl_atr_min
-        if sl < sl_atr_max:
-            sl = sl_atr_max
+    sl = sl_swing
+    if sl > sl_atr_min:
+        sl = sl_atr_min
+    if sl < sl_atr_max:
+        sl = sl_atr_max
 
-        sl_hard_floor   = entry * (1.0 - CONFIG["min_sl_pct"] / 100.0)
-        sl_hard_ceiling = entry * (1.0 - CONFIG["max_sl_pct"] / 100.0)
+    # Hard limits
+    sl = max(sl, entry * (1.0 - 0.08))   # max 8% SL
+    sl = min(sl, entry * (1.0 - 0.005))  # min 0.5% SL
 
-        if sl > sl_hard_floor:
-            sl = sl_hard_floor
-        if sl < sl_hard_ceiling:
-            sl = sl_hard_ceiling
-
-        t1, t2 = calc_fib_targets(entry, candles)
-        sl_method = "swing+ATR"
-
-    # Pastikan SL tidak sama atau di atas entry
     if sl >= entry:
-        sl = entry * (1.0 - CONFIG["min_sl_pct"] / 100.0)
+        sl = entry * 0.995
 
+    # ── Target: proyeksi swing range untuk pump ≥15-20% ─────────────────────
+    # Hitung swing range terbesar dalam 168 candle (1 minggu)
+    lookback = min(168, len(candles))
+    recent   = candles[-lookback:]
+
+    # Swing low dan high dari keseluruhan periode
+    swing_low_val  = min(c["low"]  for c in recent)
+    swing_high_val = max(c["high"] for c in recent)
+    swing_range    = swing_high_val - swing_low_val
+
+    # Proyeksi: 100% extension dari swing range = target pump
+    # Ini lebih realistis untuk altcoin yang bisa pump 20-40%
+    t1_proj = entry + swing_range * 0.80   # 80% dari swing range
+    t2_proj = entry + swing_range * 1.272  # 127.2% dari swing range (fib)
+
+    # Minimum target: T1 = +15%, T2 = +25% (target pump realistis)
+    t1_min = entry * 1.15
+    t2_min = entry * 1.25
+
+    t1 = max(t1_proj, t1_min)
+    t2 = max(t2_proj, t2_min)
+
+    # Pastikan T2 > T1
+    if t2 <= t1:
+        t2 = t1 * 1.10
+
+    # ── R/R calculation ───────────────────────────────────────────────────────
     risk   = entry - sl
     reward = t1 - entry
     rr     = round(reward / risk, 1) if risk > 0 else 0.0
@@ -1275,7 +1293,7 @@ def calc_entry(candles, bos_level, alert_level, vwap, price_now, atr_abs_val=Non
         "gain_t1_pct":  round((t1 - entry) / entry * 100, 1),
         "gain_t2_pct":  round((t2 - entry) / entry * 100, 1),
         "atr_abs":      round(atr_abs_val, 8),
-        "sl_method":    sl_method,
+        "sl_method":    "swing+proj (v15.2)",
     }
 
 def detect_energy_buildup(candles_1h, oi_data):
@@ -1403,23 +1421,21 @@ def master_score(symbol, ticker):
     add_funding_snapshot(symbol, funding)
     fstats  = get_funding_stats(symbol)
 
+    # v15.2: Funding snapshot belum cukup → lanjut dengan fstats kosong
+    # (dulu: return None → melewatkan coin bagus di run pertama)
     if fstats is None:
-        log.info(f"  {symbol}: Funding snapshot belum cukup (min 2 data — "
-                 f"normal di run pertama)")
-        return None
+        fstats = {
+            "avg": funding, "cumulative": funding, "neg_pct": 0.0,
+            "streak": 0, "basis": funding * 100, "current": funding,
+            "sample_count": 1,
+        }
+        log.info(f"  {symbol}: Funding snapshot baru (1 data) — lanjut scan")
 
-    gate_funding = (
-        fstats["avg"] < CONFIG["funding_gate_avg"] or
-        fstats["cumulative"] < CONFIG["funding_gate_cumul"]
-    )
-    if not gate_funding:
-        log.info(
-            f"  {symbol}: Funding tidak cukup negatif "
-            f"(avg={fstats['avg']:.6f}, cumul={fstats['cumulative']:.5f})"
-        )
-        return None
+    # v15.2: Funding BUKAN lagi hard gate — hanya penalti/bonus skor
+    # Log menunjukkan bahwa funding gate memblokir hampir semua coin di pasar saat ini
+    # (mayoritas funding netral ≈ 0, bukan -0.0005 seperti era bull market)
 
-    # ── GATE 2: above_vwap dengan toleransi (DIPERBARUI v15.1) ──────────────
+    # ── GATE 2: above_vwap dengan toleransi (DIPERBARUI v15.2) ──────────────
     # Dari: price > vwap  (terlalu ketat — melewatkan accumulation di bawah VWAP)
     # Ke  : price > vwap * 0.97  (toleransi 3% di bawah VWAP)
     # Fase accumulation dan liquidity sweep sering terjadi di bawah VWAP.
@@ -1428,7 +1444,7 @@ def master_score(symbol, ticker):
     if price_now < vwap_gate_level:
         log.info(
             f"  {symbol}: Harga terlalu jauh di bawah VWAP — GATE GAGAL "
-            f"(${price_now:.6g} < ${vwap_gate_level:.6g} = VWAP*0.97)"
+            f"(${price_now:.6g} < ${vwap_gate_level:.6g} = VWAP*{CONFIG['vwap_gate_tolerance']})"
         )
         return None
 
@@ -1453,7 +1469,7 @@ def master_score(symbol, ticker):
     htf_accum         = calc_htf_accumulation(c4h)
     liq_sweep         = detect_liquidity_sweep(c1h)
 
-    # BARU v15.1: Energy Build-Up (OI+vol naik, harga stuck)
+    # BARU v15.2: Energy Build-Up (OI+vol naik, harga stuck)
     # Deteksi dilakukan setelah oi_data tersedia
     energy            = detect_energy_buildup(c1h, oi_data)
     # Set is_strong jika funding netral/negatif (squeeze potential)
@@ -1552,8 +1568,29 @@ def master_score(symbol, ticker):
         score += CONFIG["score_rsi_55"]
         signals.append(f"RSI {rsi:.1f} ≥ 55 — bullish")
 
-    # 8. Funding bonus
-    if fstats["neg_pct"] >= 70:
+    # 8. Funding — scoring system (v15.2: bukan gate, tapi bonus/penalti)
+    f_avg = fstats["avg"]
+    f_cur = fstats["current"]
+
+    if f_avg <= CONFIG["funding_bonus_avg"]:
+        # Funding sangat negatif → short squeeze setup → bonus kuat
+        score += CONFIG["score_funding_cumul"]
+        signals.append(f"⭐ Funding avg {f_avg:.6f} — sangat negatif (short squeeze setup)")
+    elif fstats["cumulative"] <= CONFIG["funding_bonus_cumul"]:
+        score += 1
+        signals.append(f"Funding kumulatif {fstats['cumulative']:.5f} — akumulasi negatif")
+    elif f_avg < 0:
+        # Funding negatif ringan — tetap catat sebagai sinyal positif
+        signals.append(f"Funding avg {f_avg:.6f} — negatif (favorable untuk long)")
+    elif f_avg >= CONFIG["funding_penalty_avg"]:
+        # Funding sangat positif → coin sudah overbought, short banyak dibuka → penalti
+        score -= 2
+        signals.append(f"⚠️ Funding avg {f_avg:.6f} — sangat positif (penalti: overbought/longs banyak)")
+    else:
+        # Funding netral — normal di fase early accumulation
+        signals.append(f"Funding avg {f_avg:.6f} — netral (normal di fase accumulation)")
+
+    if fstats["neg_pct"] >= 70 and fstats["sample_count"] >= 3:
         score += CONFIG["score_funding_neg_pct"]
         signals.append(f"Funding negatif {fstats['neg_pct']:.0f}% dari {fstats['sample_count']} periode")
 
@@ -1562,20 +1599,6 @@ def master_score(symbol, ticker):
         signals.append(
             f"Funding streak negatif {fstats['streak']}x berturut "
             f"(dari {fstats['sample_count']} total data)"
-        )
-
-    if fstats["avg"] <= CONFIG["funding_bonus_avg"]:
-        score += CONFIG["score_funding_cumul"]
-        signals.append(
-            f"⭐ Funding avg {fstats['avg']:.6f} — sangat negatif (short squeeze setup kuat)"
-        )
-    elif fstats["cumulative"] <= CONFIG["funding_bonus_cumul"]:
-        score += 1
-        signals.append(f"Funding kumulatif {fstats['cumulative']:.4f} — akumulasi negatif")
-    else:
-        signals.append(
-            f"⚠️ Funding lemah (avg={fstats['avg']:.6f}) — lolos gate awal, "
-            f"konfirmasi teknikal lebih penting"
         )
 
     # 9. Volume — hanya jika konsisten (anti-manipulasi)
@@ -1632,7 +1655,7 @@ def master_score(symbol, ticker):
         score += CONFIG["score_liquidity_sweep"]
         signals.append(liq_sweep["label"])
 
-    # 14. Energy Build-Up (BARU v15.1) — OI Build + Volume Build + Price Stuck
+    # 14. Energy Build-Up (BARU v15.2) — OI Build + Volume Build + Price Stuck
     # Ini adalah pola "calm before storm" yang sering diabaikan scanner biasa.
     # Pump besar hampir selalu butuh liquidity, dan liquidity dibangun via OI.
     # Jika OI + volume naik tapi harga tidak bergerak = absorption sedang terjadi.
@@ -1678,7 +1701,7 @@ def master_score(symbol, ticker):
         alert_level = "HIGH"
         pump_type   = "Liquidity Sweep + HTF Accumulation"
     elif energy["is_buildup"] and energy["is_strong"]:
-        # BARU v15.1: energy build-up kuat = absorption + funding negatif
+        # BARU v15.2: energy build-up kuat = absorption + funding negatif
         alert_level = "HIGH"
         pump_type   = "Energy Build-Up (OI+Vol+Stuck) + Short Squeeze"
     elif energy["is_buildup"]:
@@ -1746,7 +1769,7 @@ def build_alert(r, rank=None):
     level_icon = "🔥" if r["alert_level"] == "HIGH" else "📡"
     e = r["entry"]
 
-    msg  = f"{level_icon} <b>PRE-PUMP SIGNAL #{rank} — v15.1</b>\n\n"
+    msg  = f"{level_icon} <b>PRE-PUMP SIGNAL #{rank} — v15.2</b>\n\n"
     msg += f"<b>Symbol    :</b> {r['symbol']}\n"
     msg += f"<b>Alert     :</b> {r['alert_level']} — {r['pump_type']}\n"
     msg += f"<b>Score     :</b> {r['score']}\n"
@@ -1794,7 +1817,7 @@ def build_alert(r, rank=None):
     else:
         msg += f"<b>Liq Sweep :</b> —\n"
 
-    # Energy Build-Up (BARU v15.1)
+    # Energy Build-Up (BARU v15.2)
     en = r.get("energy", {})
     if en.get("is_buildup"):
         strong_tag = " 🔥 STRONG" if en.get("is_strong") else ""
@@ -1859,7 +1882,7 @@ def build_alert(r, rank=None):
     return msg
 
 def build_summary(results):
-    msg = f"📋 <b>TOP CANDIDATES v15.1 — {utc_now()}</b>\n{'━'*28}\n"
+    msg = f"📋 <b>TOP CANDIDATES v15.2 — {utc_now()}</b>\n{'━'*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
@@ -1924,7 +1947,7 @@ def build_candidate_list(tickers):
             filtered_stats["change_too_high"] += 1
             continue
 
-        # PERUBAHAN v15.1: no_momentum filter DIHAPUS
+        # PERUBAHAN v15.2: no_momentum filter DIHAPUS
         # Sebelumnya: skip coin jika chg < -5% (membuang coin sideways/accumulation)
         # Sekarang  : skip hanya jika dump besar (< -15%)
         # Pump besar sering muncul dari coin yang terlihat "membosankan" dengan
@@ -1964,7 +1987,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v15.1 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v15.2 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -2036,7 +2059,7 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v15.1                             ║")
+    log.info("║  PRE-PUMP SCANNER v15.2                             ║")
     log.info("║  Focus: Energy Build-Up + VWAP tolerance + Funding  ║")
     log.info("╚══════════════════════════════════════════════════════╝")
 
