@@ -1,218 +1,303 @@
+# ================================
+# PRE PUMP SCANNER v15 QUANT DESK
+# ================================
+
 import requests
-import pandas as pd
-import numpy as np
 import time
 import os
+import math
+import json
+import logging
+from datetime import datetime
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 
-BITGET_URL = "https://api.bitget.com/api/mix/v1/market"
+# ================================
+# CONFIG
+# ================================
 
+CONFIG = {
+
+    "min_score_alert": 11,
+    "max_alerts_per_run": 15,
+
+    "min_vol_24h": 3000,
+    "max_vol_24h": 50_000_000,
+
+    "gate_chg_24h_max": 12,
+    "gate_chg_24h_min": -6,
+
+    "gate_rsi_max": 75,
+
+    "min_atr_pct": 0.8,
+
+}
+
+# ================================
+# TELEGRAM
+# ================================
 
 def send_telegram(msg):
 
-    url=f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    data={
-        "chat_id":CHAT_ID,
-        "text":msg
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "parse_mode": "HTML"
     }
 
-    requests.post(url,data=data)
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except:
+        pass
 
 
+# ================================
+# BITGET DATA
+# ================================
 
-def get_symbols():
+def get_tickers():
 
-    url=f"{BITGET_URL}/contracts?productType=umcbl"
+    url = "https://api.bitget.com/api/v2/mix/market/tickers"
 
-    r=requests.get(url).json()
+    r = requests.get(url, timeout=10)
+    data = r.json()
 
-    symbols=[]
-
-    for s in r["data"]:
-        if "USDT" in s["symbol"]:
-            symbols.append(s["symbol"])
-
-    return symbols
-
+    return data["data"]
 
 
 def get_candles(symbol):
 
-    url=f"{BITGET_URL}/candles"
+    url = f"https://api.bitget.com/api/v2/mix/market/candles"
 
-    params={
-        "symbol":symbol,
-        "granularity":"15m",
-        "limit":150
+    params = {
+        "symbol": symbol,
+        "granularity": "5m",
+        "limit": "200"
     }
 
-    r=requests.get(url,params=params).json()
+    r = requests.get(url, params=params, timeout=10)
 
-    df=pd.DataFrame(r["data"])
-
-    df.columns=["time","open","high","low","close","volume"]
-
-    df=df.astype(float)
-
-    df=df[::-1]
-
-    return df
+    return r.json()["data"]
 
 
+# ================================
+# INDICATORS
+# ================================
 
-def get_open_interest(symbol):
+def ema(data, period):
 
-    url=f"{BITGET_URL}/open-interest"
+    k = 2 / (period + 1)
 
-    params={"symbol":symbol}
+    ema_val = data[0]
 
-    r=requests.get(url,params=params).json()
+    for price in data:
 
-    return float(r["data"]["openInterest"])
+        ema_val = price * k + ema_val * (1 - k)
 
-
-
-def calculate_indicators(df):
-
-    df["vol_ma"]=df["volume"].rolling(20).mean()
-
-    df["atr"]=(df["high"]-df["low"]).rolling(14).mean()
-
-    df["range_high"]=df["high"].rolling(40).max()
-
-    df["range_low"]=df["low"].rolling(40).min()
-
-    return df
+    return ema_val
 
 
+def rsi(prices, period=14):
 
-def detect_accumulation(df):
+    gains = []
+    losses = []
 
-    volume_ratio=df["volume"].iloc[-1]/df["vol_ma"].iloc[-1]
+    for i in range(1, len(prices)):
 
-    price_range=df["range_high"].iloc[-1]-df["range_low"].iloc[-1]
+        diff = prices[i] - prices[i-1]
 
-    cond1=volume_ratio>1.3
-    cond2=price_range/df["close"].iloc[-1]<0.12
+        if diff >= 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
 
-    return cond1 and cond2
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
 
+    if avg_loss == 0:
+        return 100
 
+    rs = avg_gain / avg_loss
 
-def detect_liquidity_sweep(df):
-
-    recent_low=df["low"].iloc[-2]
-
-    prev_low=df["low"].rolling(20).min().iloc[-3]
-
-    bullish_close=df["close"].iloc[-2]>df["open"].iloc[-2]
-
-    return recent_low<prev_low and bullish_close
-
-
-
-def detect_oi_growth(symbol):
-
-    try:
-
-        oi1=get_open_interest(symbol)
-
-        time.sleep(1)
-
-        oi2=get_open_interest(symbol)
-
-        change=(oi2-oi1)/oi1*100
-
-        return change>3
-
-    except:
-        return False
+    return 100 - (100 / (1 + rs))
 
 
+def atr(high, low, close):
 
-def build_deep_entry(df):
+    trs = []
 
-    support=df["range_low"].iloc[-1]
+    for i in range(1, len(close)):
 
-    resistance=df["range_high"].iloc[-1]
+        tr = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
 
-    atr=df["atr"].iloc[-1]
+        trs.append(tr)
 
-    range_size=resistance-support
-
-    entry=support + range_size*0.25
-
-    sl=support - atr*0.5
-
-    tp1=resistance
-
-    tp2=resistance + range_size
-
-    return entry,sl,tp1,tp2,support,resistance
+    return sum(trs[-14:]) / 14
 
 
+# ================================
+# BTC REGIME FILTER
+# ================================
+
+def btc_regime():
+
+    candles = get_candles("BTCUSDT")
+
+    closes = [float(x[4]) for x in candles]
+
+    r = rsi(closes)
+
+    ema50 = ema(closes, 50)
+
+    price = closes[-1]
+
+    if price < ema50 and r < 45:
+        return "bear"
+
+    if price > ema50 and r > 55:
+        return "bull"
+
+    return "sideways"
+
+
+# ================================
+# DEEP ENTRY CALC
+# ================================
+
+def calculate_entry(price, vwap, atr):
+
+    deep_entry = vwap - (atr * 0.5)
+
+    sl = deep_entry - atr
+
+    tp1 = deep_entry + (atr * 1.5)
+
+    tp2 = deep_entry + (atr * 3)
+
+    return deep_entry, sl, tp1, tp2
+
+
+# ================================
+# MANIPULATION FILTER
+# ================================
+
+def wick_ratio(high, low, open_p, close):
+
+    body = abs(close - open_p)
+
+    wick = (high - low)
+
+    if body == 0:
+        return 0
+
+    return wick / body
+
+
+# ================================
+# SCANNER
+# ================================
 
 def scan():
 
-    symbols=get_symbols()
+    btc_state = btc_regime()
 
-    signals=[]
+    if btc_state == "bear":
+        print("BTC bearish — skip scan")
+        return
 
-    for sym in symbols:
+    tickers = get_tickers()
 
-        try:
+    alerts = []
 
-            df=get_candles(sym)
+    for t in tickers:
 
-            df=calculate_indicators(df)
+        symbol = t["symbol"]
 
-            acc=detect_accumulation(df)
+        if "USDT" not in symbol:
+            continue
 
-            sweep=detect_liquidity_sweep(df)
+        vol = float(t["quoteVolume"])
 
-            oi=detect_oi_growth(sym)
+        if vol < CONFIG["min_vol_24h"]:
+            continue
 
-            score=sum([acc,sweep,oi])
+        candles = get_candles(symbol)
 
-            if score>=2:
+        closes = [float(x[4]) for x in candles]
+        highs  = [float(x[2]) for x in candles]
+        lows   = [float(x[3]) for x in candles]
+        opens  = [float(x[1]) for x in candles]
 
-                entry,sl,tp1,tp2,support,resistance=build_deep_entry(df)
+        price = closes[-1]
 
-                price=df["close"].iloc[-1]
+        r = rsi(closes)
 
-                signals.append(
-                    f"{sym}\n"
-                    f"Price: {price:.4f}\n"
-                    f"Deep Entry: {entry:.4f}\n"
-                    f"SL: {sl:.4f}\n"
-                    f"TP1: {tp1:.4f}\n"
-                    f"TP2: {tp2:.4f}\n"
-                    f"Support: {support:.4f}\n"
-                    f"Resistance: {resistance:.4f}\n"
-                )
+        if r > CONFIG["gate_rsi_max"]:
+            continue
 
-        except:
-            pass
+        a = atr(highs, lows, closes)
+
+        atr_pct = a / price * 100
+
+        if atr_pct < CONFIG["min_atr_pct"]:
+            continue
+
+        ema50 = ema(closes, 50)
+
+        if price < ema50:
+            continue
+
+        wick = wick_ratio(highs[-1], lows[-1], opens[-1], closes[-1])
+
+        if wick > 2.5:
+            continue
+
+        vwap = sum(closes[-20:]) / 20
+
+        entry, sl, tp1, tp2 = calculate_entry(price, vwap, a)
+
+        support = min(lows[-20:])
+
+        msg = f"""
+🚀 <b>{symbol}</b>
+
+Entry: {entry:.4f}
+
+SL: {sl:.4f}
+
+TP1: {tp1:.4f}
+TP2: {tp2:.4f}
+
+Support: {support:.4f}
+
+BTC Regime: {btc_state}
+ATR: {atr_pct:.2f}%
+RSI: {r:.1f}
+"""
+
+        alerts.append(msg)
+
+        if len(alerts) >= CONFIG["max_alerts_per_run"]:
+            break
+
+    for a in alerts:
+
+        send_telegram(a)
+
+        time.sleep(1)
 
 
-    if signals:
+# ================================
+# MAIN
+# ================================
 
-        msg="🔥 DEEP ENTRY ACCUMULATION SIGNAL 🔥\n\n"
+if __name__ == "__main__":
 
-        for s in signals:
-            msg+=s+"\n"
-
-        send_telegram(msg)
-
-
-
-if __name__=="__main__":
-
-    while True:
-
-        scan()
-
-        time.sleep(3600)
+    scan()
