@@ -231,7 +231,7 @@ WHITELIST_SYMBOLS = {
     "AINUSDT", "RECALLUSDT", "MAVUSDT", "CLOUSDT", "LIGHTUSDT", "TOWNSUSDT", "BLESSUSDT", "HAEDALUSDT",
     "4USDT", "USUSDT", "HEIUSDT", "OGUSDT",
 }
-}
+
 
 GRAN_MAP = {"15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
 BITGET_BASE = "https://api.bitget.com"
