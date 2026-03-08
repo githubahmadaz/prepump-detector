@@ -120,7 +120,7 @@ log.info("Scanner v15.7 — log aktif: /tmp/scanner_v15.log")
 # ══════════════════════════════════════════════════════════════════════════════
 CONFIG = {
     # ── Threshold alert ───────────────────────────────────────────────────────
-    "min_score_alert":          8,
+    "min_score_alert":          7,
     "max_alerts_per_run":       15,
 
     # ── Volume 24h total (USD) ────────────────────────────────────────────────
@@ -137,7 +137,7 @@ CONFIG = {
     # Pre-pump = harga BELUM banyak bergerak. Coin yang sudah naik 10% bukan
     # pre-pump candidate — itu coin yang sudah pump. Fase distribusi sering
     # terjadi setelah pump besar, lalu harga konsolidasi tinggi + volume tinggi.
-    "gate_chg_24h_max":          5.0,
+    "gate_chg_24h_max":          15.0,
     "gate_chg_24h_min":        -15.0,   # hanya skip dump besar
 
     # ── VWAP Gate Tolerance ───────────────────────────────────────────────────
@@ -197,33 +197,33 @@ CONFIG = {
     # ── BB Squeeze — sinyal kompresi terkuat (skor dinaikkan dari +2 ke +4) ──
     # BBW < threshold → energi terakumulasi, siap meledak.
     # BUKAN BBW lebar (itu sudah meledak = distribusi/pump berjalan).
-    "bb_squeeze_threshold":    0.04,
-    "score_bb_squeeze":        4,    # FIX: naik dari +2 ke +4 — ini sinyal terpenting
+    "bb_squeeze_threshold":    0.045,
+    "score_bb_squeeze":        3,    # FIX: naik dari +2 ke +4 — ini sinyal terpenting
 
     # ── ATR Contracting — kompresi volatilitas ────────────────────────────────
     # ATR menyempit = energi menumpuk. BUKAN ATR tinggi (itu sudah meledak).
     # atr_short (6 candle) / atr_long (24 candle) < threshold = menyempit.
-    "atr_contract_ratio":      0.75,  # ATR 6c < 75% dari ATR 24c = kompresi
-    "score_atr_contracting":   3,     # FIX: ganti score_atr_15 dan score_atr_10
+    "atr_contract_ratio":      0.80,  # ATR 6c < 75% dari ATR 24c = kompresi
+    "score_atr_contracting":   2,     # FIX: ganti score_atr_15 dan score_atr_10
 
     # ── Energy Build-Up — OI naik + volume bullish + harga stuck ─────────────
     # Kondisi: OI +5%, vol 3h > 1.5x avg, range 3h < 2.5%, mayoritas candle hijau
-    "energy_oi_change_min":    5.0,
-    "energy_vol_ratio_min":    1.5,
-    "energy_range_max_pct":    2.5,
+    "energy_oi_change_min":    4.0,
+    "energy_vol_ratio_min":    1.4,
+    "energy_range_max_pct":    3.5,
     "score_energy_buildup":    4,
 
     # ── Smart Money Accumulation — vol naik + harga sideways + posisi rendah ─
     # FIX: tambah syarat price_pos_in_range < 0.70 (harga harus di bawah 70%
     # dari swing range). Sideways di atas = distribusi, bukan accumulation.
-    "accum_vol_ratio":         1.5,
-    "accum_price_range_max":   2.0,
-    "accum_atr_lookback_long": 24,
-    "accum_atr_lookback_short": 6,
+    "accum_vol_ratio":         1.4,
+    "accum_price_range_max":   3.5,
+    #"accum_atr_lookback_long": 24,
+    #"accum_atr_lookback_short": 6,
     "accum_atr_contract_ratio": 0.75,
     "accum_max_pos_in_range":  0.70,  # FIX BARU: harga max 70% dari swing range
-    "score_accumulation":      4,
-    "score_vol_compression":   4,
+    "score_accumulation":      3,
+    "score_vol_compression":   3,
 
     # ── HTF Accumulation 4H ───────────────────────────────────────────────────
     # FIX: tambah syarat 4H price position < 75% dari swing range 4H.
@@ -239,8 +239,8 @@ CONFIG = {
     "score_liquidity_sweep":   3,
 
     # ── OI Expansion ─────────────────────────────────────────────────────────
-    "oi_change_min_pct":       3.0,
-    "oi_strong_pct":          10.0,
+    "oi_change_min_pct":       2.0,
+    "oi_strong_pct":          8.0,
     "score_oi_expansion":      3,
     "score_oi_strong":         5,
 
@@ -252,19 +252,19 @@ CONFIG = {
     "score_vol_bullish":       2,     # FIX: ganti score_vol_ratio
 
     # ── Volume Acceleration dengan konteks arah ───────────────────────────────
-    "vol_accel_threshold":     0.5,
+    "vol_accel_threshold":     1.4,
     "score_vol_accel":         2,     # hanya jika candle terbaru bullish
 
     # ── RSI ideal pre-pump = 40–60 ────────────────────────────────────────────
     # FIX: score_rsi_65 DIHAPUS (RSI 65+ = sudah naik banyak, bukan pre-pump).
     # RSI 40–60 = keluar dari oversold, belum overbought = sweet spot pre-pump.
     "rsi_ideal_min":           40.0,
-    "rsi_ideal_max":           60.0,
+    "rsi_ideal_max":           65.0,
     "score_rsi_ideal":         2,     # FIX: ganti score_rsi_65 dan score_rsi_55
 
     # ── Higher Low ────────────────────────────────────────────────────────────
     "score_higher_low":        2,
-
+  "score_bos_up": 2,
     # ── BOS Up — diturunkan drastis (ini post-breakout, bukan pre-pump) ───────
     # FIX: BOS Up bukan pre-pump. Tapi tetap diberi +1 sebagai konfirmasi minor
     # bahwa struktur sedang berbalik. Pre-pump yang ideal = deteksi SEBELUM BOS.
@@ -587,6 +587,45 @@ def get_oi_change(symbol):
         "oi_prev":    round(oi_prev, 2),
         "change_pct": round(change_pct, 2),
         "is_new":     False,
+    }
+
+    # Fungsi Baru
+    def detect_momentum_breakout(candles, oi_change):
+
+    if len(candles) < 6:
+        return {"is_breakout": False, "score": 0}
+
+    last = candles[-1]
+    prev = candles[-2]
+
+    price_move = (last["close"] - prev["close"]) / prev["close"] * 100
+
+    vol_recent = last["volume_usd"]
+    vol_avg = sum(c["volume_usd"] for c in candles[-12:-1]) / 11
+
+    vol_ratio = vol_recent / vol_avg if vol_avg > 0 else 1
+
+    range_pct = (last["high"] - last["low"]) / last["close"] * 100
+
+    score = 0
+
+    if price_move > 1.2:
+        score += 2
+
+    if vol_ratio > 2:
+        score += 2
+
+    if oi_change > 6:
+        score += 3
+
+    if range_pct > 1.5:
+        score += 1
+
+    return {
+        "is_breakout": score >= 4,
+        "score": score,
+        "vol_ratio": round(vol_ratio,2),
+        "price_move": round(price_move,2)
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1719,6 +1758,16 @@ def master_score(symbol, ticker):
             f"🚀 OUTPERFORM BTC — coin {btc_corr['coin_period_chg']:+.1f}% vs BTC "
             f"{btc_corr['btc_period_chg']:+.1f}% ({btc_corr['delta_vs_btc']:+.1f}%)"
         )
+
+        # MOMENTUM BREAKOUT DETECTOR
+momentum = detect_momentum_breakout(candles_1h, oi_data["change_pct"])
+
+if momentum["is_breakout"]:
+    score += momentum["score"]
+    reasons.append(
+        f"🚀 Momentum breakout: price {momentum['price_move']}% "
+        f"vol {momentum['vol_ratio']}x"
+    )
 
     # ══════════════════════════════════════════════════════════════════════════
     #  ALERT LEVEL
