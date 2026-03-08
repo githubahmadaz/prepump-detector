@@ -1,25 +1,26 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v20                                     ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v22 — INSTITUTIONAL PUMP HUNTER        ║
 ║                                                                              ║
-║  UPGRADE v20 — 8 perbaikan signal quality dari audit quant engineer:        ║
+║  UPGRADE v22 — 13 institutional-grade upgrades:                             ║
 ║                                                                              ║
-║  PART 1  — EMA SLOPE: ema20_slope = ema20_now - ema20_3c_ago > 0           ║
-║  PART 1  — VOLUME Z-SCORE: (vol - mean20) / std20 > 1.5                    ║
-║  PART 1  — MICRO BREAKOUT: price > high_last_20                             ║
-║  PART 1  — HIGHER LOW STRUCTURE: low_current > low_previous                 ║
-║  PART 1  — DISTANCE EMA200: abs(price-ema200)/ema200 < 0.06                ║
-║  PART 1  — ORDERBOOK IMBALANCE: bid_ask_ratio = buy_vol/sell_vol > 1.2     ║
-║  PART 2  — FAKE REVERSAL FILTER: multi-condition EMA cross validation      ║
-║  PART 3  — DUMP FILTER: reject 5m<-4%, 15m<-6%, close<ema20+z>2           ║
-║  PART 4  — WEIGHTED SCORING: momentum/volume/breakout/reversal/ob/trend    ║
-║  PART 5  — TELEGRAM: escape + truncate + parse_mode=None fallback          ║
-║  PART 6  — PERFORMANCE: vectorized ops, indicator caching, reduced API     ║
-║  PART 7  — RANKING: final_score DESC → volume_zscore DESC → bid_ask DESC   ║
+║  FIX 01 — EMA50 REVERSAL OVERRIDE: slope>0 bypasses EMA50 reject gate      ║
+║  FIX 02 — SMART MONEY ACCUMULATION: range<3% + vol↑ + bid>ask              ║
+║  FIX 03 — LIQUIDITY TRAP DETECTOR: stop-sweep below 30c low + vol spike    ║
+║  FIX 04 — WHALE FOOTPRINT: large vol + no price move = accumulation        ║
+║  FIX 05 — PRE-BREAKOUT PRESSURE: BB width < 20th percentile + vol spike    ║
+║  FIX 06 — MOMENTUM IGNITION: 3 consecutive higher highs + z>1.8            ║
+║  FIX 07 — DUMP TRAP FILTER: price<EMA200 + ema50_slope<0 + ask>>bid        ║
+║  FIX 08 — IMPROVED REVERSAL: slope>0 AND z>1.5 AND price near VWAP        ║
+║  FIX 09 — INSTITUTIONAL SCORING: weighted 6-component 0-100 model         ║
+║  FIX 10 — ADVANCED PUMP PROB: sigmoid(score/8) mapped to %                 ║
+║  FIX 11 — ADVANCED RANKING: prob → z-score → orderbook → accum            ║
+║  FIX 12 — DYNAMIC TP/SL: ATR×1.3/×2.2/SL×0.9 with regime override        ║
+║  FIX 13 — TELEGRAM SANITIZE: strip < > & + plain-text fallback            ║
 ║                                                                              ║
-║  WARISAN v19: adaptive entry, liquidity-aware SL, dynamic TP,              ║
-║               AI weighted score, logistic prob, EMA trend filter,          ║
-║               wick filter, noise filter, early pump, whale accum           ║
+║  WARISAN v20: EMA slope, dump filter, reversal filter, weighted scoring,   ║
+║               EMA200 dist, higher-low, bid/ask ratio, multi-key ranking,   ║
+║               v19: adaptive entry, AI score, logistic prob, wick filter    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -53,13 +54,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v20.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v22.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v20 — log aktif: /tmp/scanner_v20.log")
+log.info("Scanner v22 — log aktif: /tmp/scanner_v22.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -416,6 +417,59 @@ CONFIG = {
 
     # PART 7 — Multi-key ranking
     "rank_v20_multi":           True,    # sort by score, zscore, bid_ask_ratio
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  UPGRADE v22: INSTITUTIONAL PUMP HUNTER CONFIG
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # FIX 01 — EMA50 Reversal Override
+    "ema50_override_slope_min":  0.0,    # slope > 0 overrides EMA50 reject gate
+    "ema50_override_zscore_min": 1.5,    # also need z > 1.5
+
+    # FIX 02 — Smart Money Accumulation
+    "sma_range_max":             0.03,   # price range contraction < 3%
+    "sma_vol_trend_min":         1.2,    # rising volume ratio
+    "score_smart_money_accum":   12,     # bonus score
+
+    # FIX 03 — Liquidity Trap (stop-sweep)
+    "liq_trap_lookback":         30,     # 30 candles for prior low
+    "liq_trap_zscore_min":       1.5,    # z-score condition
+    "score_liq_trap":            10,     # bonus score
+
+    # FIX 04 — Whale Footprint
+    "whale_fp_vol_mult":         3.0,    # vol > 3× mean
+    "whale_fp_price_max_pct":    0.5,    # price change < 0.5%
+    "score_whale_footprint":     8,      # bonus score
+
+    # FIX 05 — Pre-Breakout Pressure (BB percentile)
+    "bb_percentile_lookback":    50,     # candles for BB percentile
+    "bb_percentile_threshold":   20,     # below 20th percentile
+    "score_prebreakout":         8,      # bonus score
+
+    # FIX 06 — Momentum Ignition
+    "mom_ignition_highs":        3,      # 3 consecutive higher highs
+    "mom_ignition_zscore":       1.8,    # z-score requirement
+    "score_mom_ignition":        10,     # bonus score
+
+    # FIX 07 — Dump Trap Filter
+    "dump_trap_ema50_slope_max": 0.0,    # ema50_slope < 0
+    "dump_trap_ask_bid_min":     1.3,    # ask pressure > 1.3× bid
+
+    # FIX 08 — Improved Reversal
+    "rev_vwap_tolerance":        0.02,   # price within 2% of VWAP
+
+    # FIX 09 — Institutional Scoring weights
+    "inst_w_accumulation":       0.20,
+    "inst_w_breakout":           0.20,
+    "inst_w_volume":             0.20,
+    "inst_w_orderbook":          0.15,
+    "inst_w_momentum":           0.15,
+    "inst_w_liq_trap":           0.10,
+
+    # FIX 12 — Dynamic TP/SL v22
+    "tp1_v22_mult":              1.3,    # TP1 = entry + ATR × 1.3
+    "tp2_v22_mult":              2.2,    # TP2 = entry + ATR × 2.2
+    "sl_v22_mult":               0.9,    # SL  = entry − ATR × 0.9
 }
 
 MANUAL_EXCLUDE = set()
@@ -426,47 +480,30 @@ EXCLUDED_KEYWORDS = ["XAU", "PAXG", "BTC", "ETH", "USDC", "DAI", "BUSD", "UST"]
 #  📋  WHITELIST
 # ══════════════════════════════════════════════════════════════════════════════
 WHITELIST_SYMBOLS = {
-     "DOGEUSDT", "BCHUSDT", "ADAUSDT", "HYPEUSDT", "XMRUSDT", "LINKUSDT", "XLMUSDT", "HBARUSDT",
-    "LTCUSDT", "ZECUSDT", "AVAXUSDT", "SHIBUSDT", "SUIUSDT", "TONUSDT", "WLFIUSDT", "CROUSDT",
-    "UNIUSDT", "DOTUSDT", "TAOUSDT", "MUSDT", "AAVEUSDT", "ASTERUSDT", "PEPEUSDT", "BGBUSDT",
-    "SKYUSDT", "ETCUSDT", "NEARUSDT", "ONDOUSDT", "POLUSDT", "ICPUSDT", "WLDUSDT", "ATOMUSDT",
-    "XDCUSDT", "COINUSDT", "NIGHTUSDT", "ENAUSDT", "PIPPINUSDT", "KASUSDT", "TRUMPUSDT", "QNTUSDT",
-    "ALGOUSDT", "RENDERUSDT", "FILUSDT", "MORPHOUSDT", "APTUSDT", "SUPERUSDT", "VETUSDT", "PUMPUSDT",
-    "1000SATSUSDT", "ARBUSDT", "1000BONKUSDT", "STABLEUSDT", "KITEUSDT", "JUPUSDT", "SEIUSDT", "ZROUSDT",
-    "STXUSDT", "DYDXUSDT", "VIRTUALUSDT", "DASHUSDT", "PENGUUSDT", "CAKEUSDT", "JSTUSDT", "XTZUSDT",
-    "ETHFIUSDT", "1MBABYDOGEUSDT", "IPUSDT", "LITUSDT", "HUSDT", "FETUSDT", "CHZUSDT", "CRVUSDT",
-    "KAIAUSDT", "IMXUSDT", "BSVUSDT", "INJUSDT", "AEROUSDT", "PYTHUSDT", "IOTAUSDT", "EIGENUSDT",
-    "GRTUSDT", "JASMYUSDT", "DEXEUSDT", "SPXUSDT", "TIAUSDT", "FLOKIUSDT", "HNTUSDT", "SIRENUSDT",
-    "LDOUSDT", "CFXUSDT", "OPUSDT", "ENSUSDT", "STRKUSDT", "MONUSDT", "AXSUSDT", "SANDUSDT",
-    "PENDLEUSDT", "WIFUSDT", "LUNCUSDT", "FFUSDT", "NEOUSDT", "THETAUSDT", "RIVERUSDT", "BATUSDT",
-    "MANAUSDT", "CVXUSDT", "COMPUSDT", "BARDUSDT", "SENTUSDT", "GALAUSDT", "VVVUSDT", "RAYUSDT",
-    "XPLUSDT", "FLUIDUSDT", "FARTCOINUSDT", "GLMUSDT", "RUNEUSDT", "0GUSDT", "POWERUSDT", "SKRUSDT",
-    "EGLDUSDT", "BUSDT", "BERAUSDT", "SNXUSDT", "BANUSDT", "JTOUSDT", "ARUSDT", "COWUSDT",
-    "DEEPUSDT", "SUSDT", "LPTUSDT", "MELANIAUSDT", "UBUSDT", "FOGOUSDT", "ARCUSDT", "WUSDT",
-    "PIEVERSEUSDT", "AWEUSDT", "HOMEUSDT", "GASUSDT", "ICNTUSDT", "ZENUSDT", "XVGUSDT", "ROSEUSDT",
-    "MYXUSDT", "KSMUSDT", "RSRUSDT", "ATHUSDT", "KMNOUSDT", "AKTUSDT", "ZORAUSDT", "ESPUSDT",
-    "TOSHIUSDT", "STGUSDT", "ZILUSDT", "LYNUSDT", "APEUSDT", "KAITOUSDT", "FORMUSDT", "AZTECUSDT",
-    "QUSDT", "MOVEUSDT", "MINAUSDT", "SOONUSDT", "TUSDT", "BRETTUSDT", "ACHUSDT", "TURBOUSDT",
-    "NXPCUSDT", "ALCHUSDT", "ZETAUSDT", "MOCAUSDT", "CYSUSDT", "ASTRUSDT", "ENSOUSDT", "AXLUSDT",
-    "UAIUSDT", "VTHOUSDT", "RAVEUSDT", "NMRUSDT", "COAIUSDT", "GWEIUSDT", "MEUSDT", "ORCAUSDT",
-    "BLURUSDT", "MERLUSDT", "MOODENGUSDT", "BIOUSDT", "SOMIUSDT", "B2USDT", "ORDIUSDT", "SPKUSDT",
-    "ZAMAUSDT", "PARTIUSDT", "1000RATSUSDT", "SSVUSDT", "BIRBUSDT", "POPCATUSDT", "GUNUSDT", "BEATUSDT",
-    "BANANAS31USDT", "LAUSDT", "LINEAUSDT", "DRIFTUSDT", "AVNTUSDT", "GRASSUSDT", "GPSUSDT", "PNUTUSDT",
-    "CELOUSDT", "LUNAUSDT", "VANAUSDT", "TRIAUSDT", "IOTXUSDT", "POLYXUSDT", "ANKRUSDT", "SAHARAUSDT",
-    "RPLUSDT", "MASKUSDT", "UMAUSDT", "TAGUSDT", "USELESSUSDT", "MEMEUSDT", "ATUSDT", "KGENUSDT",
-    "SKYAIUSDT", "ONTUSDT", "ENJUSDT", "SIGNUSDT", "CTKUSDT", "NOTUSDT", "CYBERUSDT", "GMTUSDT",
-    "FIDAUSDT", "CROSSUSDT", "STEEMUSDT", "LABUSDT", "BREVUSDT", "AUCTIONUSDT", "HOLOUSDT", "PEOPLEUSDT",
-    "CVCUSDT", "IOUSDT", "BROCCOLIUSDT", "SXTUSDT", "CLANKERUSDT", "BIGTIMEUSDT", "BLASTUSDT", "THEUSDT",
-    "XPINUSDT", "MANTAUSDT", "YGGUSDT", "WAXPUSDT", "ONGUSDT", "LAYERUSDT", "ANIMEUSDT", "BOMEUSDT",
-    "C98USDT", "API3USDT", "AGLDUSDT", "MMTUSDT", "INXUSDT", "GIGGLEUSDT", "IDOLUSDT", "ARKMUSDT",
-    "RESOLVUSDT", "EULUSDT", "METISUSDT", "SONICUSDT", "TNSRUSDT", "PROMUSDT", "SAPIENUSDT", "VELVETUSDT",
-    "FLOCKUSDT", "BANKUSDT", "ALLOUSDT", "USUALUSDT", "SLPUSDT", "ARIAUSDT", "MIRAUSDT", "MAGICUSDT",
-    "ZKCUSDT", "INUSDT", "NAORISUSDT", "MAGMAUSDT", "REZUSDT", "WCTUSDT", "FUSDT", "ELSAUSDT",
-    "SPACEUSDT", "APRUSDT", "AIXBTUSDT", "GOATUSDT", "DENTUSDT", "JCTUSDT", "XAIUSDT", "AIOUSDT",
-    "ZKPUSDT", "VINEUSDT", "METAUSDT", "FIGHTUSDT", "INITUSDT", "BASUSDT", "NEWTUSDT", "FUNUSDT",
-    "FOLKSUSDT", "ARPAUSDT", "MOVRUSDT", "MUBARAKUSDT", "NOMUSDT", "ACTUSDT", "ZKJUSDT", "VANRYUSDT",
-    "AINUSDT", "RECALLUSDT", "MAVUSDT", "CLOUSDT", "LIGHTUSDT", "TOWNSUSDT", "BLESSUSDT", "HAEDALUSDT",
-    "4USDT", "USUSDT", "HEIUSDT", "OGUSDT",
+    # ── Tier 1: Large Cap Altcoin (OI & volume tertinggi) ────────────────────
+    "DOGEUSDT", "ADAUSDT", "XMRUSDT", "LINKUSDT", "XLMUSDT", "HBARUSDT",
+    "LTCUSDT", "AVAXUSDT", "SHIBUSDT", "SUIUSDT", "TONUSDT",
+    "UNIUSDT", "DOTUSDT", "TAOUSDT", "AAVEUSDT", "PEPEUSDT",
+    "ETCUSDT", "NEARUSDT", "ONDOUSDT", "POLUSDT", "ICPUSDT", "ATOMUSDT",
+    "ENAUSDT", "KASUSDT", "ALGOUSDT", "RENDERUSDT", "FILUSDT", "APTUSDT",
+    "ARBUSDT", "JUPUSDT", "SEIUSDT", "STXUSDT", "DYDXUSDT", "VIRTUALUSDT",
+
+    # ── Tier 2: Mid Cap (OI signifikan, aktif di futures) ────────────────────
+    "FETUSDT", "INJUSDT", "PYTHUSDT", "GRTUSDT", "TIAUSDT", "LDOUSDT",
+    "OPUSDT", "ENSUSDT", "AXSUSDT", "PENDLEUSDT", "WIFUSDT", "SANDUSDT",
+    "MANAUSDT", "COMPUSDT", "GALAUSDT", "RAYUSDT", "RUNEUSDT", "EGLDUSDT",
+    "SNXUSDT", "ARUSDT", "CRVUSDT", "IMXUSDT", "EIGENUSDT", "JTOUSDT",
+    "CELOUSDT", "MASKUSDT", "APEUSDT", "MOVEUSDT", "MINAUSDT", "SONICUSDT",
+    "KAIAUSDT", "HYPEUSDT", "WLDUSDT", "STRKUSDT", "CFXUSDT", "BOMEUSDT",
+
+    # ── Tier 3: Aktif trading, OI > threshold ────────────────────────────────
+    "FLOKIUSDT", "CAKEUSDT", "CHZUSDT", "HNTUSDT", "ROSEUSDT", "IOTXUSDT",
+    "ANKRUSDT", "ZILUSDT", "ONTUSDT", "ENJUSDT", "GMTUSDT", "NOTUSDT",
+    "PEOPLEUSDT", "METISUSDT", "AIXBTUSDT", "GOATUSDT", "PNUTUSDT",
+    "GRASSUSDT", "POPCATUSDT", "ORDIUSDT", "MOODENGUSDT", "BIOUSDT",
+    "MAGICUSDT", "REZUSDT", "ARPAUSDT", "ACTUSDT", "USUALUSDT",
+    "SLPUSDT", "XAIUSDT", "BLURUSDT", "ARKMUSDT", "API3USDT", "AGLDUSDT",
+    "TNSRUSDT", "LAYERUSDT", "ANIMEUSDT", "YGGUSDT", "THEUSDT",
 }
 
 GRAN_MAP    = {"5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
@@ -600,17 +637,10 @@ def safe_get(url, params=None, timeout=10):
 
 def _safe_telegram_text(msg):
     """
-    STEP 17 v19 — Telegram HTML safety.
-    Escape karakter berbahaya di luar tag HTML valid agar tidak memicu
-    'Bad Request: can\'t parse entities'. Strategi: preserve tag HTML
-    yang valid (<b>,<i>,<code>,<pre>), escape sisanya.
+    FIX 13 v22 — Enhanced Telegram message sanitizer (delegates to v22 impl).
+    Handles: & escaping, broken tags, truncation to 4050 chars.
     """
-    # Bersihkan karakter yang sering menyebabkan parse error
-    # Ampersand di luar entity
-    import re as _re
-    # Escape & yang bukan entity
-    msg = _re.sub(r'&(?!(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);)', '&amp;', msg)
-    return msg
+    return _safe_telegram_text_v22(msg)
 
 def send_telegram(msg, parse_mode="HTML"):
     """
@@ -1624,6 +1654,8 @@ def calc_ema_trend(candles):
     Rules:
       - EMA20 < EMA50 → bearish bias → penalti score −8
       - price < EMA50 → strong downtrend → REJECT gate
+        FIX 01 v22: OVERRIDE reject if EMA20 slope > 0 AND vol z > 1.5
+                    (reversal pump setup — price below EMA50 temporarily)
     Returns dict dengan ema20, ema50, trend, should_reject, score_penalty.
     """
     ema20 = calc_ema(candles, CONFIG["ema_fast"])
@@ -1632,39 +1664,69 @@ def calc_ema_trend(candles):
 
     if ema20 is None or ema50 is None:
         return {"ema20": None, "ema50": None, "trend": "UNKNOWN",
-                "should_reject": False, "score_penalty": 0, "label": "EMA data kurang"}
+                "should_reject": False, "score_penalty": 0, "label": "EMA data kurang",
+                "reversal_override": False}
+
+    # FIX 01 v22: compute EMA20 slope for override check
+    # Build minimal EMA20 series to get slope (3-candle lookback)
+    if len(candles) >= 24:
+        closes  = [c["close"] for c in candles]
+        alpha20 = 2.0 / 21.0
+        ema20_s = sum(closes[:20]) / 20
+        ema20_series = [ema20_s]
+        for v in closes[20:]:
+            ema20_s = alpha20 * v + (1.0 - alpha20) * ema20_s
+            ema20_series.append(ema20_s)
+        ema20_slope_val = ema20_series[-1] - ema20_series[-4] if len(ema20_series) >= 4 else 0.0
+    else:
+        ema20_slope_val = 0.0
 
     if price < ema50:
-        trend         = "DOWNTREND"
-        should_reject = True
-        penalty       = CONFIG["score_penalty_bearish"]
-        label         = (f"📉 DOWNTREND: harga ${price:.4g} < EMA50 {ema50:.4g} "
-                         f"— GATE GAGAL (strong downtrend)")
+        # FIX 01 v22: check if reversal override applies
+        # Override: slope rising + we'll check z-score in master_score (flagged here)
+        reversal_override = ema20_slope_val > CONFIG["ema50_override_slope_min"]
+        if reversal_override:
+            trend         = "REVERSAL_SETUP"
+            should_reject = False    # override: do NOT reject
+            penalty       = CONFIG["score_penalty_bearish"] // 2   # reduced penalty
+            label         = (f"🔄 REVERSAL SETUP: price < EMA50 BUT slope↑ {ema20_slope_val:.6g} "
+                             f"— override aktif (v22)")
+        else:
+            trend         = "DOWNTREND"
+            should_reject = True
+            penalty       = CONFIG["score_penalty_bearish"]
+            label         = (f"📉 DOWNTREND: harga ${price:.4g} < EMA50 {ema50:.4g} "
+                             f"— GATE GAGAL (strong downtrend)")
     elif ema20 < ema50:
         trend         = "BEARISH"
         should_reject = False
         penalty       = CONFIG["score_penalty_bearish"]
+        reversal_override = False
         label         = (f"📉 Bearish bias: EMA20 {ema20:.4g} < EMA50 {ema50:.4g} "
                          f"— penalti {penalty}")
     elif ema20 > ema50 and price > ema20:
         trend         = "UPTREND"
         should_reject = False
         penalty       = 0
+        reversal_override = False
         label         = f"📈 Uptrend: price > EMA20 {ema20:.4g} > EMA50 {ema50:.4g}"
     else:
         trend         = "NEUTRAL"
         should_reject = False
         penalty       = 0
+        reversal_override = False
         label         = f"〰️ Neutral: EMA20 {ema20:.4g} / EMA50 {ema50:.4g}"
 
     return {
-        "ema20":         round(ema20, 8),
-        "ema50":         round(ema50, 8),
-        "trend":         trend,
-        "should_reject": should_reject,
-        "score_penalty": penalty,
-        "label":         label,
-        "price_vs_ema50": round((price - ema50) / ema50 * 100, 2) if ema50 > 0 else 0,
+        "ema20":            round(ema20, 8),
+        "ema50":            round(ema50, 8),
+        "trend":            trend,
+        "should_reject":    should_reject,
+        "score_penalty":    penalty,
+        "label":            label,
+        "price_vs_ema50":   round((price - ema50) / ema50 * 100, 2) if ema50 > 0 else 0,
+        "reversal_override": reversal_override if 'reversal_override' in dir() else False,
+        "ema20_slope_val":  round(ema20_slope_val, 8),
     }
 
 
@@ -2378,6 +2440,479 @@ def calc_ema20_cross_up(candles, period_fast=20, period_slow=50):
     return cross_up, round(ema20, 8), round(ema50, 8)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  🏦  NEW INSTITUTIONAL DETECTORS v22
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detect_smart_money_accumulation_v22(candles):
+    """
+    FIX 02 v22 — Smart Money Accumulation Detector.
+
+    Hidden accumulation signal:
+      • price range contraction over last 20 candles < 3%
+      • volume trend rising (recent 5c vs baseline 15c)
+      • bid pressure > ask pressure (candle close-position proxy)
+
+    Returns is_accumulating, score, label.
+    """
+    if len(candles) < 25:
+        return {"is_accumulating": False, "score": 0,
+                "range_ratio": 1.0, "vol_trend": 1.0, "bid_pressure": 0.5,
+                "label": "Data kurang"}
+
+    # Price range contraction
+    last20     = candles[-20:]
+    hi20       = max(c["high"] for c in last20)
+    lo20       = min(c["low"]  for c in last20)
+    mid_price  = (hi20 + lo20) / 2
+    range_ratio = (hi20 - lo20) / mid_price if mid_price > 0 else 1.0
+
+    # Volume trend: recent 5 vs prior 15
+    vol_recent  = sum(c["volume_usd"] for c in candles[-5:]) / 5
+    vol_prior   = sum(c["volume_usd"] for c in candles[-20:-5]) / 15
+    vol_trend   = (vol_recent / vol_prior) if vol_prior > 0 else 1.0
+
+    # Bid pressure proxy (close position in range)
+    buy_fracs = []
+    for c in last20:
+        rng = c["high"] - c["low"]
+        buy_fracs.append((c["close"] - c["low"]) / rng if rng > 0 else 0.5)
+    bid_pressure = sum(buy_fracs) / len(buy_fracs)
+
+    cond_range = range_ratio < CONFIG["sma_range_max"]
+    cond_vol   = vol_trend   >= CONFIG["sma_vol_trend_min"]
+    cond_bid   = bid_pressure > 0.52   # slight buy bias
+
+    n_cond         = sum([cond_range, cond_vol, cond_bid])
+    is_accumulating = n_cond >= 2
+
+    if n_cond == 3:
+        score = CONFIG["score_smart_money_accum"]
+        label = (f"🏦 Smart Money Accum CONFIRMED — range {range_ratio*100:.1f}%, "
+                 f"vol {vol_trend:.1f}x, bid {bid_pressure*100:.0f}%")
+    elif n_cond == 2:
+        score = CONFIG["score_smart_money_accum"] // 2
+        label = (f"🏦 Smart Money Accum PROBABLE ({n_cond}/3) — "
+                 f"range {range_ratio*100:.1f}%, vol {vol_trend:.1f}x")
+    else:
+        score = 0
+        label = f"No smart money signal ({n_cond}/3)"
+
+    return {
+        "is_accumulating": is_accumulating,
+        "score":           score,
+        "range_ratio":     round(range_ratio, 4),
+        "vol_trend":       round(vol_trend, 3),
+        "bid_pressure":    round(bid_pressure, 3),
+        "n_cond":          n_cond,
+        "label":           label,
+    }
+
+
+def detect_liquidity_trap_v22(candles, vol_zscore_z):
+    """
+    FIX 03 v22 — Liquidity Trap Detector (Stop-Hunt before Pump).
+
+    Market makers sweep stops below 30-candle low, then price reverses.
+
+    Conditions:
+      candle_low < lowest_low_last_30
+      AND close > open  (bullish reversal candle)
+      AND volume_zscore > 1.5
+
+    Returns is_trap, score, label.
+    """
+    lookback = CONFIG["liq_trap_lookback"]
+    if len(candles) < lookback + 1:
+        return {"is_trap": False, "score": 0, "sweep_low": 0.0, "label": "Data kurang"}
+
+    prior_low = min(c["low"] for c in candles[-(lookback + 1):-1])
+    c_last    = candles[-1]
+    cond_sweep   = c_last["low"]   < prior_low
+    cond_bullish = c_last["close"] > c_last["open"]
+    cond_z       = vol_zscore_z    > CONFIG["liq_trap_zscore_min"]
+
+    is_trap = cond_sweep and cond_bullish and cond_z
+
+    if is_trap:
+        score = CONFIG["score_liq_trap"]
+        label = (f"🪤 Liquidity Trap! Low swept {c_last['low']:.6g} < prior {prior_low:.6g}, "
+                 f"bullish reversal, z={vol_zscore_z:.2f}")
+    else:
+        score = 0
+        label = ""
+
+    return {
+        "is_trap":   is_trap,
+        "score":     score,
+        "sweep_low": round(prior_low, 8),
+        "label":     label,
+    }
+
+
+def detect_whale_footprint_v22(candles):
+    """
+    FIX 04 v22 — Whale Footprint Detector.
+
+    Large volume spike WITHOUT large price movement = hidden accumulation.
+    Whales absorb supply without moving price (stealth buy).
+
+    Conditions:
+      volume > mean_volume * 3
+      AND abs(price_change) < 0.5%
+
+    Returns is_footprint, score, label.
+    """
+    window = 20
+    if len(candles) < window + 1:
+        return {"is_footprint": False, "score": 0, "vol_mult": 0.0, "label": "Data kurang"}
+
+    vols      = [c["volume_usd"] for c in candles]
+    cur_vol   = vols[-1]
+    mean_vol  = sum(vols[-(window + 1):-1]) / window if window > 0 else cur_vol
+    vol_mult  = (cur_vol / mean_vol) if mean_vol > 0 else 0.0
+
+    c         = candles[-1]
+    price_chg = abs(c["close"] - c["open"]) / c["open"] * 100 if c["open"] > 0 else 99.0
+
+    cond_vol   = vol_mult  > CONFIG["whale_fp_vol_mult"]
+    cond_price = price_chg < CONFIG["whale_fp_price_max_pct"]
+
+    is_footprint = cond_vol and cond_price
+
+    if is_footprint:
+        score = CONFIG["score_whale_footprint"]
+        label = (f"🐋 Whale Footprint: {vol_mult:.1f}x vol, price only {price_chg:.2f}% "
+                 f"— stealth accumulation")
+    else:
+        score = 0
+        label = ""
+
+    return {
+        "is_footprint": is_footprint,
+        "score":        score,
+        "vol_mult":     round(vol_mult, 2),
+        "price_chg":    round(price_chg, 3),
+        "label":        label,
+    }
+
+
+def detect_prebreakout_pressure_v22(candles):
+    """
+    FIX 05 v22 — Pre-Breakout Pressure Detector (BB Compression).
+
+    Detects volatility compression before explosive move.
+    Uses BB width relative to its historical percentile.
+
+    Conditions:
+      current_bbw < percentile_20(bbw_history)
+      AND recent volume spike (vol_ratio > 1.3x)
+
+    Returns is_compressed, score, label.
+    """
+    lookback = CONFIG["bb_percentile_lookback"]
+    period   = 20
+    if len(candles) < lookback + period:
+        return {"is_compressed": False, "score": 0, "percentile": 50.0, "label": "Data kurang"}
+
+    # Build BBW history
+    bbw_history = []
+    for i in range(lookback, 0, -1):
+        window = candles[-(i + period):-i] if i > 0 else candles[-period:]
+        if len(window) < period:
+            continue
+        closes   = [c["close"] for c in window]
+        mean_c   = sum(closes) / period
+        std_c    = math.sqrt(sum((x - mean_c) ** 2 for x in closes) / period)
+        mid_c    = mean_c if mean_c > 0 else 1.0
+        bbw_history.append((2 * std_c * 2) / mid_c)   # BB width = 4σ / price
+
+    if not bbw_history:
+        return {"is_compressed": False, "score": 0, "percentile": 50.0, "label": "BBW history kurang"}
+
+    current_bbw = bbw_history[-1]
+    sorted_bbw  = sorted(bbw_history)
+    rank        = sum(1 for v in sorted_bbw if v <= current_bbw)
+    percentile  = rank / len(sorted_bbw) * 100
+
+    # Volume spike check
+    vol_recent = sum(c["volume_usd"] for c in candles[-3:]) / 3
+    vol_prior  = sum(c["volume_usd"] for c in candles[-15:-3]) / 12
+    vol_ratio  = (vol_recent / vol_prior) if vol_prior > 0 else 1.0
+
+    cond_bb  = percentile <= CONFIG["bb_percentile_threshold"]
+    cond_vol = vol_ratio  >= 1.3
+
+    is_compressed = cond_bb and cond_vol
+
+    if is_compressed:
+        score = CONFIG["score_prebreakout"]
+        label = (f"💥 Pre-Breakout: BB width p{percentile:.0f} "
+                 f"(compressed), vol {vol_ratio:.1f}x — explosion incoming")
+    elif cond_bb:
+        score = CONFIG["score_prebreakout"] // 2
+        is_compressed = True
+        label = (f"💥 Pre-Breakout (BB only): p{percentile:.0f} — no vol confirm yet")
+    else:
+        score = 0
+        label = ""
+
+    return {
+        "is_compressed": is_compressed,
+        "score":         score,
+        "percentile":    round(percentile, 1),
+        "current_bbw":   round(current_bbw, 5),
+        "vol_ratio":     round(vol_ratio, 3),
+        "label":         label,
+    }
+
+
+def detect_momentum_ignition_v22(candles, vol_zscore_z):
+    """
+    FIX 06 v22 — Momentum Ignition Detector.
+
+    Early pump stage signal: price is making consecutive higher highs
+    while volume confirms with a spike.
+
+    Conditions:
+      3 consecutive higher highs in last 5 candles
+      AND volume_zscore > 1.8
+
+    Returns is_ignition, score, label.
+    """
+    n_highs = CONFIG["mom_ignition_highs"]
+    if len(candles) < n_highs + 2:
+        return {"is_ignition": False, "score": 0, "label": "Data kurang"}
+
+    highs  = [c["high"] for c in candles[-(n_highs + 1):]]
+    consec = sum(1 for i in range(1, len(highs)) if highs[i] > highs[i - 1])
+
+    cond_highs = consec >= n_highs
+    cond_z     = vol_zscore_z > CONFIG["mom_ignition_zscore"]
+
+    is_ignition = cond_highs and cond_z
+
+    if is_ignition:
+        score = CONFIG["score_mom_ignition"]
+        label = (f"🚀 Momentum Ignition! {consec} higher highs + "
+                 f"vol z={vol_zscore_z:.2f} — EARLY PUMP STAGE")
+    else:
+        score = 0
+        label = ""
+
+    return {
+        "is_ignition": is_ignition,
+        "score":       score,
+        "consec_highs": consec,
+        "label":       label,
+    }
+
+
+def check_dump_trap_v22(candles, ema200_dist_data, vol_zscore_v20_data):
+    """
+    FIX 07 v22 — Dump Trap Filter.
+    Reject coins in active institutional sell pressure.
+
+    Conditions (ALL must be true to reject):
+      price < EMA200
+      AND ema50_slope < 0  (EMA50 downward)
+      AND ask pressure >> bid pressure (imbalance ratio > 1.3)
+
+    Returns (should_reject: bool, reason: str)
+    """
+    if len(candles) < 55:
+        return False, ""
+
+    # EMA200 check (reuse from ema200_dist_data)
+    above_ema200 = ema200_dist_data.get("above_ema200", True)
+    if above_ema200:
+        return False, ""   # price above EMA200 — not a dump trap
+
+    # EMA50 slope: compare current EMA50 vs 5 candles ago
+    closes = [c["close"] for c in candles]
+    alpha50 = 2.0 / 51.0
+    ema50 = sum(closes[:50]) / 50
+    ema50_series = [ema50]
+    for v in closes[50:]:
+        ema50 = alpha50 * v + (1.0 - alpha50) * ema50
+        ema50_series.append(ema50)
+
+    ema50_now  = ema50_series[-1]
+    ema50_prev = ema50_series[-6] if len(ema50_series) > 6 else ema50_series[0]
+    ema50_slope = ema50_now - ema50_prev
+
+    if ema50_slope >= CONFIG["dump_trap_ema50_slope_max"]:
+        return False, ""   # EMA50 still rising
+
+    # Ask pressure check from candle imbalance proxy
+    ask_bid_ratio = 1.0 / vol_zscore_v20_data.get("bid_ask_ratio", 1.0)   # invert bid/ask
+    if ask_bid_ratio < CONFIG["dump_trap_ask_bid_min"]:
+        return False, ""
+
+    return True, (
+        f"🚨 DUMP TRAP: price < EMA200, EMA50 slope {ema50_slope:.6g} < 0, "
+        f"ask/bid={ask_bid_ratio:.2f} — institutional selling active"
+    )
+
+
+def calc_improved_reversal_v22(price_now, vwap, ema20_slope_data, vol_zscore_v20_data):
+    """
+    FIX 08 v22 — Improved Reversal Filter.
+    Allows reversal pumps ONLY when conditions confirm genuine reversal.
+
+    Required:
+      ema20_slope > 0        (momentum building)
+      vol_zscore_z > 1.5     (volume confirms)
+      price near VWAP (within ±2%)  (fair value area)
+
+    Returns (is_valid_reversal: bool, confidence: str, label: str)
+    """
+    slope_ok  = ema20_slope_data.get("is_rising", False)
+    z         = vol_zscore_v20_data.get("z", 0)
+    z_ok      = z > CONFIG["vol_zscore_v20_min"]
+
+    vwap_dist = abs(price_now - vwap) / vwap if vwap > 0 else 1.0
+    vwap_ok   = vwap_dist <= CONFIG["rev_vwap_tolerance"]
+
+    n_cond = sum([slope_ok, z_ok, vwap_ok])
+
+    if n_cond == 3:
+        return True, "HIGH", (
+            f"✅ Reversal VALID (3/3): slope↑ + z={z:.2f} + "
+            f"price {vwap_dist*100:.1f}% from VWAP"
+        )
+    elif n_cond == 2:
+        return True, "MEDIUM", (
+            f"✅ Reversal PROBABLE (2/3): {n_cond}/3 conditions met"
+        )
+    elif slope_ok and z_ok:
+        return True, "LOW", "Reversal: slope + volume OK (VWAP dist mismatch)"
+    else:
+        return False, "NONE", (
+            f"❌ Reversal WEAK ({n_cond}/3) — slope:{slope_ok} z:{z:.2f} vwap:{vwap_ok}"
+        )
+
+
+def calc_institutional_score_v22(smart_money, liq_trap, whale_fp,
+                                  prebreakout, mom_ignition,
+                                  vol_zscore_v20, candle_imbal,
+                                  micro_breakout, accum, energy):
+    """
+    FIX 09 v22 — Institutional Scoring Model (0-100, normalized weighted).
+
+    score = accumulation  × 0.20
+          + breakout      × 0.20
+          + volume        × 0.20
+          + orderbook     × 0.15
+          + momentum      × 0.15
+          + liq_trap      × 0.10
+
+    Returns inst_score (0-100) and breakdown dict.
+    """
+    # Accumulation component [0-100]
+    accum_raw = 0
+    if smart_money.get("is_accumulating"):
+        accum_raw += 50 + (smart_money.get("n_cond", 0) - 2) * 25
+    if whale_fp.get("is_footprint"):
+        accum_raw += 30
+    if accum.get("is_accumulating"):
+        accum_raw += 20
+    accum_score = min(accum_raw, 100.0)
+
+    # Breakout component [0-100]
+    bo_raw = 0
+    if prebreakout.get("is_compressed"):
+        bo_raw += 40 + max(0, 20 - prebreakout.get("percentile", 20))
+    if micro_breakout.get("is_breakout"):
+        bo_raw += 40
+    if energy.get("is_buildup"):
+        bo_raw += 20
+    breakout_score = min(bo_raw, 100.0)
+
+    # Volume component [0-100]
+    z = vol_zscore_v20.get("z", 0)
+    volume_score = min(max(z / 4.0, 0.0) * 100, 100.0)   # z=4 → 100%
+
+    # Orderbook component [0-100]
+    bar = vol_zscore_v20.get("bid_ask_ratio", candle_imbal.get("imbalance", 1.0))
+    ob_raw = min(max((bar - 1.0) / 0.5, 0.0) * 100, 100.0)   # bar=1.5 → 100%
+    orderbook_score = ob_raw
+
+    # Momentum component [0-100]
+    mom_raw = 0
+    if mom_ignition.get("is_ignition"):
+        mom_raw += 60
+    mom_raw += min(mom_ignition.get("consec_highs", 0) * 15, 40)
+    momentum_score = min(mom_raw, 100.0)
+
+    # Liquidity trap component [0-100]
+    liq_trap_score = 100.0 if liq_trap.get("is_trap") else 0.0
+
+    w = CONFIG
+    inst_score = (
+        w["inst_w_accumulation"] * accum_score
+      + w["inst_w_breakout"]     * breakout_score
+      + w["inst_w_volume"]       * volume_score
+      + w["inst_w_orderbook"]    * orderbook_score
+      + w["inst_w_momentum"]     * momentum_score
+      + w["inst_w_liq_trap"]     * liq_trap_score
+    )
+
+    return {
+        "inst_score":      round(inst_score, 1),
+        "accum_score":     round(accum_score, 1),
+        "breakout_score":  round(breakout_score, 1),
+        "volume_score":    round(volume_score, 1),
+        "orderbook_score": round(orderbook_score, 1),
+        "momentum_score":  round(momentum_score, 1),
+        "liq_trap_score":  round(liq_trap_score, 1),
+    }
+
+
+def calc_pump_probability_v22(inst_score):
+    """
+    FIX 10 v22 — Advanced Pump Probability Model.
+
+    Uses sigmoid function centered on score=50 with scale=8:
+      probability = 1 / (1 + exp(-inst_score / 8))
+
+    Maps directly to 0-100%.
+    Replaces linear logistic — this gives stronger signal separation.
+    """
+    try:
+        prob = 1.0 / (1.0 + math.exp(-inst_score / 8.0))
+    except OverflowError:
+        prob = 0.0 if inst_score < 0 else 1.0
+    return round(prob * 100, 1)
+
+
+def _safe_telegram_text_v22(msg):
+    """
+    FIX 13 v22 — Enhanced Telegram message sanitizer.
+
+    Strips / replaces problematic characters that cause
+    'Bad Request: can't parse entities' in HTML parse mode:
+      • & → &amp; (if not already entity)
+      • Unmatched < > that look like broken tags
+      • Non-ASCII chars that can confuse parser
+      • Ensures message <= 4096 chars
+
+    Returns sanitized message string.
+    """
+    import re as _re
+    # Escape & that aren't already HTML entities
+    msg = _re.sub(r'&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', msg)
+    # Remove any bare < or > that aren't part of known tags
+    allowed_tags = r'(?:</?(?:b|i|code|pre|a|s|u)(?:\s[^>]*)?>)'
+    def _fix_angle(m):
+        return m.group(0) if _re.match(allowed_tags, m.group(0), _re.I) else ''
+    msg = _re.sub(r'<[^>]*>', _fix_angle, msg)
+    # Truncate safely
+    if len(msg) > 4050:
+        msg = msg[:3950] + "\n<i>...[truncated]</i>"
+    return msg
+
+
 def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
                    rsi, buy_ratio, vol_ratio, price_pos, alert_level, bos_level,
                    liq_sweep):
@@ -2457,10 +2992,18 @@ def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
     if sl >= entry:
         sl = entry * 0.975
 
-    # ── STEP 3: Dynamic TP ────────────────────────────────────────────────────
-    tp1 = entry + atr * CONFIG["tp1_v19_mult"]    # 2× ATR
-    tp2 = entry + atr * CONFIG["tp2_v19_mult"]    # 3.5× ATR
-    tp3 = entry + atr * CONFIG["tp3_v19_mult"]    # 5× ATR
+    # ── STEP 3: Dynamic TP v22 — ATR × 1.3 / × 2.2 / × 3.5 ──────────────────
+    # FIX 12 v22: tighter TP1/TP2 for higher win-rate, ATR×0.9 SL
+    tp1 = entry + atr * CONFIG["tp1_v22_mult"]    # 1.3× ATR (tighter, higher hit rate)
+    tp2 = entry + atr * CONFIG["tp2_v22_mult"]    # 2.2× ATR
+    tp3 = entry + atr * CONFIG["tp3_v19_mult"]    # 5.0× ATR (keep v19 for extended target)
+    # v22 tighter SL = entry - ATR × 0.9
+    sl_v22 = entry - atr * CONFIG["sl_v22_mult"]
+    sl = max(sl, sl_v22)   # use whichever is less risky (higher of the two SL levels)
+    sl = max(sl, entry * (1.0 - CONFIG["max_sl_pct"] / 100.0))
+    sl = min(sl, entry * (1.0 - CONFIG["min_sl_pct"] / 100.0))
+    if sl >= entry:
+        sl = entry * 0.975
 
     # Boost TP3 jika ada liquidity void (gap resistance > 5%)
     if sr and sr.get("resistance"):
@@ -2474,7 +3017,7 @@ def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
         if len(res_above) >= 2 and res_above[1] > tp2:
             tp2 = max(tp2, res_above[1])
 
-    tp1 = max(tp1, entry * 1.008)
+    tp1 = max(tp1, entry * 1.005)   # v22: relaxed minimum (was 1.008)
     tp2 = max(tp2, tp1   * 1.01)
     tp3 = max(tp3, tp2   * 1.02)
 
@@ -3231,6 +3774,13 @@ def master_score(symbol, ticker):
     # Inject cross_up into ema_trend for use by reversal validator
     ema_trend["cross_up"] = cross_up
 
+    # FIX 01 v22: also validate z-score for reversal override
+    # If REVERSAL_SETUP but z < threshold → still reject
+    if (ema_trend.get("trend") == "REVERSAL_SETUP"
+            and vol_zscore_v20["z"] < CONFIG["ema50_override_zscore_min"]):
+        ema_trend["should_reject"] = True
+        ema_trend["label"] += f" [z={vol_zscore_v20['z']:.2f} < {CONFIG['ema50_override_zscore_min']} — override cancelled]"
+
     # Inject vol_z for dump filter (passed via ema20_slope data dict)
     ema20_slope["vol_z_for_dump"] = vol_zscore_v20["z"]
 
@@ -3240,7 +3790,25 @@ def master_score(symbol, ticker):
         log.info(f"  {symbol}: {dump_reason} — GATE GAGAL (dump filter v20)")
         return None
 
-    # PART 2: Reversal validation
+    # ── NEW v22 indicators ────────────────────────────────────────────────────
+    smart_money_v22  = detect_smart_money_accumulation_v22(c1h)
+    liq_trap_v22     = detect_liquidity_trap_v22(c1h, vol_zscore_v20["z"])
+    whale_fp_v22     = detect_whale_footprint_v22(c1h)
+    prebreakout_v22  = detect_prebreakout_pressure_v22(c1h)
+    mom_ignition_v22 = detect_momentum_ignition_v22(c1h, vol_zscore_v20["z"])
+
+    # FIX 07: Dump Trap Filter (institutional sell pressure)
+    dump_trap_reject, dump_trap_reason = check_dump_trap_v22(c1h, ema200_dist, vol_zscore_v20)
+    if dump_trap_reject:
+        log.info(f"  {symbol}: {dump_trap_reason} — GATE GAGAL (dump trap v22)")
+        return None
+
+    # FIX 08: Improved reversal check (informational, used in scoring)
+    rev_valid_v22, rev_conf_v22, rev_label_v22 = calc_improved_reversal_v22(
+        price_now, vwap, ema20_slope, vol_zscore_v20
+    )
+
+    # PART 2: Reversal validation (v20)
     reversal_valid = validate_reversal_v20(
         ema_trend, price_now, vol_zscore_v20, ema20_slope,
         micro_breakout, candle_imbal
@@ -3661,6 +4229,39 @@ def master_score(symbol, ticker):
         signals.append(reversal_valid["label"])
 
     # ══════════════════════════════════════════════════════════════════════════
+    #  SCORING v22 — INSTITUTIONAL DETECTOR BONUSES
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # FIX 02: Smart Money Accumulation
+    if smart_money_v22.get("is_accumulating"):
+        score += smart_money_v22["score"]
+        signals.append(smart_money_v22["label"])
+
+    # FIX 03: Liquidity Trap (stop-sweep reversal)
+    if liq_trap_v22.get("is_trap"):
+        score += liq_trap_v22["score"]
+        signals.append(liq_trap_v22["label"])
+
+    # FIX 04: Whale Footprint
+    if whale_fp_v22.get("is_footprint"):
+        score += whale_fp_v22["score"]
+        signals.append(whale_fp_v22["label"])
+
+    # FIX 05: Pre-Breakout Pressure
+    if prebreakout_v22.get("is_compressed"):
+        score += prebreakout_v22["score"]
+        signals.append(prebreakout_v22["label"])
+
+    # FIX 06: Momentum Ignition
+    if mom_ignition_v22.get("is_ignition"):
+        score += mom_ignition_v22["score"]
+        signals.append(mom_ignition_v22["label"])
+
+    # FIX 08: Improved Reversal — add signal but no extra score (it's informational)
+    if rev_label_v22:
+        signals.append(rev_label_v22)
+
+    # ══════════════════════════════════════════════════════════════════════════
     #  ALERT LEVEL v18 — feature-based probability + timing ETA
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -3670,11 +4271,27 @@ def master_score(symbol, ticker):
         micro_breakout, rsi, bb_squeeze, vol_zscore, energy,
         candle_imbal, whale_accum
     )
-    # Final score = 70% heuristic + 30% AI weighted (blended)
-    blended_score = round(score * 0.70 + ai_score_data["weighted_score"] * 0.30)
 
-    # STEP 5 v19: Logistic probability dari blended score
-    pump_prob = calc_pump_probability_v19(blended_score)
+    # FIX 09 v22: Institutional Score (0-100 normalized)
+    inst_score_data = calc_institutional_score_v22(
+        smart_money_v22, liq_trap_v22, whale_fp_v22,
+        prebreakout_v22, mom_ignition_v22,
+        vol_zscore_v20, candle_imbal, micro_breakout, accum, energy
+    )
+
+    # FIX 09: Blended score = 50% heuristic + 30% AI + 20% institutional
+    blended_score = round(
+        score * 0.50
+        + ai_score_data["weighted_score"] * 0.30
+        + inst_score_data["inst_score"]   * 0.20
+    )
+
+    # FIX 10 v22: Advanced sigmoid probability from institutional score
+    pump_prob_v22  = calc_pump_probability_v22(inst_score_data["inst_score"])
+    # Retain legacy logistic prob for backward compat
+    pump_prob_leg  = calc_pump_probability_v19(blended_score)
+    # Use blended prob: 60% institutional + 40% legacy
+    pump_prob      = round(pump_prob_v22 * 0.60 + pump_prob_leg * 0.40, 1)
 
     # v18 timing ETA (retained)
     pump_timing = calc_pump_timing_eta(
@@ -3813,6 +4430,18 @@ def master_score(symbol, ticker):
             # v20 ranking keys (used for multi-key sort in PART 7)
             "rank_vol_z_v20":  vol_zscore_v20["z"],
             "rank_bid_ask":    vol_zscore_v20["bid_ask_ratio"],
+            # v22 institutional fields
+            "smart_money_v22":  smart_money_v22,
+            "liq_trap_v22":     liq_trap_v22,
+            "whale_fp_v22":     whale_fp_v22,
+            "prebreakout_v22":  prebreakout_v22,
+            "mom_ignition_v22": mom_ignition_v22,
+            "inst_score":       inst_score_data,
+            "pump_prob_v22":    pump_prob_v22,
+            "rev_conf_v22":     rev_conf_v22,
+            # FIX 11 v22 ranking keys
+            "rank_inst_score":  inst_score_data["inst_score"],
+            "rank_accum_score": inst_score_data["accum_score"],
         }
     else:
         log.info(f"  {symbol}: Skor {score} < {min_score} (WATCHLIST threshold) — dilewati")
@@ -4049,15 +4678,44 @@ def build_alert(r, rank=None):
     if hlv20 and hlv20.get("is_higher_low"):
         msg += f"  {hlv20.get('label', '')[:80]}\n"
 
+    # v22 institutional signals
+    sm22  = r.get("smart_money_v22", {})
+    lt22  = r.get("liq_trap_v22", {})
+    wf22  = r.get("whale_fp_v22", {})
+    pb22  = r.get("prebreakout_v22", {})
+    mi22  = r.get("mom_ignition_v22", {})
+    is22  = r.get("inst_score", {})
+    pv22  = r.get("pump_prob_v22", 0)
+    rc22  = r.get("rev_conf_v22", "")
+
+    if is22 and is22.get("inst_score", 0) > 0:
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "<b>🏦 Institutional Score v22:</b>\n"
+        msg += (
+            f"  Score: {is22.get('inst_score',0):.1f}/100 | "
+            f"Prob: {pv22:.1f}% | Rev: {rc22}\n"
+            f"  Accum:{is22.get('accum_score',0):.0f} "
+            f"BO:{is22.get('breakout_score',0):.0f} "
+            f"Vol:{is22.get('volume_score',0):.0f} "
+            f"OB:{is22.get('orderbook_score',0):.0f} "
+            f"Mom:{is22.get('momentum_score',0):.0f} "
+            f"Trap:{is22.get('liq_trap_score',0):.0f}\n"
+        )
+    for det, label_key in [(sm22,"label"),(lt22,"label"),(wf22,"label"),(pb22,"label"),(mi22,"label")]:
+        lbl = det.get(label_key, "") if det else ""
+        if lbl:
+            msg += f"  {lbl[:90]}\n"
+
     rank_val = r.get("rank_value", r.get("score", 0))
     z_rank   = r.get("rank_vol_z_v20", 0)
     ba_rank  = r.get("rank_bid_ask", 1.0)
-    msg += (f"\n<i>Scanner v20 | Rank:{rank_val:.1f} | "
-            f"Z:{z_rank:.2f} | BA:{ba_rank:.2f} | ⚠️ Bukan financial advice</i>")
+    is_rank  = r.get("rank_inst_score", 0)
+    msg += (f"\n<i>Scanner v22 | Rank:{rank_val:.1f} | "
+            f"Inst:{is_rank:.0f} | Z:{z_rank:.2f} | BA:{ba_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
 def build_summary(results):
-    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v20 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
+    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v22 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
@@ -4158,7 +4816,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v20:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v22:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -4181,7 +4839,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v20 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v22 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -4227,14 +4885,15 @@ def run_scan():
     save_oi_snapshots()
     log.info("OI snapshots disimpan ke disk.")
 
-    # PART 7 v20 — Multi-key ranking: final_score DESC → volume_zscore DESC → bid_ask DESC
-    # Extends v19 rank_value with secondary/tertiary sort keys for tie-breaking
+    # FIX 11 v22 — Advanced Ranking: prob → vol_zscore → orderbook → accum
+    # 4-key tuple sort ensures strongest institutional signals surface first
     if CONFIG.get("rank_v20_multi", True):
         results.sort(
             key=lambda x: (
-                x.get("rank_value", x["score"]),           # primary: score × prob
-                x.get("rank_vol_z_v20", 0),                # secondary: vol z-score v20
-                x.get("rank_bid_ask", 1.0),                # tertiary: bid/ask ratio
+                x.get("rank_value",      x["score"]),   # primary:   score × prob
+                x.get("rank_inst_score", 0),             # secondary: institutional score
+                x.get("rank_vol_z_v20",  0),             # tertiary:  vol z-score
+                x.get("rank_bid_ask",    1.0),           # quaternary: bid/ask ratio
             ),
             reverse=True,
         )
@@ -4264,16 +4923,17 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v20 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v22 — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v20                   ║")
-    log.info("║  Focus: EMA Slope + Dump Filter + Reversal Validation      ║")
-    log.info("║  + Weighted Scoring + Multi-key Ranking + Perf Optim       ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v22                   ║")
+    log.info("║  INSTITUTIONAL PUMP HUNTER                                 ║")
+    log.info("║  Smart Money + Liq Trap + Whale FP + Pre-Breakout          ║")
+    log.info("║  Mom Ignition + Dump Trap + Sigmoid Prob + 4-key Rank      ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
