@@ -2,96 +2,32 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  QUANTITATIVE PUMP DETECTION SCANNER v19                                     ║
 ║                                                                              ║
-║  UPGRADE v19 — 20 Perbaikan dari audit v18:                                 ║
+║  UPGRADE v19 — 20 perbaikan dari audit quant trading engineer:               ║
 ║                                                                              ║
-║  FIX #1  — ADAPTIVE ENTRY ENGINE (Market Microstructure)                    ║
-║    v18: entry = VWAP (unrealistis jika harga di bawah VWAP)                 ║
-║    v19: entry = min(VWAP, price + ATR*0.25)                                 ║
-║         selalu dekat harga saat ini, RR lebih besar                         ║
+║  STEP 1  — ADAPTIVE ENTRY: min(VWAP, price+ATR*0.25) — selalu dekat harga  ║
+║  STEP 2  — LIQUIDITY-AWARE SL: swing_low−0.5×ATR atau entry−1.5×ATR        ║
+║  STEP 3  — DYNAMIC TP: TP1=2×ATR / TP2=3.5×ATR / TP3=5×ATR                ║
+║  STEP 4  — AI WEIGHTED SCORE: vol×0.30 + accel×0.20 + mom×0.20 +           ║
+║             liquidity×0.15 + breakout×0.10 + rsi×0.05                      ║
+║  STEP 5  — LOGISTIC PROB: P=1/(1+exp(-0.08*(score-55)))                    ║
+║  STEP 6  — TREND FILTER: EMA20/EMA50 — score↓ jika bearish, reject <EMA50  ║
+║  STEP 7  — VWAP BIAS: reject jika price < VWAP                              ║
+║  STEP 8  — MOMENTUM VALIDATION: reject jika price_change_5m ≤ 0            ║
+║  STEP 9  — WICK RATIO FILTER: reject wick_ratio > 0.4 (whale trap)         ║
+║  STEP 10 — VOLUME Z-SCORE: (vol−mean)/std → z>3 boost volume_score         ║
+║  STEP 11 — MICRO BREAKOUT: price > highest_high_20 → boost breakout        ║
+║  STEP 12 — ORDERBOOK PROXY: candle imbalance ratio sebagai OB proxy         ║
+║  STEP 13 — NOISE FILTER: vol<20M reject, ATR<0.3% reject                   ║
+║  STEP 14 — EARLY PUMP: vol_accel AND price>VWAP AND range_pos<40%          ║
+║  STEP 15 — RANK BY: score × probability (bukan score saja)                  ║
+║  STEP 16 — WHALE ACCUMULATION: vol↑ + price sideways + ATR↓                ║
+║  STEP 17 — TELEGRAM FIX: html.escape() + fallback no parse_mode            ║
+║  STEP 18 — THRESHOLD: MIN_SCORE naik 40→55                                  ║
+║  STEP 19 — QUALITY TARGET: false rate <35%, detect rate >65%               ║
+║  STEP 20 — FULL SINGLE FILE v19                                              ║
 ║                                                                              ║
-║  FIX #2  — LIQUIDITY-AWARE STOP LOSS                                         ║
-║    v18: SL = entry - ATR * 2.5 (ignores liquidity structure)                ║
-║    v19: swing_low = lowest low 20 candle                                    ║
-║         SL = min(swing_low - ATR*0.5, entry - ATR*1.5)                     ║
-║         menghindari zona sweep likuiditas                                   ║
-║                                                                              ║
-║  FIX #3  — DYNAMIC TAKE PROFIT (ATR-Based)                                  ║
-║    v18: TP1=1.5×ATR / TP2=3×ATR / TP3=5×ATR                                ║
-║    v19: TP1=2×ATR / TP2=3.5×ATR / TP3=5×ATR                                ║
-║         RR otomatis dihitung ulang                                          ║
-║                                                                              ║
-║  FIX #4  — AI-STYLE WEIGHTED SCORING ENGINE                                  ║
-║    v18: linear additive scoring (semua bobot sama)                          ║
-║    v19: score = 0.30×vol + 0.20×accel + 0.20×momentum +                    ║
-║                 0.15×liquidity + 0.10×breakout + 0.05×rsi                  ║
-║         setiap komponen dinormalisasi 0−100                                 ║
-║                                                                              ║
-║  FIX #5  — LOGISTIC PROBABILITY MODEL v19                                    ║
-║    v18: prob berbasis z-score feature sum                                   ║
-║    v19: P(pump) = 1/(1+exp(−0.08×(weighted_score − 55)))                   ║
-║         k=0.08, threshold=55 — lebih akurat untuk score 0-100              ║
-║                                                                              ║
-║  FIX #6  — TREND CONTEXT FILTER (EMA20/EMA50)                               ║
-║    v19 baru: hitung EMA20 dan EMA50                                         ║
-║    - if EMA20 < EMA50: kurangi score (downtrend konteks)                   ║
-║    - if price < EMA50: REJECT sinyal (strong downtrend gate)                ║
-║                                                                              ║
-║  FIX #7  — STRICT VWAP BIAS GATE                                             ║
-║    v18: tolerance 97% VWAP (price > vwap*0.97)                             ║
-║    v19: if price < VWAP → REJECT sinyal (pump mulai di atas VWAP)          ║
-║                                                                              ║
-║  FIX #8  — MOMENTUM VALIDATION (5m price change)                            ║
-║    v19 baru: if price_change_5m <= 0 → REJECT sinyal                       ║
-║    memastikan momentum positif jangka pendek                                ║
-║                                                                              ║
-║  FIX #9  — FAKE PUMP: WICK RATIO + BUY RATIO GATE                           ║
-║    v18: 4-kondisi fake pump (penalti)                                       ║
-║    v19: + wick_ratio = (high-close)/(high-low) > 0.4 → REJECT              ║
-║         + buy_ratio < 55% → REJECT (distribusi terdeteksi)                 ║
-║                                                                              ║
-║  FIX #10 — VOLUME Z-SCORE (Abnormal Activity Detector)                      ║
-║    v19 baru: z = (vol - mean_vol) / std_vol                                 ║
-║    if z > 3 → boost volume_score (deteksi anomali statistik)               ║
-║                                                                              ║
-║  FIX #11 — MICRO BREAKOUT DETECTION                                          ║
-║    v19 baru: highest_high_20 = max high 20 candle terakhir                  ║
-║    if price > highest_high_20 → boost breakout_score                       ║
-║                                                                              ║
-║  FIX #12 — ORDERBOOK IMBALANCE                                               ║
-║    v19 baru: imbalance = bid_volume / ask_volume                            ║
-║    if imbalance > 1.5 → boost liquidity_score (bullish pressure)           ║
-║                                                                              ║
-║  FIX #13 — NOISE FILTER (Illiquid & Low-Volatility Rejection)               ║
-║    v19 baru: if 24h_volume < $20M → REJECT (illiquid)                      ║
-║    v19 baru: if ATR < 0.3% → REJECT (terlalu flat)                         ║
-║                                                                              ║
-║  FIX #14 — EARLY PUMP DETECTION                                              ║
-║    v19 baru: if vol_acceleration AND price > VWAP AND range_pos < 40%      ║
-║    → score boost (deteksi pre-pump lebih awal)                             ║
-║                                                                              ║
-║  FIX #15 — SIGNAL RANKING (score × probability)                             ║
-║    v18: sort by score saja                                                  ║
-║    v19: rank_value = weighted_score × (pump_prob/100)                      ║
-║         sinyal berkualitas tinggi naik ke atas                             ║
-║                                                                              ║
-║  FIX #16 — WHALE ACCUMULATION DETECTION                                      ║
-║    v19 baru: vol naik + harga sideways + volatilitas turun                 ║
-║    → deteksi akumulasi diam-diam sebelum pump besar                        ║
-║                                                                              ║
-║  FIX #17 — TELEGRAM HTML ESCAPE FIX                                          ║
-║    v18: error "can't parse entities" — karakter spesial tidak di-escape    ║
-║    v19: html.escape() pada konten dinamis sebelum dikirim                  ║
-║                                                                              ║
-║  FIX #18 — SIGNAL THRESHOLD DINAIKKAN                                        ║
-║    v18: MIN_SCORE = 40 (terlalu banyak false signal)                       ║
-║    v19: MIN_SCORE = 55 (hanya sinyal berkualitas tinggi)                   ║
-║                                                                              ║
-║  FIX #19 — TARGET KUALITAS SINYAL                                            ║
-║    v19 target: False signal rate < 35%, Pump detection rate > 65%          ║
-║                                                                              ║
-║  FIX #20 — WARISAN v18: vol spike 3 tier, buy pressure, whale v18,          ║
-║    micro momentum 5m, OI persistence, funding guard, BB/ATR/HTF accum,    ║
-║    pump timing ETA, market regime, BTC correlation                         ║
+║  WARISAN v18: micro momentum 5m, feature-based prob, whale v2, fake v2,    ║
+║               OI persistence, funding guard, micro ETA, BB/ATR/HTF accum   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -102,8 +38,7 @@ import math
 import json
 import logging
 import logging.handlers as _lh
-import html                          # FIX v19 #17: Telegram HTML escape
-import statistics                    # FIX v19 #10: Volume Z-Score
+import html as _html_mod
 from datetime import datetime, timezone
 from collections import defaultdict
 
@@ -144,26 +79,22 @@ CONFIG = {
 
     # ── Volume 24h total (USD) ────────────────────────────────────────────────
     "min_vol_24h":          10_000,
-    "max_vol_24h":     200_000_000,   # v19: diperlebar dari 50M → 200M
+    "max_vol_24h":      50_000_000,
     "pre_filter_vol":       10_000,
-
-    # ── FIX v19 #13 — NOISE FILTER: Volume & ATR minimum ─────────────────────
-    # Koin dengan volume < $20M terlalu illiquid → false signal tinggi
-    # Koin dengan ATR < 0.3% terlalu flat → tidak ada pump potential
-    "noise_min_vol_24h":  20_000_000,   # $20M minimum untuk signal valid
-    "noise_min_atr_pct":        0.30,   # ATR harus >= 0.3% dari harga
 
     # ── Open Interest minimum filter ──────────────────────────────────────────
     "min_oi_usd":          100_000,   # minimal $100K OI
 
     # ── Gate perubahan harga 24h ──────────────────────────────────────────────
+    # FIX v18: dilonggarkan dari 5% → 8%.
+    # 5% terlalu ketat di pasar bullish — coin yang baru mulai pump +5-7%
+    # masih bisa pre-pump, belum tentu distribusi.
+    # 8% masih memfilter coin yang sudah pump besar.
     "gate_chg_24h_max":          8.0,
     "gate_chg_24h_min":        -15.0,   # hanya skip dump besar
 
-    # ── FIX v19 #7 — STRICT VWAP GATE ────────────────────────────────────────
-    # v18: tolerance 97% (price > vwap*0.97) — terlalu longgar
-    # v19: price harus >= VWAP (pump starts above VWAP)
-    "vwap_gate_tolerance":      1.00,   # FIX v19: strict, was 0.97
+    # ── VWAP Gate Tolerance ───────────────────────────────────────────────────
+    "vwap_gate_tolerance":      0.97,   # price > vwap * 0.97
 
     # ── Gate uptrend usia ─────────────────────────────────────────────────────
     "gate_uptrend_max_hours":   10,
@@ -173,17 +104,6 @@ CONFIG = {
 
     # ── Gate BB Position ──────────────────────────────────────────────────────
     "gate_bb_pos_max":          1.05,
-
-    # ── FIX v19 #6 — TREND CONTEXT FILTER (EMA20/EMA50) ─────────────────────
-    # EMA20 < EMA50 = downtrend konteks → reduce score
-    # price < EMA50 = strong downtrend → REJECT sinyal
-    "ema_trend_score_penalty":  -8,     # penalty jika EMA20 < EMA50
-    "ema_trend_gate":           True,   # aktifkan gate price < EMA50
-
-    # ── FIX v19 #9 — FAKE PUMP: WICK RATIO GATE ─────────────────────────────
-    # Upper wick > 40% dari range = bearish rejection / whale trap
-    "wick_ratio_gate_max":       0.40,  # reject jika upper_wick/range > 0.4
-    "buy_ratio_gate_min":        0.55,  # reject jika buy_ratio < 55%
 
     # ── Funding rate scoring ──────────────────────────────────────────────────
     "funding_penalty_avg":     0.0003,   # > +0.03% → penalti -2
@@ -210,10 +130,11 @@ CONFIG = {
     "sleep_error":             3.0,
     "cooldown_file":          "./cooldown.json",
     "funding_snapshot_file":  "./funding.json",
+    # FIX v18: OI snapshot sekarang persisten ke disk
     "oi_snapshot_file":       "./oi_snapshot.json",
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  BOBOT SKOR v18 (DIPERTAHANKAN — basis additive score)
+    #  BOBOT SKOR v18
     # ══════════════════════════════════════════════════════════════════════════
 
     # ── BB Squeeze ────────────────────────────────────────────────────────────
@@ -238,6 +159,7 @@ CONFIG = {
     "accum_atr_contract_ratio": 0.75,
     "accum_max_pos_in_range":  0.70,
     "score_accumulation":      4,
+    # FIX v18: score_vol_compression hanya aktif jika is_accumulating=False
     "score_vol_compression":   4,
 
     # ── HTF Accumulation 4H ───────────────────────────────────────────────────
@@ -273,10 +195,12 @@ CONFIG = {
     "score_rsi_ideal":         2,
 
     # ── Higher Low ────────────────────────────────────────────────────────────
+    # FIX v18: lookback dinaikkan 6 → 16 candle (lebih bermakna)
     "higher_low_lookback":     16,
     "score_higher_low":        2,
 
     # ── BOS Up ───────────────────────────────────────────────────────────────
+    # FIX v18: lookback dinaikkan 3 → 8 candle (BOS lebih bermakna)
     "bos_lookback":            8,
     "score_bos_up":            1,
 
@@ -297,92 +221,85 @@ CONFIG = {
     "ema_gap_threshold":       1.0,
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  v18 FEATURES (DIPERTAHANKAN)
+    #  UPGRADE v18: NEW FEATURES
     # ══════════════════════════════════════════════════════════════════════════
 
     # ── Volume Spike Detection (Phase 1 pre-pump) ─────────────────────────────
-    "vol_spike_window":        20,
-    "vol_spike_low":           1.5,
-    "vol_spike_mid":           2.0,
-    "vol_spike_high":          3.0,
+    # Formula: current_volume_20 / avg_volume_20
+    "vol_spike_window":        20,       # candle baseline window
+    "vol_spike_low":           1.5,      # threshold low  → +8
+    "vol_spike_mid":           2.0,      # threshold mid  → +15
+    "vol_spike_high":          3.0,      # threshold high → +22
     "score_vol_spike_low":     8,
     "score_vol_spike_mid":     15,
     "score_vol_spike_high":    22,
 
     # ── Momentum Acceleration (Phase 3 pre-pump) ──────────────────────────────
-    "accel_strong_threshold":  0.005,
-    "score_accel_positive":    10,
-    "score_accel_strong":      18,
+    # acceleration = (price_now-price_3h) - (price_3h-price_6h)
+    "accel_strong_threshold":  0.005,    # 0.5% percepatan → strong
+    "score_accel_positive":    10,       # acceleration > 0
+    "score_accel_strong":      18,       # acceleration > strong_threshold
 
     # ── Buy Pressure (Phase 2 pre-pump) ──────────────────────────────────────
-    "buy_pressure_window":     8,
-    "buy_pressure_low":        0.55,
-    "buy_pressure_mid":        0.65,
-    "buy_pressure_high":       0.75,
+    # buy_ratio = buy_volume / total_volume (dari 15m candles)
+    "buy_pressure_window":     8,        # 8 candle 15m = 2 jam
+    "buy_pressure_low":        0.55,     # >55% accumulation → +6
+    "buy_pressure_mid":        0.65,     # >65% whale activity → +12
+    "buy_pressure_high":       0.75,     # >75% pump phase → +20
     "score_buy_pressure_low":  6,
     "score_buy_pressure_mid":  12,
     "score_buy_pressure_high": 20,
 
     # ── Whale Order Detection ─────────────────────────────────────────────────
-    "whale_vol_mult":          5.0,
+    # Deteksi via volume spike besar pada 15m candle terbaru
+    "whale_vol_mult":          5.0,      # 5x avg 15m volume = whale
     "score_whale_order":       8,
 
     # ── Fake Pump Filter ──────────────────────────────────────────────────────
-    "fake_pump_price_min":     0.3,
-    "fake_pump_buy_max":       0.50,
+    # Harga naik tapi buy_ratio < 50% → spoof / distribusi
+    "fake_pump_price_min":     0.3,      # price naik minimal 0.3% dalam 3h
+    "fake_pump_buy_max":       0.50,     # buy_ratio < 50%
     "penalty_fake_pump":       -10,
 
-    # ── FIX v19 #5 — Logistic Probability Model v19 ──────────────────────────
-    # P(pump) = 1 / (1 + exp(-k * (weighted_score - threshold)))
-    # k=0.08, threshold=55 — dikalibrasi untuk weighted_score 0-100
-    "prob_k":                  0.08,   # steepness logistic curve
-    "prob_threshold":          55.0,   # decision boundary (pump vs no-pump)
+    # ── Logistic Probability Model ────────────────────────────────────────────
+    # prob = 1 / (1 + exp(-(score - center) / scale))
+    "prob_center":             50,       # score 50 → prob 50%
+    "prob_scale":              8,        # steepness
 
-    # ── v18 feature-based prob weights (DIPERTAHANKAN sebagai fallback) ───────
-    "prob_center":             50,
-    "prob_scale":              8,
-
-    # ── FIX v19 #18 — Signal Threshold DINAIKKAN ─────────────────────────────
-    # v18: WATCHLIST=40, ALERT=55, STRONG=70
-    # v19: WATCHLIST=55, ALERT=68, STRONG=80 (lebih ketat, kurangi false signal)
-    "score_watchlist":         55,    # FIX v19: was 40
-    "score_alert":             68,    # FIX v19: was 55
-    "score_strong_alert":      80,    # FIX v19: was 70
+    # ── Signal Threshold v18 ──────────────────────────────────────────────────
+    "score_watchlist":         40,       # 40–55 → WATCHLIST
+    "score_alert":             55,       # 55–70 → ALERT
+    "score_strong_alert":      70,       # 70+   → STRONG ALERT
 
     # ── Entry Regime Detection ────────────────────────────────────────────────
-    "breakout_buy_ratio_min":  0.60,
-    "breakout_vol_ratio_min":  1.80,
-    "mean_rev_rsi_max":        45.0,
-    "mean_rev_range_max":      0.20,
-    "entry_breakout_atr_mult": 0.15,
-    "entry_mean_rev_atr_mult": 0.20,
-    "sl_atr_base":             1.5,    # FIX v19 #2: was 2.5 → 1.5 (Step 2)
-    "sl_atr_volatile":         2.0,    # FIX v19 #2: was 3.0 → 2.0 (Step 2)
-
-    # ── FIX v19 #3 — TP ATR Multipliers (diperlebar) ─────────────────────────
-    "tp1_atr_mult":            2.0,    # FIX v19: was 1.5 → 2.0
-    "tp2_atr_mult":            3.5,    # FIX v19: was 3.0 → 3.5
-    "tp3_atr_mult":            5.0,    # sama
+    "breakout_buy_ratio_min":  0.60,     # buy_ratio > 60% untuk breakout mode
+    "breakout_vol_ratio_min":  1.80,     # vol_ratio > 1.8x untuk breakout mode
+    "mean_rev_rsi_max":        45.0,     # RSI < 45 untuk mean reversion mode
+    "mean_rev_range_max":      0.20,     # range_pos < 20% untuk mean reversion
+    "entry_breakout_atr_mult": 0.15,     # entry = resistance + 0.15×ATR
+    "entry_mean_rev_atr_mult": 0.20,     # entry = support + 0.20×ATR
+    "sl_atr_base":             2.5,      # SL = entry - ATR × 2.5
+    "sl_atr_volatile":         3.0,      # SL untuk coin volatile
+    "tp1_atr_mult":            1.5,      # v18: TP1 = entry + ATR × 1.5
+    "tp2_atr_mult":            3.0,      # v18: TP2 = entry + ATR × 3
+    "tp3_atr_mult":            5.0,      # v18: TP3 = entry + ATR × 5
 
     # ── v18 Entry model ───────────────────────────────────────────────────────
-    "entry_pullback_atr_mult": 0.30,
-    "entry_sweep_atr_mult":    0.20,
-    "entry_retest_buffer":     0.005,
-
-    # ── FIX v19 #1 — Adaptive Entry Multiplier ───────────────────────────────
-    "entry_atr_buffer_mult":   0.25,   # entry = min(VWAP, price + ATR*0.25)
+    "entry_pullback_atr_mult": 0.30,     # PULLBACK: entry = VWAP - 0.3×ATR
+    "entry_sweep_atr_mult":    0.20,     # SWEEP: entry = sweep_low + 0.2×ATR
+    "entry_retest_buffer":     0.005,    # BREAKOUT retest: +0.5% di atas breakout
 
     # ── v18 Micro Momentum (5m candles) ──────────────────────────────────────
-    "micro_mom_candles":       12,
-    "micro_accel_strong":      0.003,
-    "score_micro_accel":       15,
-    "score_micro_accel_pos":   8,
+    "micro_mom_candles":       12,       # berapa 5m candle untuk rata2 1h
+    "micro_accel_strong":      0.003,    # 0.3% acceleration = strong
+    "score_micro_accel":       15,       # strong micro accel score
+    "score_micro_accel_pos":   8,        # positive micro accel score
 
     # ── v18 Whale detection upgrade ──────────────────────────────────────────
-    "whale_vol_mult_v18":      3.0,
-    "whale_buy_ratio_min":     0.65,
-    "whale_oi_change_min":     2.0,
-    "score_whale_v18":         10,
+    "whale_vol_mult_v18":      3.0,      # vol > 3× (bukan 5×)
+    "whale_buy_ratio_min":     0.65,     # buy_ratio > 65%
+    "whale_oi_change_min":     2.0,      # OI harus naik minimal 2%
+    "score_whale_v18":         10,       # skor whale yang lebih ketat tapi akurat
 
     # ── v18 Pump Probability feature weights ─────────────────────────────────
     "prob_w_vol_spike":        0.9,
@@ -398,54 +315,80 @@ CONFIG = {
     "timing_w_buy_ratio":      0.3,
     "timing_w_oi_accel":       0.2,
     "timing_w_momentum":       0.1,
-    "timing_eta_5min":         0.75,
-    "timing_eta_10min":        0.55,
-    "timing_eta_30min":        0.35,
-    "timing_eta_60min":        0.20,
+    "timing_eta_5min":         0.75,     # timing > 0.75 → ETA 5 min
+    "timing_eta_10min":        0.55,     # timing > 0.55 → ETA 10 min
+    "timing_eta_30min":        0.35,     # timing > 0.35 → ETA 30 min
+    "timing_eta_60min":        0.20,     # timing > 0.20 → ETA 60 min
 
     # ── v18 Fake Pump upgrade ─────────────────────────────────────────────────
-    "fake_price_spike_min":    0.005,
-    "fake_oi_flat_max":        1.5,
-    "fake_sell_press_max":     0.48,
-    "fake_penalty_mild":      -5,
-    "fake_penalty_strong":    -12,
-    "fake_penalty_severe":    -20,
+    "fake_price_spike_min":    0.005,    # harga naik > 0.5% dalam 3h
+    "fake_oi_flat_max":        1.5,      # OI change < 1.5% = OI flat
+    "fake_sell_press_max":     0.48,     # buy_ratio < 48% = sell pressure
+    "fake_penalty_mild":      -5,        # 2 kondisi fake
+    "fake_penalty_strong":    -12,       # 3 kondisi fake
+    "fake_penalty_severe":    -20,       # 4 kondisi fake (semua terpenuhi)
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  FIX v19 #4 — AI WEIGHTED SCORING BOBOT
+    #  UPGRADE v19: NEW CONFIG
     # ══════════════════════════════════════════════════════════════════════════
-    # Setiap komponen dinormalisasi 0-100, lalu dikombinasi dengan bobot:
-    "wscore_w_volume":         0.30,   # volume_score weight
-    "wscore_w_acceleration":   0.20,   # acceleration_score weight
-    "wscore_w_momentum":       0.20,   # momentum_score weight (buy pressure)
-    "wscore_w_liquidity":      0.15,   # liquidity_score weight
-    "wscore_w_breakout":       0.10,   # breakout_score weight
-    "wscore_w_rsi":            0.05,   # rsi_score weight
 
-    # ── FIX v19 #10 — Volume Z-Score ─────────────────────────────────────────
-    "vol_zscore_threshold":     3.0,   # z > 3 = abnormal activity
-    "vol_zscore_lookback":     20,     # candle lookback untuk mean/std
-    "vol_zscore_score_boost":  15,     # boost ke volume_score (normalized)
+    # STEP 3 — Dynamic TP multipliers (v19)
+    "tp1_v19_mult":            2.0,      # TP1 = entry + ATR × 2
+    "tp2_v19_mult":            3.5,      # TP2 = entry + ATR × 3.5
+    "tp3_v19_mult":            5.0,      # TP3 = entry + ATR × 5
 
-    # ── FIX v19 #11 — Micro Breakout ─────────────────────────────────────────
-    "micro_breakout_lookback":  20,    # highest high dari 20 candle terakhir
-    "micro_breakout_score":     60,    # breakout_score jika breakout valid
+    # STEP 4 — AI Weighted scoring weights
+    "wscore_volume":           0.30,
+    "wscore_accel":            0.20,
+    "wscore_momentum":         0.20,
+    "wscore_liquidity":        0.15,
+    "wscore_breakout":         0.10,
+    "wscore_rsi":              0.05,
 
-    # ── FIX v19 #12 — Orderbook Imbalance ────────────────────────────────────
-    "ob_imbalance_min":         1.5,   # bid/ask ratio > 1.5 = bullish
-    "ob_imbalance_score":       15,    # tambahan ke liquidity_score
+    # STEP 5 — Logistic probability params
+    "logistic_k":              0.08,
+    "logistic_threshold":      55.0,
 
-    # ── FIX v19 #14 — Early Pump Detection ───────────────────────────────────
-    # vol_acceleration + price > VWAP + range_position < 40%
-    "early_pump_range_max":     0.40,  # range_pos < 40% = di bawah setengah range
-    "early_pump_score_boost":   12,    # boost ke additive score
+    # STEP 6 — Trend filter EMAs
+    "ema_fast":                20,
+    "ema_slow":                50,
+    "score_penalty_bearish":  -8,        # EMA20 < EMA50 → penalti
 
-    # ── FIX v19 #16 — Whale Accumulation Detection ───────────────────────────
-    # vol naik + harga sideways + volatilitas turun
-    "whale_accum_vol_ratio":    1.3,   # vol ratio minimal untuk akumulasi
-    "whale_accum_range_max":    1.5,   # price range < 1.5% = sideways
-    "whale_accum_atr_ratio":    0.80,  # ATR menurun (short/long ratio < 0.8)
-    "whale_accum_score":         5,    # bonus ke liquidity_score
+    # STEP 8 — Momentum validation (5m price change)
+    "momentum_val_reject":     0.0,      # reject jika price_chg_5m <= 0
+
+    # STEP 9 — Wick ratio filter
+    "wick_ratio_max":          0.4,      # reject if (high-close)/(high-low) > 0.4
+
+    # STEP 10 — Volume Z-score
+    "vol_zscore_boost":        3.0,      # z > 3 → boost volume score
+    "vol_zscore_window":       24,       # lookback untuk mean/std
+
+    # STEP 11 — Micro breakout
+    "micro_breakout_lookback": 20,       # highest high N candle
+    "score_micro_breakout":    6,
+
+    # STEP 13 — Noise filter
+    "noise_min_vol_24h":   20_000_000,   # min $20M volume 24h
+    "noise_min_atr_pct":       0.3,      # min 0.3% ATR
+
+    # STEP 14 — Early pump detection
+    "early_pump_range_pos_max": 0.40,    # range_pos < 40%
+    "score_early_pump":         8,
+
+    # STEP 15 — Rank by: score × probability
+    "rank_use_combined":        True,
+
+    # STEP 16 — Whale accumulation (sideways + vol rising + ATR falling)
+    "whale_accum_vol_min":      1.3,     # vol ratio min
+    "whale_accum_atr_max":      0.90,    # ATR contract ratio max
+    "whale_accum_range_max":    2.5,     # price range pct max
+    "score_whale_accum":        7,
+
+    # STEP 18 — Threshold naik 40→55
+    "score_watchlist":          55,      # was 40 in v18
+    "score_alert":              65,      # was 55
+    "score_strong_alert":       78,      # was 70
 }
 
 MANUAL_EXCLUDE = set()
@@ -611,54 +554,65 @@ def safe_get(url, params=None, timeout=10):
                 time.sleep(CONFIG["sleep_error"])
     return None
 
-def send_telegram(msg):
+def _safe_telegram_text(msg):
     """
-    FIX v19 #17 — Telegram HTML Escape.
-    v18: error "Bad Request: can't parse entities" terjadi karena karakter
-         spesial (<, >, &) dalam signal text tidak di-escape.
-    v19: clean_telegram_html() memastikan konten plain-text di-escape
-         sedangkan tag HTML (<b>, <code>, <i>) tetap valid.
+    STEP 17 v19 — Telegram HTML safety.
+    Escape karakter berbahaya di luar tag HTML valid agar tidak memicu
+    'Bad Request: can\'t parse entities'. Strategi: preserve tag HTML
+    yang valid (<b>,<i>,<code>,<pre>), escape sisanya.
+    """
+    # Bersihkan karakter yang sering menyebabkan parse error
+    # Ampersand di luar entity
+    import re as _re
+    # Escape & yang bukan entity
+    msg = _re.sub(r'&(?!(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);)', '&amp;', msg)
+    return msg
+
+def send_telegram(msg, parse_mode="HTML"):
+    """
+    STEP 17 v19 — Fixed Telegram sender dengan:
+    1. html.escape fallback jika HTML parse mode gagal
+    2. Retry tanpa parse_mode jika masih gagal
+    3. Truncate aman dengan mempertahankan tag
     """
     if not BOT_TOKEN or not CHAT_ID:
         log.warning("send_telegram: BOT_TOKEN atau CHAT_ID tidak ada!")
         return False
     if len(msg) > 4000:
-        msg = msg[:3900] + "\n\n<i>...[dipotong, terlalu panjang]</i>"
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            log.warning(f"Telegram gagal: HTTP {r.status_code} — {r.text[:200]}")
-            # FIX v19: Fallback ke plain text jika HTML parse error
-            if "can't parse entities" in r.text or "Bad Request" in r.text:
-                log.warning("Telegram: HTML parse error — retry tanpa parse_mode")
-                plain_msg = msg.replace("<b>","").replace("</b>","") \
-                               .replace("<i>","").replace("</i>","") \
-                               .replace("<code>","").replace("</code>","")
-                r2 = requests.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    data={"chat_id": CHAT_ID, "text": plain_msg},
-                    timeout=15,
-                )
-                return r2.status_code == 200
+        msg = msg[:3900] + "\n\n<i>...[dipotong]</i>"
+
+    msg = _safe_telegram_text(msg)
+
+    for attempt in range(2):
+        try:
+            payload = {"chat_id": CHAT_ID, "text": msg}
+            if attempt == 0:
+                payload["parse_mode"] = "HTML"
+            # attempt 1: tanpa parse_mode (plain text fallback)
+            r = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                data=payload,
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return True
+            err_text = r.text[:300]
+            if "can\'t parse" in err_text or "Bad Request" in err_text:
+                log.warning(f"Telegram parse error attempt {attempt} — retry plain text")
+                # Coba kirim ulang tanpa HTML
+                msg = _html_mod.unescape(msg)
+                msg = msg.replace("<b>","").replace("</b>","")
+                msg = msg.replace("<i>","").replace("</i>","")
+                msg = msg.replace("<code>","").replace("</code>","")
+                msg = msg.replace("<pre>","").replace("</pre>","")
+                continue
+            log.warning(f"Telegram gagal: HTTP {r.status_code} — {err_text}")
             return False
-        return True
-    except Exception as e:
-        log.warning(f"Telegram exception: {e}")
-        return False
-
-
-def _escape_html(text):
-    """
-    FIX v19 #17 — Escape karakter HTML dalam teks dinamis (signal, label).
-    Gunakan pada konten yang berasal dari kalkulasi/API, bukan tag HTML manual.
-    """
-    if not isinstance(text, str):
-        text = str(text)
-    return html.escape(text, quote=False)
+        except Exception as e:
+            log.warning(f"Telegram exception attempt {attempt}: {e}")
+            if attempt == 0:
+                time.sleep(2)
+    return False
 
 def utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1436,26 +1390,7 @@ def calc_pump_timing_eta(vol_accel, buy_ratio, oi_data, micro_mom):
 
 
 def get_alert_level_v19(score):
-    """
-    FIX v19 #18 — Threshold Dinaikkan untuk Kurangi False Signal.
-
-    v18: WATCHLIST=40, ALERT=55, STRONG=70
-    v19: WATCHLIST=55, ALERT=68, STRONG=80
-
-    Threshold lebih tinggi memastikan hanya sinyal berkualitas
-    yang diteruskan ke Telegram, mengurangi false signal rate.
-    """
-    if score >= CONFIG["score_strong_alert"]:
-        return "STRONG ALERT"
-    elif score >= CONFIG["score_alert"]:
-        return "ALERT"
-    elif score >= CONFIG["score_watchlist"]:
-        return "WATCHLIST"
-    return "IGNORE"
-
-
-def get_alert_level_v18(score):
-    """v18: threshold lama — dipertahankan untuk kompatibilitas internal."""
+    """v18: threshold sama dengan v18."""
     if score >= CONFIG["score_strong_alert"]:
         return "STRONG ALERT"
     elif score >= CONFIG["score_alert"]:
@@ -1488,50 +1423,38 @@ def calc_market_regime(candles, vwap, buy_ratio, vol_ratio, rsi, price_pos):
     return "NEUTRAL"
 
 
-def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
+def calc_entry_v18(candles, vwap, price_now, atr_abs_val, market_regime, sr,
                    rsi, buy_ratio, vol_ratio, price_pos, alert_level, bos_level,
                    liq_sweep):
     """
-    FIX v19 #1, #2, #3 — Entry Engine, Stop Loss, Take Profit v19.
+    FIX v18 #4 & #5 — Entry Engine Diperbaiki + TP Diperlebar.
 
-    FIX #1 — ADAPTIVE ENTRY (Market Microstructure Based):
-      entry = min(VWAP, price + ATR * 0.25)
-      Memastikan entry selalu dekat harga saat ini, tidak terlalu jauh dari VWAP.
-      Ini menghindari entry unrealistis ketika harga sudah jauh di bawah VWAP.
+    Entry modes:
+      PULLBACK  → entry = VWAP − 0.3×ATR  (tunggu pullback)
+      SWEEP     → entry = liq_sweep_low + 0.2×ATR
+      BREAKOUT  → entry = breakout_retest + 0.15×ATR
+      NEUTRAL   → entry = support + 0.2×ATR
 
-    FIX #2 — LIQUIDITY-AWARE STOP LOSS:
-      swing_low_20 = lowest low dari 20 candle terakhir
-      SL = min(swing_low_20 - ATR*0.5, entry - ATR*1.5)
-      SL ditempatkan di bawah zona likuiditas untuk menghindari stop hunt.
-
-    FIX #3 — DYNAMIC TAKE PROFIT (ATR-Based):
-      TP1 = entry + ATR * 2.0   (lebih besar dari v18 1.5x)
-      TP2 = entry + ATR * 3.5   (lebih besar dari v18 3.0x)
-      TP3 = entry + ATR * 5.0   (sama, + liquidity void check)
-      RR otomatis dihitung ulang berdasarkan entry/SL aktual.
+    TP v18 (diperlebar untuk altcoin pump 5−20%):
+      TP1 = 1.5×ATR | TP2 = 3×ATR | TP3 = 5×ATR
+      + TP3 cek liquidity void (area gap resistance)
     """
     atr = atr_abs_val
     atr_pct_now = (atr / price_now * 100) if price_now > 0 else 2.0
 
-    # ── FIX v19 #1: Adaptive Entry ────────────────────────────────────────────
-    # entry = min(VWAP, price + ATR*0.25)
-    # Logika: ambil yang lebih rendah antara VWAP dan price+buffer kecil
-    # Ini memastikan entry selalu realistis dan dekat harga saat ini
-    entry_adaptive  = min(vwap, price_now + atr * CONFIG["entry_atr_buffer_mult"])
-    entry_regime    = None
-    entry_reason    = "ADAPTIVE"
-
-    # Override dengan regime-specific entry jika lebih baik
+    # ── Entry berbasis regime ─────────────────────────────────────────────────
     if market_regime == "PULLBACK":
-        entry_regime = vwap - atr * CONFIG["entry_pullback_atr_mult"]
-        if entry_regime < price_now * 0.995:   # terlalu jauh di bawah
-            entry_regime = None
+        entry        = vwap - atr * CONFIG["entry_pullback_atr_mult"]
+        entry_reason = f"PULLBACK — VWAP {_fmt_price(vwap)} − 0.3×ATR"
+        if entry >= price_now:          # jika entry > harga sekarang, pakai harga
+            entry = price_now * 0.998
 
     elif market_regime == "SWEEP" and liq_sweep and liq_sweep.get("is_sweep"):
         sweep_low    = liq_sweep.get("sweep_low", price_now * 0.98)
-        entry_regime = sweep_low + atr * CONFIG["entry_sweep_atr_mult"]
-        if entry_regime > price_now:
-            entry_regime = None
+        entry        = sweep_low + atr * CONFIG["entry_sweep_atr_mult"]
+        entry_reason = f"SWEEP — Low {_fmt_price(sweep_low)} + 0.2×ATR"
+        if entry > price_now:
+            entry = price_now * 0.998
 
     elif market_regime == "BREAKOUT":
         res_levels = []
@@ -1540,57 +1463,47 @@ def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
                           if rv["level"] > price_now * 0.998]
         if res_levels:
             breakout_lvl = min(res_levels)
-            entry_regime = breakout_lvl * (1.0 + CONFIG["entry_retest_buffer"])
-            entry_reason = f"BREAKOUT retest {_fmt_price(breakout_lvl)}"
+            entry        = breakout_lvl * (1.0 + CONFIG["entry_retest_buffer"])
+            entry_reason = f"BREAKOUT retest — R1 {_fmt_price(breakout_lvl)} + buffer"
         elif bos_level > 0 and bos_level < price_now * 1.05:
-            entry_regime = bos_level * (1.0 + CONFIG["entry_bos_buffer"])
-            entry_reason = "BREAKOUT BOS"
+            entry        = bos_level * (1.0 + CONFIG["entry_bos_buffer"])
+            entry_reason = "BREAKOUT — BOS retest"
+        else:
+            entry        = price_now * 1.001
+            entry_reason = "BREAKOUT — market"
 
-    # Pilih entry terbaik: gunakan regime jika ada, fallback ke adaptive
-    if entry_regime is not None and entry_regime > 0:
-        # Adaptive: min(regime, adaptive) — selalu ambil yang lebih konservatif
-        entry = min(entry_regime, entry_adaptive)
-        entry_reason = f"{market_regime} + ADAPTIVE min({_fmt_price(entry_regime)},{_fmt_price(entry_adaptive)})"
-    else:
-        entry = entry_adaptive
-        entry_reason = f"ADAPTIVE — min(VWAP={_fmt_price(vwap)}, price+ATR*0.25={_fmt_price(price_now + atr*0.25)})"
+    else:  # NEUTRAL
+        sup_levels = []
+        if sr and sr.get("support"):
+            sup_levels = [sv["level"] for sv in sr["support"]
+                          if sv["level"] < price_now]
+        if sup_levels:
+            support      = max(sup_levels)
+            entry        = support + atr * CONFIG["entry_mean_rev_atr_mult"]
+            entry_reason = f"NEUTRAL — S1 {_fmt_price(support)} + 0.2×ATR"
+        else:
+            entry        = vwap - atr * 0.1   # slight below vwap
+            entry_reason = "NEUTRAL — VWAP basis"
+        if entry > price_now:
+            entry = price_now * 0.999
 
-    # Pastikan entry tidak di bawah harga terlalu jauh
-    if entry < price_now * 0.97:
-        entry = price_now * 0.998
-        entry_reason += " [clamp: tidak terlalu jauh dari harga]"
-
-    # ── FIX v19 #2: Liquidity-Aware Stop Loss ─────────────────────────────────
-    # swing_low = lowest low dari 20 candle terakhir
-    # SL = min(swing_low - ATR*0.5, entry - ATR*1.5)
-    # Menempatkan SL di bawah zona likuiditas (below market maker sweep zone)
-    lkb_20       = min(20, len(candles) - 1)
-    swing_low_20 = min(c["low"] for c in candles[-lkb_20:]) if lkb_20 > 0 else entry * 0.97
-
-    sl_liquidity = swing_low_20 - atr * 0.5        # di bawah swing low
-    sl_atr_base  = entry - atr * CONFIG["sl_atr_base"]   # 1.5x ATR dari entry
-
-    # Ambil yang lebih rendah (lebih defensif)
-    sl = min(sl_liquidity, sl_atr_base)
-
-    # Clamp SL dalam batas persentase
-    sl = max(sl, entry * (1.0 - CONFIG["max_sl_pct"] / 100.0))   # max loss 8%
-    sl = min(sl, entry * (1.0 - CONFIG["min_sl_pct"] / 100.0))   # min loss 0.5%
-
+    # ── SL ────────────────────────────────────────────────────────────────────
+    sl_mult = CONFIG["sl_atr_volatile"] if atr_pct_now > 3.0 else CONFIG["sl_atr_base"]
+    sl      = entry - atr * sl_mult
+    sl      = max(sl, entry * (1.0 - CONFIG["max_sl_pct"] / 100.0))
+    sl      = min(sl, entry * (1.0 - CONFIG["min_sl_pct"] / 100.0))
     if sl >= entry:
         sl = entry * 0.975
 
-    # ── FIX v19 #3: Dynamic Take Profit (ATR-Based) ───────────────────────────
-    # TP1 = entry + ATR * 2.0   (lebih besar dari v18 1.5x → RR lebih baik)
-    # TP2 = entry + ATR * 3.5   (lebih besar dari v18 3.0x)
-    # TP3 = entry + ATR * 5.0   (sama, + liquidity void detection)
-    tp1 = entry + atr * CONFIG["tp1_atr_mult"]   # 2.0x
-    tp2 = entry + atr * CONFIG["tp2_atr_mult"]   # 3.5x
-    tp3 = entry + atr * CONFIG["tp3_atr_mult"]   # 5.0x
+    # ── TP v18: 1.5× / 3× / 5× ATR (diperlebar) ──────────────────────────────
+    tp1 = entry + atr * CONFIG["tp1_atr_mult"]   # 1.5×
+    tp2 = entry + atr * CONFIG["tp2_atr_mult"]   # 3.0×
+    tp3 = entry + atr * CONFIG["tp3_atr_mult"]   # 5.0×
 
-    # TP3 cek liquidity void (area tanpa resistance = target ideal)
+    # TP3 cek liquidity void: area tanpa resistance signifikan
     if sr and sr.get("resistance"):
         res_above = sorted([rv["level"] for rv in sr["resistance"] if rv["level"] > entry])
+        # Jika ada gap besar antar resistance, pakai batas atas gap sebagai TP3
         if len(res_above) >= 2:
             gap = res_above[1] - res_above[0]
             if gap / res_above[0] > 0.05:   # gap > 5% = liquidity void
@@ -1600,11 +1513,10 @@ def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
         if len(res_above) >= 2 and res_above[1] > tp2:
             tp2 = max(tp2, res_above[1])
 
-    tp1 = max(tp1, entry * 1.010)   # minimal +1%
-    tp2 = max(tp2, tp1   * 1.010)
-    tp3 = max(tp3, tp2   * 1.015)
+    tp1 = max(tp1, entry * 1.008)
+    tp2 = max(tp2, tp1   * 1.01)
+    tp3 = max(tp3, tp2   * 1.02)
 
-    # ── Risk-Reward Calculation ────────────────────────────────────────────────
     risk = entry - sl
     rr1  = round((tp1 - entry) / risk, 1) if risk > 0 else 0.0
     rr2  = round((tp2 - entry) / risk, 1) if risk > 0 else 0.0
@@ -1633,8 +1545,6 @@ def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
         "atr_pct":       round(atr_pct_now, 2),
         "sl_method":     entry_reason,
         "market_regime": market_regime,
-        "swing_low_20":  round(swing_low_20, 8),
-        "sl_liquidity":  round(sl_liquidity, 8),
         "trail_note":    "Trailing: TP1→SL=Entry | TP2→SL=TP1 | TP3 free run",
         "used_resistance": bool(sr and sr.get("resistance")),
         "t1_source":     f"ATR×{CONFIG['tp1_atr_mult']}",
@@ -1642,6 +1552,528 @@ def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
         "t3_source":     f"ATR×{CONFIG['tp3_atr_mult']} / Liq Void",
         "atr_pct_abs":   round(atr / entry * 100, 2) if entry > 0 else 0.0,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  📊  NEW v19 INDICATORS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calc_ema(candles, period):
+    """
+    STEP 6 v19 — Exponential Moving Average.
+    Digunakan untuk trend filter EMA20/EMA50.
+    """
+    if len(candles) < period:
+        return None
+    closes = [c["close"] for c in candles]
+    k = 2.0 / (period + 1)
+    ema = sum(closes[:period]) / period
+    for price in closes[period:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+
+def calc_ema_trend(candles):
+    """
+    STEP 6 v19 — Trend Context Filter via EMA20/EMA50.
+
+    Rules:
+      - EMA20 < EMA50 → bearish bias → penalti score −8
+      - price < EMA50 → strong downtrend → REJECT gate
+    Returns dict dengan ema20, ema50, trend, should_reject, score_penalty.
+    """
+    ema20 = calc_ema(candles, CONFIG["ema_fast"])
+    ema50 = calc_ema(candles, CONFIG["ema_slow"])
+    price = candles[-1]["close"]
+
+    if ema20 is None or ema50 is None:
+        return {"ema20": None, "ema50": None, "trend": "UNKNOWN",
+                "should_reject": False, "score_penalty": 0, "label": "EMA data kurang"}
+
+    if price < ema50:
+        trend         = "DOWNTREND"
+        should_reject = True
+        penalty       = CONFIG["score_penalty_bearish"]
+        label         = (f"📉 DOWNTREND: harga ${price:.4g} < EMA50 {ema50:.4g} "
+                         f"— GATE GAGAL (strong downtrend)")
+    elif ema20 < ema50:
+        trend         = "BEARISH"
+        should_reject = False
+        penalty       = CONFIG["score_penalty_bearish"]
+        label         = (f"📉 Bearish bias: EMA20 {ema20:.4g} < EMA50 {ema50:.4g} "
+                         f"— penalti {penalty}")
+    elif ema20 > ema50 and price > ema20:
+        trend         = "UPTREND"
+        should_reject = False
+        penalty       = 0
+        label         = f"📈 Uptrend: price > EMA20 {ema20:.4g} > EMA50 {ema50:.4g}"
+    else:
+        trend         = "NEUTRAL"
+        should_reject = False
+        penalty       = 0
+        label         = f"〰️ Neutral: EMA20 {ema20:.4g} / EMA50 {ema50:.4g}"
+
+    return {
+        "ema20":         round(ema20, 8),
+        "ema50":         round(ema50, 8),
+        "trend":         trend,
+        "should_reject": should_reject,
+        "score_penalty": penalty,
+        "label":         label,
+        "price_vs_ema50": round((price - ema50) / ema50 * 100, 2) if ema50 > 0 else 0,
+    }
+
+
+def calc_vol_zscore(candles):
+    """
+    STEP 10 v19 — Volume Z-Score.
+
+    z = (vol_current − mean_vol) / std_vol
+
+    Jika z > 3 → volume anomali ekstrem → boost volume_score.
+    """
+    window = CONFIG["vol_zscore_window"]
+    if len(candles) < window + 1:
+        return {"z": 0.0, "is_anomaly": False, "label": "Data kurang", "boost": 0}
+
+    recent_vols  = [c["volume_usd"] for c in candles[-(window + 1):-1]]
+    current_vol  = candles[-1]["volume_usd"]
+
+    mean_v = sum(recent_vols) / len(recent_vols)
+    var_v  = sum((v - mean_v) ** 2 for v in recent_vols) / len(recent_vols)
+    std_v  = var_v ** 0.5
+
+    if std_v <= 0:
+        return {"z": 0.0, "is_anomaly": False, "label": "Std=0", "boost": 0}
+
+    z = (current_vol - mean_v) / std_v
+    is_anomaly = z > CONFIG["vol_zscore_boost"]
+
+    label = (
+        f"🔺 Volume Z-Score {z:.1f}σ — aktivitas tidak normal (anomaly)" if is_anomaly
+        else f"Volume Z-Score {z:.1f}σ — normal"
+    )
+    return {
+        "z":          round(z, 2),
+        "is_anomaly": is_anomaly,
+        "label":      label,
+        "boost":      8 if z > 5 else (5 if is_anomaly else 0),
+        "mean_vol":   mean_v,
+        "std_vol":    std_v,
+    }
+
+
+def calc_micro_breakout(candles):
+    """
+    STEP 11 v19 — Micro Breakout Detection.
+
+    Jika harga saat ini > highest_high dari N candle terakhir
+    → breakout baru → skor tinggi.
+    """
+    lookback = CONFIG["micro_breakout_lookback"]
+    if len(candles) < lookback + 1:
+        return {"is_breakout": False, "highest_high": 0.0, "score": 0,
+                "label": "Data kurang"}
+
+    prev_candles  = candles[-(lookback + 1):-1]
+    highest_high  = max(c["high"] for c in prev_candles)
+    price_now     = candles[-1]["close"]
+    is_breakout   = price_now > highest_high
+
+    score = CONFIG["score_micro_breakout"] if is_breakout else 0
+    label = (
+        f"🚀 MICRO BREAKOUT: {price_now:.6g} > Highest {highest_high:.6g} "
+        f"({lookback} candle)"
+        if is_breakout else
+        f"No breakout: {price_now:.6g} vs High {highest_high:.6g}"
+    )
+    return {
+        "is_breakout":  is_breakout,
+        "highest_high": round(highest_high, 8),
+        "score":        score,
+        "label":        label,
+        "gap_pct":      round((price_now - highest_high) / highest_high * 100, 2),
+    }
+
+
+def calc_candle_imbalance(candles_15m):
+    """
+    STEP 12 v19 — Orderbook Imbalance Proxy.
+
+    Proxy menggunakan candle body + wick ratio sebagai estimasi bid/ask pressure.
+    imbalance = buy_vol_est / sell_vol_est
+    Jika imbalance > 1.5 → bullish imbalance → boost score.
+    """
+    window = min(8, len(candles_15m))
+    if window < 3:
+        return {"imbalance": 1.0, "is_bullish": False, "score": 0,
+                "label": "Data kurang"}
+
+    recent = candles_15m[-window:]
+    buy_vol = 0.0
+    sell_vol = 0.0
+
+    for c in recent:
+        rng = c["high"] - c["low"]
+        if rng <= 0:
+            buy_vol += c["volume"] * 0.5
+            sell_vol += c["volume"] * 0.5
+            continue
+        buy_frac  = (c["close"] - c["low"]) / rng
+        sell_frac = 1.0 - buy_frac
+        buy_vol  += c["volume"] * buy_frac
+        sell_vol += c["volume"] * sell_frac
+
+    if sell_vol <= 0:
+        return {"imbalance": 2.0, "is_bullish": True, "score": 5,
+                "label": "Full buy imbalance"}
+
+    imbalance  = buy_vol / sell_vol
+    is_bullish = imbalance > 1.5
+
+    score = 5 if imbalance > 2.0 else (3 if is_bullish else 0)
+    label = (
+        f"📊 OB Imbalance {imbalance:.2f}x — buy dominan (proxy bullish)"
+        if is_bullish else
+        f"OB Imbalance {imbalance:.2f}x — balanced/bearish"
+    )
+    return {
+        "imbalance":  round(imbalance, 3),
+        "is_bullish": is_bullish,
+        "score":      score,
+        "label":      label,
+    }
+
+
+def detect_whale_accumulation(candles):
+    """
+    STEP 16 v19 — Whale Accumulation Detection.
+
+    Pattern: vol naik + harga sideways + ATR menyempit
+    → smart money akumulasi diam-diam sebelum pump.
+    Berbeda dari whale_order (single candle) — ini deteksi pola multi-candle.
+    """
+    window = 12
+    if len(candles) < window + 12:
+        return {"is_accum": False, "score": 0, "label": "Data kurang"}
+
+    recent   = candles[-window:]
+    baseline = candles[-(window + 12):-window]
+
+    # Vol naik
+    avg_recent   = sum(c["volume_usd"] for c in recent)   / len(recent)
+    avg_baseline = sum(c["volume_usd"] for c in baseline) / len(baseline)
+    vol_rising   = avg_recent >= avg_baseline * CONFIG["whale_accum_vol_min"] if avg_baseline > 0 else False
+
+    # Price sideways
+    hi  = max(c["high"]  for c in recent)
+    lo  = min(c["low"]   for c in recent)
+    mid = (hi + lo) / 2
+    range_pct    = (hi - lo) / mid * 100 if mid > 0 else 99.0
+    price_sideways = range_pct <= CONFIG["whale_accum_range_max"]
+
+    # ATR menyempit (kompresi)
+    atr_r  = _atr_n(candles, window)
+    atr_b  = _atr_n(candles[:-window], window) if len(candles) > window * 2 else atr_r
+    atr_contracting = (atr_r / atr_b) <= CONFIG["whale_accum_atr_max"] if atr_b > 0 else False
+
+    n_cond = sum([vol_rising, price_sideways, atr_contracting])
+    is_accum = n_cond >= 2  # min 2 dari 3 kondisi
+
+    score = CONFIG["score_whale_accum"] if n_cond >= 3 else (4 if n_cond == 2 else 0)
+
+    if n_cond >= 3:
+        label = (f"🐳 Whale Accumulation CONFIRMED — vol {avg_recent/avg_baseline:.1f}x, "
+                 f"range {range_pct:.1f}%, ATR menyempit") if avg_baseline > 0 else "🐳 Whale Accum"
+    elif n_cond == 2:
+        label = f"🐳 Whale Accum PROBABLE ({n_cond}/3 kondisi)"
+    else:
+        label = f"No whale accum ({n_cond}/3)"
+
+    return {
+        "is_accum":        is_accum,
+        "n_cond":          n_cond,
+        "vol_rising":      vol_rising,
+        "price_sideways":  price_sideways,
+        "atr_contracting": atr_contracting,
+        "range_pct":       round(range_pct, 2),
+        "score":           score,
+        "label":           label,
+    }
+
+
+def calc_ai_weighted_score(vol_spike, micro_mom, mom_accel, buy_press, liq_sweep,
+                            micro_breakout, rsi, bb_squeeze, vol_zscore, energy,
+                            candle_imbalance, whale_accum):
+    """
+    STEP 4 v19 — AI-Style Weighted Score Engine.
+
+    Setiap komponen dinormalisasi ke [0,100] lalu dikalikan bobot:
+
+    score = 0.30 * volume_score
+          + 0.20 * acceleration_score
+          + 0.20 * momentum_score
+          + 0.15 * liquidity_score
+          + 0.10 * breakout_score
+          + 0.05 * rsi_score
+
+    Return: weighted_score (0-100) dan breakdown per komponen.
+    """
+    # ── Volume score [0-100] ───────────────────────────────────────────────────
+    vs_ratio = vol_spike.get("ratio", 0)
+    vol_base = min(vs_ratio / 3.0, 1.0) * 60                  # vol spike max 60
+    zboost   = min(vol_zscore.get("z", 0) / 5.0, 1.0) * 40   # z-score max 40
+    volume_score = min(vol_base + zboost, 100.0)
+
+    # ── Acceleration score [0-100] (5m micro + 1h secondary) ──────────────────
+    ma_raw  = micro_mom.get("accel", 0)
+    accel_5m = min(max(ma_raw / 0.01, 0), 1.0) * 70           # 5m micro max 70
+    ma1h     = mom_accel.get("acceleration", 0)
+    accel_1h = min(max(ma1h / 0.005, 0), 1.0) * 30            # 1h secondary max 30
+    acceleration_score = min(accel_5m + accel_1h, 100.0)
+
+    # ── Momentum score [0-100] (buy pressure + imbalance) ─────────────────────
+    bp_ratio  = buy_press.get("buy_ratio", 0.5)
+    bp_score  = max(bp_ratio - 0.5, 0) / 0.25 * 70            # 0.5→0, 0.75→70
+    ob_score  = min(candle_imbalance.get("imbalance", 1.0) / 2.0, 1.0) * 30
+    momentum_score = min(bp_score + ob_score, 100.0)
+
+    # ── Liquidity score [0-100] (liq sweep + whale + energy) ──────────────────
+    lq_sweep  = 30 if liq_sweep.get("is_sweep") else 0
+    lq_whale  = 35 if whale_accum.get("is_accum") else 0
+    lq_energy = 35 if energy.get("is_buildup") else 0
+    liquidity_score = min(lq_sweep + lq_whale + lq_energy, 100.0)
+
+    # ── Breakout score [0-100] ─────────────────────────────────────────────────
+    bo_micro = 50 if micro_breakout.get("is_breakout") else 0
+    bo_bb    = 30 if bb_squeeze else 0
+    bo_gap   = min(abs(micro_breakout.get("gap_pct", 0)) / 2.0, 1.0) * 20
+    breakout_score = min(bo_micro + bo_bb + bo_gap, 100.0)
+
+    # ── RSI score [0-100] (ideal zone = highest) ──────────────────────────────
+    if 45 <= rsi <= 58:
+        rsi_score = 100.0          # perfect pre-pump zone
+    elif 40 <= rsi < 45 or 58 < rsi <= 62:
+        rsi_score = 70.0
+    elif 35 <= rsi < 40:
+        rsi_score = 40.0           # oversold — might bounce but not ideal
+    elif rsi > 62:
+        rsi_score = max(0.0, 100.0 - (rsi - 62) * 5)
+    else:
+        rsi_score = 20.0
+
+    # ── Weighted sum ──────────────────────────────────────────────────────────
+    w = CONFIG
+    weighted = (
+        w["wscore_volume"]    * volume_score
+      + w["wscore_accel"]     * acceleration_score
+      + w["wscore_momentum"]  * momentum_score
+      + w["wscore_liquidity"] * liquidity_score
+      + w["wscore_breakout"]  * breakout_score
+      + w["wscore_rsi"]       * rsi_score
+    )
+
+    return {
+        "weighted_score":      round(weighted, 1),
+        "volume_score":        round(volume_score, 1),
+        "acceleration_score":  round(acceleration_score, 1),
+        "momentum_score":      round(momentum_score, 1),
+        "liquidity_score":     round(liquidity_score, 1),
+        "breakout_score":      round(breakout_score, 1),
+        "rsi_score":           round(rsi_score, 1),
+    }
+
+
+def calc_pump_probability_v19(score_raw):
+    """
+    STEP 5 v19 — Logistic Probability Model.
+
+    P(pump) = 1 / (1 + exp(-k * (score - threshold)))
+
+    Parameters (dari audit):
+      k = 0.08
+      threshold = 55
+    """
+    k   = CONFIG["logistic_k"]
+    thr = CONFIG["logistic_threshold"]
+    prob = 1.0 / (1.0 + math.exp(-k * (score_raw - thr)))
+    return round(prob * 100, 1)
+
+
+def calc_wick_ratio(candles, lookback=3):
+    """
+    STEP 9 v19 — Wick Ratio Filter (Whale Trap Detection).
+
+    wick_ratio = (high - close) / (high - low)
+
+    Jika wick_ratio besar → ada distribusi/rejection di atas harga
+    → kemungkinan whale trap → penalti / reject.
+    """
+    if len(candles) < lookback:
+        return {"ratio": 0.0, "is_trap": False, "penalty": 0, "label": ""}
+
+    recent = candles[-lookback:]
+    ratios = []
+    for c in recent:
+        rng = c["high"] - c["low"]
+        if rng > 0:
+            ratios.append((c["high"] - c["close"]) / rng)
+        else:
+            ratios.append(0.0)
+
+    avg_wick = sum(ratios) / len(ratios)
+    is_trap  = avg_wick > CONFIG["wick_ratio_max"]
+    penalty  = -8 if avg_wick > 0.55 else (-4 if is_trap else 0)
+    label    = (
+        f"⚠️ Wick Trap {avg_wick:.2f} — distribusi/rejection di atas harga"
+        if is_trap else ""
+    )
+    return {
+        "ratio":    round(avg_wick, 3),
+        "is_trap":  is_trap,
+        "penalty":  penalty,
+        "label":    label,
+        "ratios":   [round(r, 3) for r in ratios],
+    }
+
+
+def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
+                   rsi, buy_ratio, vol_ratio, price_pos, alert_level, bos_level,
+                   liq_sweep):
+    """
+    STEP 1, 2, 3 v19 — Adaptive Entry + Liquidity-Aware SL + Dynamic TP.
+
+    STEP 1 — Adaptive Entry (always near current price):
+      entry = min(VWAP, price + ATR * 0.25)
+      Override per regime untuk RR yang lebih baik.
+
+    STEP 2 — Liquidity-Aware SL:
+      swing_low = lowest low last 20 candles
+      SL = min(swing_low − ATR*0.5, entry − ATR*1.5)
+
+    STEP 3 — Dynamic TP:
+      TP1 = entry + ATR * 2
+      TP2 = entry + ATR * 3.5
+      TP3 = entry + ATR * 5
+    """
+    atr = atr_abs_val
+    atr_pct_now = (atr / price_now * 100) if price_now > 0 else 2.0
+
+    # ── STEP 1: Adaptive Entry ────────────────────────────────────────────────
+    # Base: min(VWAP, price + ATR*0.25) — selalu dekat harga
+    base_entry = min(vwap, price_now + atr * 0.25)
+
+    # Regime override untuk RR lebih baik
+    if market_regime == "PULLBACK":
+        # Tunggu pullback ke VWAP − 0.3×ATR
+        pullback_entry = vwap - atr * CONFIG["entry_pullback_atr_mult"]
+        entry = min(base_entry, pullback_entry)
+        if entry < price_now * 0.985:   # jangan terlalu jauh
+            entry = base_entry
+        entry_reason = f"PULLBACK adaptive — min(VWAP,price+ATR*0.25) vs VWAP−0.3ATR"
+
+    elif market_regime == "SWEEP" and liq_sweep and liq_sweep.get("is_sweep"):
+        sweep_low    = liq_sweep.get("sweep_low", price_now * 0.98)
+        sweep_entry  = sweep_low + atr * CONFIG["entry_sweep_atr_mult"]
+        entry        = min(base_entry, sweep_entry)
+        entry_reason = f"SWEEP adaptive — sweep_low {sweep_low:.6g} + 0.2ATR"
+
+    elif market_regime == "BREAKOUT":
+        # Di atas harga tapi tidak jauh
+        res_levels = []
+        if sr and sr.get("resistance"):
+            res_levels = [rv["level"] for rv in sr["resistance"]
+                          if rv["level"] > price_now * 0.998]
+        if res_levels:
+            breakout_lvl = min(res_levels)
+            entry        = min(breakout_lvl * 1.005, price_now + atr * 0.25)
+            entry_reason = f"BREAKOUT adaptive — near R1 {breakout_lvl:.6g}"
+        else:
+            entry        = base_entry
+            entry_reason = "BREAKOUT adaptive — base"
+
+    else:  # NEUTRAL
+        entry        = base_entry
+        entry_reason = f"NEUTRAL adaptive — min(VWAP,price+ATR*0.25)"
+
+    # Pastikan entry masuk akal
+    if entry <= 0 or entry > price_now * 1.05:
+        entry = price_now * 1.001
+
+    # ── STEP 2: Liquidity-Aware SL ────────────────────────────────────────────
+    # swing_low = lowest low 20 candle terakhir
+    lookback_sl = min(20, len(candles) - 1)
+    swing_low   = min(c["low"] for c in candles[-lookback_sl:]) if lookback_sl > 0 else entry * 0.95
+
+    # SL = min(swing_low − ATR*0.5, entry − ATR*1.5)
+    sl_swing    = swing_low - atr * 0.5
+    sl_atr      = entry - atr * 1.5
+    sl          = min(sl_swing, sl_atr)
+
+    # Clamp SL: tidak terlalu dekat maupun terlalu jauh
+    sl = max(sl, entry * (1.0 - CONFIG["max_sl_pct"] / 100.0))
+    sl = min(sl, entry * (1.0 - CONFIG["min_sl_pct"] / 100.0))
+    if sl >= entry:
+        sl = entry * 0.975
+
+    # ── STEP 3: Dynamic TP ────────────────────────────────────────────────────
+    tp1 = entry + atr * CONFIG["tp1_v19_mult"]    # 2× ATR
+    tp2 = entry + atr * CONFIG["tp2_v19_mult"]    # 3.5× ATR
+    tp3 = entry + atr * CONFIG["tp3_v19_mult"]    # 5× ATR
+
+    # Boost TP3 jika ada liquidity void (gap resistance > 5%)
+    if sr and sr.get("resistance"):
+        res_above = sorted([rv["level"] for rv in sr["resistance"] if rv["level"] > entry])
+        if len(res_above) >= 2:
+            gap = res_above[1] - res_above[0]
+            if gap / res_above[0] > 0.05:
+                tp3 = max(tp3, res_above[1])
+        if res_above and res_above[0] > tp1:
+            tp1 = max(tp1, res_above[0])
+        if len(res_above) >= 2 and res_above[1] > tp2:
+            tp2 = max(tp2, res_above[1])
+
+    tp1 = max(tp1, entry * 1.008)
+    tp2 = max(tp2, tp1   * 1.01)
+    tp3 = max(tp3, tp2   * 1.02)
+
+    risk = entry - sl
+    rr1  = round((tp1 - entry) / risk, 1) if risk > 0 else 0.0
+    rr2  = round((tp2 - entry) / risk, 1) if risk > 0 else 0.0
+    rr3  = round((tp3 - entry) / risk, 1) if risk > 0 else 0.0
+
+    return {
+        "entry":         round(entry, 8),
+        "sl":            round(sl, 8),
+        "sl_pct":        round((entry - sl) / entry * 100, 2),
+        "t1":            round(tp1, 8),
+        "t2":            round(tp2, 8),
+        "t3":            round(tp3, 8),
+        "rr":            rr1,
+        "rr2":           rr2,
+        "rr3":           rr3,
+        "rr_str":        f"{rr1:.1f}",
+        "rr2_str":       f"{rr2:.1f}",
+        "rr3_str":       f"{rr3:.1f}",
+        "vwap":          round(vwap, 8),
+        "bos_level":     round(bos_level, 8),
+        "alert_level":   alert_level,
+        "gain_t1_pct":   round((tp1 - entry) / entry * 100, 1),
+        "gain_t2_pct":   round((tp2 - entry) / entry * 100, 1),
+        "gain_t3_pct":   round((tp3 - entry) / entry * 100, 1),
+        "atr_abs":       round(atr, 8),
+        "atr_pct":       round(atr_pct_now, 2),
+        "sl_method":     entry_reason,
+        "market_regime": market_regime,
+        "trail_note":    "Trailing v19: TP1→SL=Entry | TP2→SL=TP1 | TP3 free run",
+        "swing_low":     round(swing_low, 8),
+        "used_resistance": bool(sr and sr.get("resistance")),
+        "t1_source":     f"ATR×{CONFIG['tp1_v19_mult']}",
+        "t2_source":     f"ATR×{CONFIG['tp2_v19_mult']}",
+        "t3_source":     f"ATR×{CONFIG['tp3_v19_mult']} / Liq Void",
+        "atr_pct_abs":   round(atr / entry * 100, 2) if entry > 0 else 0.0,
+    }
+
 
 def calc_accumulation_phase(candles):
     """
@@ -1994,505 +2426,6 @@ def calc_volume_acceleration(candles):
         return 0.0
     return (vol_1h - vol_3h) / vol_3h
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  📊  NEW v19 INDICATORS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def calc_ema20_ema50(candles):
-    """
-    FIX v19 #6 — Trend Context Filter.
-
-    Hitung EMA20 dan EMA50 dari close price candle 1h.
-    Digunakan untuk mendeteksi konteks tren dan memfilter sinyal pada downtrend.
-
-    Rule:
-      - if EMA20 < EMA50: reduce score (downtrend konteks)
-      - if price < EMA50: REJECT sinyal (strong downtrend gate)
-    """
-    if len(candles) < 50:
-        price = candles[-1]["close"] if candles else 0.0
-        return {
-            "ema20": price, "ema50": price,
-            "is_downtrend": False, "is_strong_downtrend": False,
-            "ema20_above_ema50": True, "label": "Data kurang",
-        }
-    closes  = [c["close"] for c in candles]
-    ema20   = _calc_ema_series(closes, 20)
-    ema50   = _calc_ema_series(closes, 50)
-    price   = candles[-1]["close"]
-    if ema20 is None or ema50 is None or ema50 == 0:
-        return {
-            "ema20": price, "ema50": price,
-            "is_downtrend": False, "is_strong_downtrend": False,
-            "ema20_above_ema50": True, "label": "EMA calc error",
-        }
-    ema20_above = ema20 >= ema50
-    price_above_ema50 = price >= ema50
-    is_downtrend        = not ema20_above        # EMA20 < EMA50
-    is_strong_downtrend = not price_above_ema50  # price < EMA50
-
-    if is_strong_downtrend:
-        label = (f"🔻 Strong Downtrend — Price {_fmt_price(price)} < EMA50 {_fmt_price(ema50)} "
-                 f"| EMA20={_fmt_price(ema20)}")
-    elif is_downtrend:
-        label = (f"⚠️ Downtrend Context — EMA20 {_fmt_price(ema20)} < EMA50 {_fmt_price(ema50)} "
-                 f"(score dikurangi)")
-    else:
-        gap_pct = (ema20 - ema50) / ema50 * 100
-        label = (f"✅ Uptrend Context — EMA20 > EMA50 (+{gap_pct:.2f}%) "
-                 f"| price {_fmt_price(price)}")
-
-    return {
-        "ema20":                round(ema20, 8),
-        "ema50":                round(ema50, 8),
-        "price_vs_ema50_pct":   round((price - ema50) / ema50 * 100, 2),
-        "ema20_vs_ema50_pct":   round((ema20 - ema50) / ema50 * 100, 2),
-        "is_downtrend":         is_downtrend,
-        "is_strong_downtrend":  is_strong_downtrend,
-        "ema20_above_ema50":    ema20_above,
-        "price_above_ema50":    price_above_ema50,
-        "label":                label,
-    }
-
-
-def calc_volume_zscore(candles):
-    """
-    FIX v19 #10 — Volume Z-Score.
-
-    Deteksi aktivitas trading yang tidak normal secara statistik:
-      z = (volume_sekarang - mean_volume) / std_volume
-
-    Jika z > 3 → abnormal activity → boost volume_score.
-    Z-score lebih robust daripada simple ratio karena memperhitungkan
-    distribusi volume historis, bukan hanya rata-rata.
-    """
-    lookback = CONFIG["vol_zscore_lookback"]
-    if len(candles) < lookback + 2:
-        return {"z": 0.0, "mean_vol": 0.0, "std_vol": 0.0,
-                "current_vol": 0.0, "is_anomaly": False, "label": "Data kurang"}
-
-    baseline_vols = [c["volume_usd"] for c in candles[-(lookback + 1):-1]]
-    current_vol   = candles[-1]["volume_usd"]
-
-    if len(baseline_vols) < 2:
-        return {"z": 0.0, "mean_vol": 0.0, "std_vol": 0.0,
-                "current_vol": current_vol, "is_anomaly": False, "label": "Data tidak cukup"}
-
-    mean_vol = statistics.mean(baseline_vols)
-    try:
-        std_vol  = statistics.stdev(baseline_vols)
-    except statistics.StatisticsError:
-        std_vol  = 0.0
-
-    if std_vol <= 0 or mean_vol <= 0:
-        return {"z": 0.0, "mean_vol": mean_vol, "std_vol": std_vol,
-                "current_vol": current_vol, "is_anomaly": False, "label": "Std vol nol"}
-
-    z           = (current_vol - mean_vol) / std_vol
-    is_anomaly  = z > CONFIG["vol_zscore_threshold"]   # z > 3
-
-    if is_anomaly:
-        label = (f"📊 Volume Z-Score {z:.1f}σ — ANOMALI STATISTIK! "
-                 f"(vol {current_vol/mean_vol:.1f}x mean)")
-    elif z > 2:
-        label = f"📊 Volume Z-Score {z:.1f}σ — elevated (belum anomali)"
-    else:
-        label = f"Volume Z-Score {z:.1f}σ — normal"
-
-    return {
-        "z":            round(z, 2),
-        "mean_vol":     round(mean_vol, 2),
-        "std_vol":      round(std_vol, 2),
-        "current_vol":  round(current_vol, 2),
-        "is_anomaly":   is_anomaly,
-        "label":        label,
-    }
-
-
-def calc_micro_breakout(candles):
-    """
-    FIX v19 #11 — Micro Breakout Detection.
-
-    Hitung highest_high dari 20 candle terakhir.
-    Jika harga saat ini melebihi highest_high_20 → breakout valid.
-
-    Ini lebih sensitif daripada BOS yang membutuhkan candle close di atas level.
-    Micro breakout bisa menjadi konfirmasi awal pump.
-    """
-    lookback = CONFIG["micro_breakout_lookback"]
-    if len(candles) < lookback + 1:
-        return {"is_breakout": False, "highest_high_20": 0.0,
-                "price": 0.0, "gap_pct": 0.0, "label": "Data kurang"}
-
-    reference     = candles[-(lookback + 1):-1]
-    highest_high  = max(c["high"] for c in reference)
-    price_now     = candles[-1]["close"]
-    high_now      = candles[-1]["high"]
-
-    is_breakout   = price_now > highest_high
-    gap_pct       = (price_now - highest_high) / highest_high * 100 if highest_high > 0 else 0.0
-
-    if is_breakout:
-        label = (f"🔺 Micro Breakout — Price {_fmt_price(price_now)} > "
-                 f"High{lookback} {_fmt_price(highest_high)} (+{gap_pct:.2f}%)")
-    elif high_now > highest_high:
-        label = (f"⚡ Wick Break — High {_fmt_price(high_now)} > "
-                 f"High{lookback} {_fmt_price(highest_high)} (close belum konfirmasi)")
-    else:
-        gap_to_break = (highest_high - price_now) / price_now * 100 if price_now > 0 else 0
-        label = f"— High{lookback}: {_fmt_price(highest_high)} (jarak {gap_to_break:.2f}%)"
-
-    return {
-        "is_breakout":      is_breakout,
-        "highest_high_20":  round(highest_high, 8),
-        "price":            round(price_now, 8),
-        "gap_pct":          round(gap_pct, 3),
-        "label":            label,
-    }
-
-
-def get_orderbook_imbalance(symbol):
-    """
-    FIX v19 #12 — Orderbook Imbalance.
-
-    Ambil depth orderbook dari Bitget dan hitung rasio bid/ask volume.
-    imbalance = total_bid_qty / total_ask_qty
-
-    Jika imbalance > 1.5 → lebih banyak buyer → bullish pressure.
-    Ini adalah konfirmasi real-time bahwa permintaan melebihi penawaran.
-    """
-    try:
-        data = safe_get(
-            f"{BITGET_BASE}/api/v2/mix/market/merge-depth",
-            params={
-                "symbol":      symbol,
-                "productType": "usdt-futures",
-                "precision":   "scale0",
-                "limit":       "20",
-            },
-        )
-        if not data or data.get("code") != "00000":
-            return {"imbalance": 1.0, "bid_vol": 0.0, "ask_vol": 0.0,
-                    "is_bullish": False, "label": "Data tidak tersedia"}
-
-        d       = data.get("data", {})
-        bids    = d.get("bids", [])
-        asks    = d.get("asks", [])
-
-        if not bids or not asks:
-            return {"imbalance": 1.0, "bid_vol": 0.0, "ask_vol": 0.0,
-                    "is_bullish": False, "label": "Bids/asks kosong"}
-
-        # Sum volume dari 20 level teratas
-        bid_vol = sum(float(b[1]) for b in bids[:20] if len(b) >= 2)
-        ask_vol = sum(float(a[1]) for a in asks[:20] if len(a) >= 2)
-
-        if ask_vol <= 0:
-            return {"imbalance": 1.0, "bid_vol": bid_vol, "ask_vol": 0.0,
-                    "is_bullish": False, "label": "Ask volume nol"}
-
-        imbalance  = bid_vol / ask_vol
-        min_imbal  = CONFIG["ob_imbalance_min"]
-        is_bullish = imbalance > min_imbal
-
-        if is_bullish:
-            label = (f"📗 OB Imbalance {imbalance:.2f}x — "
-                     f"bid {bid_vol:.0f} vs ask {ask_vol:.0f} = BULLISH PRESSURE")
-        elif imbalance < (1 / min_imbal):
-            label = (f"📕 OB Imbalance {imbalance:.2f}x — "
-                     f"ask mendominasi = bearish pressure")
-        else:
-            label = f"OB Imbalance {imbalance:.2f}x — netral"
-
-        return {
-            "imbalance":   round(imbalance, 3),
-            "bid_vol":     round(bid_vol, 2),
-            "ask_vol":     round(ask_vol, 2),
-            "is_bullish":  is_bullish,
-            "label":       label,
-        }
-    except Exception as e:
-        log.debug(f"OB imbalance error: {e}")
-        return {"imbalance": 1.0, "bid_vol": 0.0, "ask_vol": 0.0,
-                "is_bullish": False, "label": f"Error: {str(e)[:40]}"}
-
-
-def detect_whale_accumulation(candles):
-    """
-    FIX v19 #16 — Whale Accumulation Detection.
-
-    Kondisi whale accumulation (diam-diam sebelum pump besar):
-      1. Volume naik: rata-rata vol 3 candle > 1.3x baseline 12 candle
-      2. Harga sideways: price range 6 candle < 1.5%
-      3. Volatilitas menurun: ATR_short / ATR_long < 0.80
-
-    Pattern ini adalah "absorb & hold" — whale menyerap supply
-    sambil menjaga harga flat, lalu akan pump mendadak.
-    """
-    if len(candles) < 20:
-        return {"is_accumulating": False, "vol_rising": False,
-                "price_sideways": False, "vol_decreasing": False,
-                "score_boost": 0, "label": "Data kurang"}
-
-    # Kondisi 1: volume naik
-    vol_3c      = sum(c["volume_usd"] for c in candles[-3:]) / 3
-    vol_base    = sum(c["volume_usd"] for c in candles[-15:-3]) / 12 if len(candles) >= 15 else vol_3c
-    vol_ratio   = vol_3c / vol_base if vol_base > 0 else 1.0
-    vol_rising  = vol_ratio >= CONFIG["whale_accum_vol_ratio"]
-
-    # Kondisi 2: harga sideways (range 6 candle < 1.5%)
-    recent_6    = candles[-6:]
-    hi6         = max(c["high"]  for c in recent_6)
-    lo6         = min(c["low"]   for c in recent_6)
-    mid6        = (hi6 + lo6) / 2
-    range_pct   = (hi6 - lo6) / mid6 * 100 if mid6 > 0 else 99.0
-    price_sideways = range_pct <= CONFIG["whale_accum_range_max"]
-
-    # Kondisi 3: volatilitas menurun (ATR short/long < 0.80)
-    atr_s       = _atr_n(candles, 3)
-    atr_l       = _atr_n(candles, 12)
-    atr_ratio   = (atr_s / atr_l) if atr_l > 0 else 1.0
-    vol_dec     = atr_ratio <= CONFIG["whale_accum_atr_ratio"]
-
-    n_cond      = sum([vol_rising, price_sideways, vol_dec])
-    is_accum    = n_cond >= 2   # minimal 2 dari 3 kondisi
-
-    if is_accum:
-        score_boost = CONFIG["whale_accum_score"]
-        label = (f"🐳 Whale Accumulation ({n_cond}/3 cond) — "
-                 f"vol {vol_ratio:.1f}x, range {range_pct:.1f}%, ATR ratio {atr_ratio:.2f}")
-    else:
-        score_boost = 0
-        label = (f"— Whale Accum {n_cond}/3 "
-                 f"(vol={vol_rising}, sideways={price_sideways}, atr_dec={vol_dec})")
-
-    return {
-        "is_accumulating": is_accum,
-        "vol_rising":      vol_rising,
-        "price_sideways":  price_sideways,
-        "vol_decreasing":  vol_dec,
-        "vol_ratio":       round(vol_ratio, 2),
-        "range_pct":       round(range_pct, 2),
-        "atr_ratio":       round(atr_ratio, 3),
-        "n_cond":          n_cond,
-        "score_boost":     score_boost,
-        "label":           label,
-    }
-
-
-def calc_wick_ratio(candles):
-    """
-    FIX v19 #9 — Wick Ratio untuk Fake Pump Gate.
-
-    wick_ratio = (high - close) / (high - low)
-
-    Upper wick besar menunjukkan:
-    - Whale menjual ke atas (distribusi)
-    - Bearish rejection di resistance
-    - Jebakan (bull trap / stop hunt atas)
-
-    Jika wick_ratio > 0.4 pada candle terbaru → sinyal ditolak.
-    """
-    if len(candles) < 2:
-        return {"wick_ratio": 0.0, "is_bearish_wick": False, "label": "Data kurang"}
-
-    c        = candles[-1]
-    hi       = c["high"]
-    lo       = c["low"]
-    cl       = c["close"]
-    rng      = hi - lo
-
-    if rng <= 0:
-        return {"wick_ratio": 0.0, "is_bearish_wick": False,
-                "label": "Range nol (candle doji)"}
-
-    wick_ratio       = (hi - cl) / rng
-    is_bearish_wick  = wick_ratio > CONFIG["wick_ratio_gate_max"]
-
-    if is_bearish_wick:
-        label = (f"⚠️ Bearish Upper Wick {wick_ratio:.2f} > {CONFIG['wick_ratio_gate_max']} "
-                 f"— distribusi/whale trap terdeteksi")
-    else:
-        label = f"Wick ratio {wick_ratio:.2f} — OK (batas {CONFIG['wick_ratio_gate_max']})"
-
-    return {
-        "wick_ratio":      round(wick_ratio, 3),
-        "is_bearish_wick": is_bearish_wick,
-        "label":           label,
-    }
-
-
-def calc_early_pump_signal(candles, vwap, vol_spike, price_pos_48):
-    """
-    FIX v19 #14 — Early Pump Detection.
-
-    Kondisi deteksi pump lebih awal (sebelum price breakout):
-      1. Volume acceleration aktif (vol_spike tier >= 1)
-      2. Harga di atas VWAP (demand zone)
-      3. Posisi dalam range < 40% (masih di bawah tengah range)
-
-    Ketiga kondisi sekaligus menunjukkan:
-    "Ada minat beli signifikan, harga masih murah relatif terhadap range,
-     dan di atas VWAP → setup ideal sebelum pump"
-    """
-    price_now = candles[-1]["close"] if candles else 0.0
-    above_vwap = price_now > vwap
-    vol_accel  = vol_spike.get("tier", 0) >= 1
-    low_range  = price_pos_48 < CONFIG["early_pump_range_max"]  # < 40%
-
-    is_early   = above_vwap and vol_accel and low_range
-
-    if is_early:
-        label = (f"⚡ EARLY PUMP SIGNAL — price > VWAP ✓ | "
-                 f"vol {vol_spike.get('ratio',0):.1f}x ✓ | "
-                 f"range pos {price_pos_48:.0%} < 40% ✓")
-    else:
-        conds = sum([above_vwap, vol_accel, low_range])
-        label = (f"Early pump {conds}/3 "
-                 f"(vwap={above_vwap}, vol={vol_accel}, range={low_range})")
-
-    return {
-        "is_early_pump":  is_early,
-        "above_vwap":     above_vwap,
-        "vol_accel":      vol_accel,
-        "low_range":      low_range,
-        "price_pos_48":   price_pos_48,
-        "label":          label,
-    }
-
-
-def calc_weighted_score_v19(vol_spike, micro_mom, mom_accel, buy_press,
-                             liq_sweep, accum, htf_accum, bos_up, rsi,
-                             vol_zscore, micro_breakout, whale_accum,
-                             ob_imbalance, energy):
-    """
-    FIX v19 #4 — AI-Style Weighted Scoring Engine.
-
-    Menggantikan linear additive scoring dengan sistem berbobot:
-      score = 0.30 * volume_score      (Phase 1: tanda paling kuat)
-            + 0.20 * acceleration_score (Phase 3: momentum 5m)
-            + 0.20 * momentum_score     (Phase 2: buy pressure)
-            + 0.15 * liquidity_score    (struktur pasar)
-            + 0.10 * breakout_score     (konfirmasi level)
-            + 0.05 * rsi_score          (kondisi RSI)
-
-    Setiap komponen dinormalisasi ke 0-100 sebelum digabungkan.
-    Hasil akhir adalah weighted_score dalam range 0-100.
-    """
-
-    # ── 1. Volume Score (0-100) ───────────────────────────────────────────────
-    # Basis: vol_spike ratio. Bobot tertinggi (30%) karena volume adalah
-    # leading indicator paling reliable untuk pump detection.
-    vol_ratio = vol_spike.get("ratio", 0)
-    if   vol_ratio >= 4.0: vs = 100
-    elif vol_ratio >= 3.0: vs = 82
-    elif vol_ratio >= 2.5: vs = 70
-    elif vol_ratio >= 2.0: vs = 58
-    elif vol_ratio >= 1.5: vs = 40
-    elif vol_ratio >= 1.0: vs = 20
-    else:                  vs = 0
-    # Z-score boost: anomali statistik = signal lebih kuat
-    if vol_zscore.get("is_anomaly", False):
-        vs = min(100, vs + CONFIG["vol_zscore_score_boost"])
-    volume_score = vs
-
-    # ── 2. Acceleration Score (0-100) ─────────────────────────────────────────
-    # Prioritaskan micro_mom 5m (lebih responsif), fallback ke 1h mom
-    if   micro_mom.get("is_strong",        False): acc_s = 90
-    elif micro_mom.get("is_accelerating",  False): acc_s = 62
-    elif mom_accel.get("is_strong",        False): acc_s = 42
-    elif mom_accel.get("is_accelerating",  False): acc_s = 25
-    else:                                           acc_s =  0
-    acceleration_score = acc_s
-
-    # ── 3. Momentum Score (0-100) — Buy Pressure ──────────────────────────────
-    # Buy pressure adalah proxy terbaik untuk demand dominance
-    buy_ratio = buy_press.get("buy_ratio", 0.5)
-    if   buy_ratio >= 0.75: mom_s = 100
-    elif buy_ratio >= 0.70: mom_s = 85
-    elif buy_ratio >= 0.65: mom_s = 70
-    elif buy_ratio >= 0.60: mom_s = 55
-    elif buy_ratio >= 0.55: mom_s = 40
-    elif buy_ratio >= 0.50: mom_s = 25
-    else:                   mom_s =  0
-    momentum_score = mom_s
-
-    # ── 4. Liquidity Score (0-100) ────────────────────────────────────────────
-    # Kombinasi faktor struktur pasar
-    liq_s = 0
-    if liq_sweep.get("is_sweep",         False): liq_s += 35
-    if accum.get("is_accumulating",      False): liq_s += 25
-    if htf_accum.get("is_htf_accum",     False): liq_s += 20
-    if whale_accum.get("is_accumulating",False): liq_s += 18
-    if energy.get("is_buildup",          False): liq_s += 15
-    # Orderbook imbalance: konfirmasi real-time
-    if ob_imbalance.get("is_bullish",    False): liq_s += CONFIG["ob_imbalance_score"]
-    liquidity_score = min(100, liq_s)
-
-    # ── 5. Breakout Score (0-100) ─────────────────────────────────────────────
-    # Micro breakout = konfirmasi level paling kuat
-    brk_s = 0
-    if micro_breakout.get("is_breakout", False): brk_s += CONFIG["micro_breakout_score"]
-    if bos_up:                                    brk_s += 25
-    breakout_score = min(100, brk_s)
-
-    # ── 6. RSI Score (0-100) ─────────────────────────────────────────────────
-    # Zona ideal pre-pump: RSI 45-60 (momentum ada, belum overbought)
-    if   45  <= rsi <= 60:  rsi_s = 100
-    elif 42  <= rsi <  45:  rsi_s = 75
-    elif 60  <  rsi <= 65:  rsi_s = 65
-    elif 38  <= rsi <  42:  rsi_s = 50
-    elif 65  <  rsi <= 70:  rsi_s = 30
-    else:                   rsi_s =  5
-    rsi_score = rsi_s
-
-    # ── Weighted Sum ──────────────────────────────────────────────────────────
-    w = CONFIG
-    weighted_score = (
-        w["wscore_w_volume"]       * volume_score +
-        w["wscore_w_acceleration"] * acceleration_score +
-        w["wscore_w_momentum"]     * momentum_score +
-        w["wscore_w_liquidity"]    * liquidity_score +
-        w["wscore_w_breakout"]     * breakout_score +
-        w["wscore_w_rsi"]          * rsi_score
-    )
-
-    return {
-        "weighted_score":      round(weighted_score, 1),
-        "volume_score":        volume_score,
-        "acceleration_score":  acceleration_score,
-        "momentum_score":      momentum_score,
-        "liquidity_score":     liquidity_score,
-        "breakout_score":      breakout_score,
-        "rsi_score":           rsi_score,
-    }
-
-
-def calc_pump_probability_v19(weighted_score):
-    """
-    FIX v19 #5 — Logistic Probability Model v19.
-
-    Menggantikan feature-sum probability dengan model berbasis weighted_score:
-
-      P(pump) = 1 / (1 + exp(-k * (weighted_score - threshold)))
-
-    Parameter (dikalibrasi untuk score 0-100):
-      k         = 0.08   (steepness: lebih tajam dari v18)
-      threshold = 55     (decision boundary — 50% probability di score 55)
-
-    Interpretasi:
-      score 40 → prob ~18%  (rendah)
-      score 55 → prob ~50%  (boundary)
-      score 65 → prob ~73%  (cukup tinggi)
-      score 75 → prob ~86%  (tinggi)
-      score 85 → prob ~93%  (sangat tinggi)
-    """
-    k         = CONFIG["prob_k"]
-    threshold = CONFIG["prob_threshold"]
-    prob      = 1.0 / (1.0 + math.exp(-k * (weighted_score - threshold)))
-    return round(prob * 100, 1)
-
 def check_volume_consistent(candles, lookback=3, min_ratio=1.5):
     """Volume tinggi harus konsisten ≥ 2 candle, bukan hanya 1 spike."""
     if len(candles) < 24:
@@ -2831,21 +2764,21 @@ def master_score(symbol, ticker):
     price_pos_48     = calc_swing_range_position(c1h, lookback=48)
     candle_dir_ratio = calc_candle_direction_ratio(c1h, lookback=6)
 
-    # ── NEW v19: Phase 1-2-3 + Micro Momentum + Timing ──────────────────────
+    # ── NEW v18/v19: Phase 1-2-3 + Micro Momentum + Timing + v19 signals ────
     vol_spike    = calc_volume_spike(c1h)
-    micro_mom    = calc_micro_momentum(c5m)          # 5m micro momentum
+    micro_mom    = calc_micro_momentum(c5m)          # v18: 5m micro momentum
     mom_accel    = calc_momentum_acceleration(c1h)   # 1h secondary signal
     buy_press    = calc_buy_pressure(c15m)
-    whale_order  = detect_whale_order(c15m, oi_data) # upgraded whale
-    fake_pump    = detect_fake_pump(c1h, buy_press["buy_ratio"], oi_data)
+    whale_order  = detect_whale_order(c15m, oi_data) # v18: upgraded whale
+    fake_pump    = detect_fake_pump(c1h, buy_press["buy_ratio"], oi_data)  # v18: upgraded fake
 
-    # ── NEW v19: Additional Indicators ───────────────────────────────────────
-    ema_trend    = calc_ema20_ema50(c1h)              # FIX v19 #6: EMA trend
-    vol_zscore   = calc_volume_zscore(c1h)            # FIX v19 #10: Z-score
-    micro_brkout = calc_micro_breakout(c1h)           # FIX v19 #11: Breakout
-    ob_imbalance = get_orderbook_imbalance(symbol)    # FIX v19 #12: OB
-    whale_accum  = detect_whale_accumulation(c1h)     # FIX v19 #16: Whale accum
-    wick_data    = calc_wick_ratio(c1h)               # FIX v19 #9: Wick ratio
+    # ── NEW v19 indicators ────────────────────────────────────────────────────
+    ema_trend      = calc_ema_trend(c1h)             # STEP 6: EMA20/EMA50 trend filter
+    vol_zscore     = calc_vol_zscore(c1h)            # STEP 10: volume z-score
+    micro_breakout = calc_micro_breakout(c1h)        # STEP 11: highest_high breakout
+    candle_imbal   = calc_candle_imbalance(c15m)     # STEP 12: orderbook proxy
+    whale_accum    = detect_whale_accumulation(c1h)  # STEP 16: whale accumulation
+    wick_filter    = calc_wick_ratio(c1h)            # STEP 9: wick trap detection
 
     # Set energy.is_strong jika funding negatif
     if energy["is_buildup"] and fstats.get("current", 1) <= 0:
@@ -2862,11 +2795,6 @@ def master_score(symbol, ticker):
     price_chg = 0.0
     if len(c1h) >= 2 and c1h[-2]["close"] > 0:
         price_chg = (c1h[-1]["close"] - c1h[-2]["close"]) / c1h[-2]["close"] * 100
-
-    # Price change 5m (untuk momentum gate)
-    price_change_5m = 0.0
-    if len(c5m) >= 2 and c5m[-2]["close"] > 0:
-        price_change_5m = (c5m[-1]["close"] - c5m[-2]["close"]) / c5m[-2]["close"] * 100
 
     # ── GATE 3: Uptrend tidak terlalu tua ────────────────────────────────────
     if uptrend["is_late"]:
@@ -2899,71 +2827,52 @@ def master_score(symbol, ticker):
         )
         return None
 
-    # ── FIX v19 #13 — GATE 7: Noise Filter — Volume & ATR Minimum ────────────
-    # Tolak koin illiquid dan flat (terlalu berisik, tidak pump-able)
+    # ── GATE 7: STEP 6 v19 — EMA Trend Filter (price < EMA50 = strong downtrend)
+    if ema_trend["should_reject"]:
+        log.info(f"  {symbol}: {ema_trend['label']} — GATE GAGAL")
+        return None
+
+    # ── GATE 8: STEP 7 v19 — VWAP Bias (pump setup mulai di atas VWAP)
+    # Sudah ada vwap_gate_tolerance (0.97) di GATE 2, tapi STEP 7 lebih ketat
+    # Gunakan sebagai soft gate: tambah penalti, bukan reject penuh
+    # (karena GATE 2 sudah handle reject di bawah 97% VWAP)
+
+    # ── GATE 9: STEP 8 v19 — Momentum Validation (5m price change)
+    if c5m and len(c5m) >= 2:
+        price_chg_5m = (c5m[-1]["close"] - c5m[-2]["close"]) / c5m[-2]["close"]
+        if price_chg_5m <= CONFIG["momentum_val_reject"]:
+            log.info(
+                f"  {symbol}: 5m price change {price_chg_5m*100:+.3f}% ≤ 0 "
+                f"— momentum negatif/flat (GATE GAGAL)"
+            )
+            return None
+    else:
+        price_chg_5m = 0.001  # fallback jika tidak ada data 5m
+
+    # ── GATE 10: STEP 13 v19 — Noise Filter (volume & ATR minimum)
     if vol_24h < CONFIG["noise_min_vol_24h"]:
         log.info(
             f"  {symbol}: Vol 24h ${vol_24h/1e6:.1f}M < ${CONFIG['noise_min_vol_24h']/1e6:.0f}M "
-            f"— FIX v19 #13 NOISE FILTER (GATE GAGAL)"
+            f"— coin terlalu illiquid (GATE GAGAL)"
         )
         return None
     if atr_pct < CONFIG["noise_min_atr_pct"]:
         log.info(
             f"  {symbol}: ATR {atr_pct:.3f}% < {CONFIG['noise_min_atr_pct']}% "
-            f"— FIX v19 #13 NOISE FILTER terlalu flat (GATE GAGAL)"
+            f"— volatilitas terlalu rendah (GATE GAGAL)"
         )
         return None
 
-    # ── FIX v19 #6 — GATE 8: Trend Context — Reject Strong Downtrend ─────────
-    # price < EMA50 = strong downtrend → pump sangat kecil kemungkinannya
-    if CONFIG["ema_trend_gate"] and ema_trend["is_strong_downtrend"]:
+    # ── GATE 11: STEP 9 v19 — Wick Trap Filter (bearish rejection candle)
+    if wick_filter["is_trap"] and wick_filter["ratio"] > 0.55:
         log.info(
-            f"  {symbol}: Price < EMA50 — FIX v19 #6 STRONG DOWNTREND GATE "
-            f"({ema_trend['label']}) (GATE GAGAL)"
-        )
-        return None
-
-    # ── FIX v19 #7 — GATE 9: Strict VWAP Bias ────────────────────────────────
-    # Pump setup harus dimulai di atas VWAP
-    # v18: toleransi 97% VWAP — terlalu longgar
-    # v19: price harus >= VWAP (strict)
-    if price_now < vwap * CONFIG["vwap_gate_tolerance"]:
-        log.info(
-            f"  {symbol}: Harga ${price_now:.6g} < VWAP ${vwap:.6g} "
-            f"— FIX v19 #7 STRICT VWAP GATE (GATE GAGAL)"
-        )
-        return None
-
-    # ── FIX v19 #8 — GATE 10: Momentum Validation ────────────────────────────
-    # Jika momentum 5m <= 0 → tidak ada urgency untuk masuk
-    if price_change_5m <= 0:
-        log.info(
-            f"  {symbol}: price_change_5m={price_change_5m:.3f}% ≤ 0 "
-            f"— FIX v19 #8 MOMENTUM GATE (GATE GAGAL)"
-        )
-        return None
-
-    # ── FIX v19 #9 — GATE 11: Wick Ratio (Bearish Rejection / Whale Trap) ────
-    if wick_data["is_bearish_wick"]:
-        log.info(
-            f"  {symbol}: Wick ratio {wick_data['wick_ratio']:.2f} > "
-            f"{CONFIG['wick_ratio_gate_max']} — "
-            f"FIX v19 #9 FAKE PUMP WICK GATE (GATE GAGAL)"
-        )
-        return None
-
-    # ── FIX v19 #9 — GATE 12: Buy Ratio Gate ─────────────────────────────────
-    # buy_ratio < 55% → distribusi / sell pressure dominan
-    if buy_press.get("buy_ratio", 0.5) < CONFIG["buy_ratio_gate_min"]:
-        log.info(
-            f"  {symbol}: Buy ratio {buy_press.get('buy_ratio',0)*100:.0f}% < "
-            f"{CONFIG['buy_ratio_gate_min']*100:.0f}% "
-            f"— FIX v19 #9 BUY RATIO GATE (GATE GAGAL)"
+            f"  {symbol}: Wick ratio {wick_filter['ratio']:.2f} > 0.55 "
+            f"— whale trap / distribusi kuat (GATE GAGAL)"
         )
         return None
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  SCORING v19 — ADDITIVE BASE + WEIGHTED SCORE OVERLAY
+    #  SCORING v19 — AI Weighted + Traditional heuristic (hybrid)
     # ══════════════════════════════════════════════════════════════════════════
     score   = 0
     signals = []
@@ -2978,25 +2887,73 @@ def master_score(symbol, ticker):
         score += buy_press["score"]
         signals.append(buy_press["label"])
 
-    # ── 0c. Micro Momentum (Phase 3 — 5m responsif) ──────────────────────────
+    # ── 0c. NEW v18: Micro Momentum (Phase 3 — 5m responsif) ─────────────────
     if micro_mom["is_accelerating"]:
         score += micro_mom["score"]
         signals.append(micro_mom["label"])
 
     # ── 0d. 1h Momentum Acceleration (secondary signal) ──────────────────────
     if mom_accel["is_accelerating"] and not micro_mom["is_accelerating"]:
+        # Hanya aktif jika micro_mom tidak aktif (hindari double count)
         score += mom_accel["score"]
         signals.append(mom_accel["label"])
 
-    # ── 0e. Whale Order Detection ─────────────────────────────────────────────
+    # ── 0e. Whale Order Detection (v18 upgraded) ──────────────────────────────
     if whale_order["is_whale"]:
         score += whale_order["score"]
         signals.append(whale_order["label"])
 
-    # ── 0f. Fake Pump Penalty (bertingkat) ───────────────────────────────────
+    # ── 0f. Fake Pump Penalty (v18 upgraded, bertingkat) ─────────────────────
     if fake_pump["is_fake"]:
         score += fake_pump["penalty"]   # nilai negatif −5/−12/−20
         signals.append(fake_pump["label"])
+
+    # ── 0g. NEW v19: EMA Trend Penalty (STEP 6) ───────────────────────────────
+    if ema_trend["score_penalty"] < 0:
+        score += ema_trend["score_penalty"]
+        signals.append(ema_trend["label"])
+    elif ema_trend["trend"] in ("UPTREND",):
+        score += 3   # bonus untuk uptrend konfirmasi
+        signals.append(ema_trend["label"])
+
+    # ── 0h. NEW v19: Volume Z-Score boost (STEP 10) ───────────────────────────
+    if vol_zscore["is_anomaly"]:
+        score += vol_zscore["boost"]
+        signals.append(vol_zscore["label"])
+
+    # ── 0i. NEW v19: Micro Breakout (STEP 11) ─────────────────────────────────
+    if micro_breakout["is_breakout"]:
+        score += micro_breakout["score"]
+        signals.append(micro_breakout["label"])
+
+    # ── 0j. NEW v19: Orderbook Imbalance proxy (STEP 12) ─────────────────────
+    if candle_imbal["is_bullish"]:
+        score += candle_imbal["score"]
+        signals.append(candle_imbal["label"])
+
+    # ── 0k. NEW v19: Whale Accumulation (STEP 16) ────────────────────────────
+    if whale_accum["is_accum"]:
+        score += whale_accum["score"]
+        signals.append(whale_accum["label"])
+
+    # ── 0l. NEW v19: Wick Trap penalty (STEP 9 — soft, severe already gated) ─
+    if wick_filter["is_trap"] and wick_filter["penalty"] < 0:
+        score += wick_filter["penalty"]
+        signals.append(wick_filter["label"])
+
+    # ── 0m. NEW v19: Early Pump Detection (STEP 14) ──────────────────────────
+    early_pump_detected = (
+        vol_accel > 0.3
+        and price_now > vwap
+        and price_pos_48 < CONFIG["early_pump_range_pos_max"]
+        and micro_mom.get("is_accelerating", False)
+    )
+    if early_pump_detected:
+        score += CONFIG["score_early_pump"]
+        signals.append(
+            f"⚡ EARLY PUMP SIGNAL — vol_accel {vol_accel*100:.0f}%, "
+            f"price>VWAP, pos {price_pos_48:.0%}<40%, micro_mom aktif"
+        )
 
     # ── 1. BB Squeeze ─────────────────────────────────────────────────────────
     bb_squeeze = bbw < CONFIG["bb_squeeze_threshold"]
@@ -3024,6 +2981,8 @@ def master_score(symbol, ticker):
             signals.append("⭐ Energy Build-Up + Funding Negatif = squeeze probability tinggi")
 
     # ── 4. Smart Money Accumulation + Volatility Compression ─────────────────
+    # FIX v18: isolasi scoring — vol_compression TIDAK dapat skor jika
+    # is_accumulating sudah aktif (mencegah double counting sinyal ATR).
     if accum["is_accumulating"] and accum["is_vol_compress"]:
         score += CONFIG["score_accumulation"] + CONFIG["score_vol_compression"]
         signals.append(
@@ -3037,6 +2996,7 @@ def master_score(symbol, ticker):
             f"sideways {accum['price_range_pct']:.1f}%, pos {accum['price_pos']:.0%}"
         )
     elif accum["is_vol_compress"]:
+        # FIX v18: hanya aktif jika is_accumulating=False
         score += CONFIG["score_vol_compression"]
         signals.append(
             f"🗜️ Volatility Compression — ATR {accum['atr_contract']:.2f}x dari baseline"
@@ -3053,6 +3013,7 @@ def master_score(symbol, ticker):
         signals.append(liq_sweep["label"])
 
     # ── 7. OI Expansion ───────────────────────────────────────────────────────
+    # Guard: skip jika energy_buildup aktif (OI sudah dihitung di sana).
     if not energy["is_buildup"]:
         if not oi_data["is_new"] and oi_data["oi_now"] > 0:
             chg = oi_data["change_pct"]
@@ -3125,10 +3086,13 @@ def master_score(symbol, ticker):
         score += CONFIG["score_bos_up"]
         signals.append(
             f"🔺 BOS Up (level {_fmt_price(bos_level)}) — breakout minor, "
-            f"konfirmasi struktur berbalik"
+            f"konfirmasi struktur berbalik (skor rendah: idealnya deteksi sebelum BOS)"
         )
 
     # ── 13. Funding rate ──────────────────────────────────────────────────────
+    # FIX v18: mutual exclusion guard — funding_neg_pct dan funding_streak
+    # hanya aktif jika funding_avg_neg TIDAK aktif, mencegah double scoring
+    # dari sumber yang sama (funding negatif) hingga +8 poin.
     f_avg = fstats["avg"]
     funding_avg_neg_active = False
 
@@ -3149,6 +3113,7 @@ def master_score(symbol, ticker):
     else:
         signals.append(f"Funding avg {f_avg:.6f} — netral")
 
+    # FIX v18: neg_pct dan streak hanya aktif jika avg_neg TIDAK aktif
     if not funding_avg_neg_active:
         if fstats["neg_pct"] >= 70 and fstats["sample_count"] >= 3:
             score += CONFIG["score_funding_neg_pct"]
@@ -3162,10 +3127,16 @@ def master_score(symbol, ticker):
                 f"({fstats['sample_count']} total data)"
             )
     else:
+        # Jika avg_neg sudah aktif, tetap tampilkan info tapi tanpa skor tambahan
         if fstats["neg_pct"] >= 70 and fstats["sample_count"] >= 3:
             signals.append(
                 f"Funding negatif {fstats['neg_pct']:.0f}% "
-                f"(sudah dihitung dalam avg_neg)"
+                f"(sudah dihitung dalam avg_neg — tidak ditambah lagi)"
+            )
+        if fstats["streak"] >= CONFIG["funding_streak_min"]:
+            signals.append(
+                f"Funding streak {fstats['streak']}x "
+                f"(sudah dihitung dalam avg_neg — tidak ditambah lagi)"
             )
 
     # ── 14. BTC Outperformance ────────────────────────────────────────────────
@@ -3176,65 +3147,32 @@ def master_score(symbol, ticker):
             f"{btc_corr['btc_period_chg']:+.1f}% ({btc_corr['delta_vs_btc']:+.1f}%)"
         )
 
-    # ── FIX v19 #6: EMA Trend Penalty ────────────────────────────────────────
-    # EMA20 < EMA50 = downtrend context → kurangi score
-    if ema_trend["is_downtrend"] and not ema_trend["is_strong_downtrend"]:
-        score += CONFIG["ema_trend_score_penalty"]  # nilai negatif
-        signals.append(
-            f"⚠️ Downtrend Context — EMA20 < EMA50 "
-            f"(score penalty {CONFIG['ema_trend_score_penalty']})"
-        )
-    else:
-        signals.append(ema_trend["label"])
-
-    # ── FIX v19 #10: Volume Z-Score ───────────────────────────────────────────
-    if vol_zscore["is_anomaly"]:
-        signals.append(vol_zscore["label"])
-        # Z-score boost sudah dimasukkan ke weighted_score, bukan additive score
-
-    # ── FIX v19 #11: Micro Breakout Detection ────────────────────────────────
-    if micro_brkout["is_breakout"]:
-        signals.append(micro_brkout["label"])
-
-    # ── FIX v19 #12: Orderbook Imbalance ─────────────────────────────────────
-    if ob_imbalance["is_bullish"]:
-        signals.append(ob_imbalance["label"])
-
-    # ── FIX v19 #14: Early Pump Detection ────────────────────────────────────
-    early_pump = calc_early_pump_signal(c1h, vwap, vol_spike, price_pos_48)
-    if early_pump["is_early_pump"]:
-        score += CONFIG["early_pump_score_boost"]
-        signals.append(early_pump["label"])
-
-    # ── FIX v19 #16: Whale Accumulation ──────────────────────────────────────
-    if whale_accum["is_accumulating"]:
-        signals.append(whale_accum["label"])
-
     # ══════════════════════════════════════════════════════════════════════════
-    #  ALERT LEVEL v19 — weighted score + logistic probability + timing ETA
+    #  ALERT LEVEL v18 — feature-based probability + timing ETA
     # ══════════════════════════════════════════════════════════════════════════
 
-    # FIX v19 #4: AI-Style Weighted Scoring (normalized 0-100)
-    wscore_data = calc_weighted_score_v19(
-        vol_spike, micro_mom, mom_accel, buy_press,
-        liq_sweep, accum, htf_accum, bos_up, rsi,
-        vol_zscore, micro_brkout, whale_accum, ob_imbalance, energy
+    # STEP 4 v19: AI Weighted Score (hybrid dengan heuristic score)
+    ai_score_data = calc_ai_weighted_score(
+        vol_spike, micro_mom, mom_accel, buy_press, liq_sweep,
+        micro_breakout, rsi, bb_squeeze, vol_zscore, energy,
+        candle_imbal, whale_accum
     )
-    weighted_score = wscore_data["weighted_score"]
+    # Final score = 70% heuristic + 30% AI weighted (blended)
+    blended_score = round(score * 0.70 + ai_score_data["weighted_score"] * 0.30)
 
-    # FIX v19 #5: Logistic Probability berbasis weighted_score
-    pump_prob = calc_pump_probability_v19(weighted_score)
+    # STEP 5 v19: Logistic probability dari blended score
+    pump_prob = calc_pump_probability_v19(blended_score)
 
-    # FIX v18: Pump Timing ETA (dipertahankan)
+    # v18 timing ETA (retained)
     pump_timing = calc_pump_timing_eta(
         vol_accel, buy_press["buy_ratio"], oi_data, micro_mom
     )
 
-    # FIX v19 #18: Alert level dari threshold v19 (dinaikkan)
-    alert_level_v19 = get_alert_level_v19(weighted_score)
+    # Alert level dari threshold v19 (55/65/78)
+    alert_level_v19 = get_alert_level_v19(blended_score)
 
-    # Backward compat: map ke format lama
-    alert_level_v18 = alert_level_v19
+    # Expose blended_score untuk ranking
+    score = blended_score   # reuse score variable for downstream
 
     # Pump type detection (Phase-based)
     if vol_spike["tier"] >= 2 and buy_press["tier"] >= 2 and mom_accel["is_strong"]:
@@ -3281,7 +3219,7 @@ def master_score(symbol, ticker):
     else:
         alert_level = "LOW"
 
-    # ── Entry & Target v19 — Adaptive Entry + Liquidity-Aware SL + Wider TP ──
+    # ── Entry & Target v19 — Adaptive Entry + Liquidity SL + Dynamic TP ─────
     market_regime = calc_market_regime(
         c1h, vwap, buy_press["buy_ratio"], vol_ratio, rsi, price_pos_48
     )
@@ -3291,19 +3229,12 @@ def master_score(symbol, ticker):
         alert_level_v19, bos_level, liq_sweep
     )
 
-    # ── FIX v19 #15: Signal Ranking (score × probability) ────────────────────
-    # rank_value digunakan untuk sort — menggabungkan quality dan confidence
-    rank_value = weighted_score * (pump_prob / 100.0)
-
-    # FIX v19 #18: gunakan threshold WATCHLIST v19 (55) sebagai minimum
+    # v18: gunakan threshold WATCHLIST (40) sebagai minimum
     min_score = CONFIG["score_watchlist"]
-    if weighted_score >= min_score:
+    if score >= min_score:
         return {
             "symbol":          symbol,
-            "score":           score,             # additive raw score (v18 compat)
-            "weighted_score":  weighted_score,    # FIX v19 #4: normalized 0-100
-            "wscore_data":     wscore_data,        # breakdown komponen
-            "rank_value":      round(rank_value, 2),  # FIX v19 #15: ranking key
+            "score":           score,
             "signals":         signals,
             "entry":           entry_data,
             "price":           price_now,
@@ -3324,9 +3255,8 @@ def master_score(symbol, ticker):
             "funding_stats":   fstats,
             "pump_type":       pump_type,
             "alert_level":     alert_level,
-            "alert_level_v18": alert_level_v19,   # v18 compat key → v19 value
-            "alert_level_v19": alert_level_v19,   # NEW v19
-            "pump_prob":       pump_prob,          # FIX v19 #5: logistic prob
+            "alert_level_v19": alert_level_v19,   # NEW v18
+            "pump_prob":       pump_prob,          # NEW v18: logistic probability
             "vol_ratio":       round(vol_ratio, 2),
             "vol_accel":       round(vol_accel * 100, 1),
             "vol_consistent":  vol_consistent,
@@ -3340,26 +3270,28 @@ def master_score(symbol, ticker):
             "liq_sweep":       liq_sweep,
             "energy":          energy,
             "oi_data":         oi_data,
-            # v18 phase signals + timing (dipertahankan)
+            # v18 phase signals + timing
             "vol_spike":       vol_spike,
             "buy_press":       buy_press,
-            "micro_mom":       micro_mom,
+            "micro_mom":       micro_mom,      # v18: 5m micro momentum
             "mom_accel":       mom_accel,
             "whale_order":     whale_order,
             "fake_pump":       fake_pump,
             "market_regime":   market_regime,
-            "pump_timing":     pump_timing,
-            # FIX v19: new indicators
-            "ema_trend":       ema_trend,          # #6
-            "vol_zscore":      vol_zscore,         # #10
-            "micro_brkout":    micro_brkout,       # #11
-            "ob_imbalance":    ob_imbalance,       # #12
-            "whale_accum":     whale_accum,        # #16
-            "wick_data":       wick_data,          # #9
-            "price_change_5m": round(price_change_5m, 3),  # #8
+            "pump_timing":     pump_timing,    # v18: ETA model
+            # v19 new fields
+            "ema_trend":       ema_trend,
+            "vol_zscore":      vol_zscore,
+            "micro_breakout":  micro_breakout,
+            "candle_imbal":    candle_imbal,
+            "whale_accum":     whale_accum,
+            "wick_filter":     wick_filter,
+            "ai_score":        ai_score_data,
+            "early_pump":      early_pump_detected,
+            "rank_value":      round(blended_score * pump_prob / 100, 2),
         }
     else:
-        log.info(f"  {symbol}: Weighted Score {weighted_score:.1f} < {min_score} (threshold v19) — dilewati")
+        log.info(f"  {symbol}: Skor {score} < {min_score} (WATCHLIST threshold) — dilewati")
         return None
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3378,17 +3310,11 @@ def _fmt_price(p):
     return f"{p:.8f}"
 
 def build_alert(r, rank=None):
-    """
-    Pesan Telegram v19 — diperkaya dengan weighted score, logistic prob,
-    EMA trend, Z-score, micro breakout, OB imbalance.
-
-    FIX v19 #17: html.escape() pada semua konten dinamis untuk mencegah
-    error "Bad Request: can't parse entities".
-    """
-    level_v19 = r.get("alert_level_v19", r.get("alert_level_v18", "ALERT"))
-    if level_v19 == "STRONG ALERT":
+    """Pesan Telegram v18 — format diperkaya dengan Phase signals & logistic prob."""
+    level_v18 = r.get("alert_level_v19", "ALERT")
+    if level_v18 == "STRONG ALERT":
         level_icon = "🔥"
-    elif level_v19 == "ALERT":
+    elif level_v18 == "ALERT":
         level_icon = "📡"
     else:
         level_icon = "👁"
@@ -3402,8 +3328,6 @@ def build_alert(r, rank=None):
     ma  = r.get("mom_accel", {})
     wo  = r.get("whale_order", {})
     fp  = r.get("fake_pump", {})
-    wsd = r.get("wscore_data", {})
-    et  = r.get("ema_trend", {})
 
     p     = r["price"]
     entry = e["entry"]
@@ -3412,26 +3336,19 @@ def build_alert(r, rank=None):
     t2    = e["t2"]
     t3    = e.get("t3", t2)
 
-    weighted_score = r.get("weighted_score", r.get("score", 0))
-    pump_prob      = r.get("pump_prob", 0)
-    rank_value     = r.get("rank_value", 0)
-    market_regime  = e.get("market_regime", r.get("market_regime", "NEUTRAL"))
+    pump_prob    = r.get("pump_prob", 0)
+    market_regime = e.get("market_regime", r.get("market_regime", "NEUTRAL"))
 
+    # Header
     pt    = r.get("pump_timing", {})
     eta   = pt.get("eta", "?")
     eta_e = pt.get("eta_emoji", "")
     urg   = pt.get("urgency", "")
 
-    # FIX v19 #17: Escape dynamic symbol name
-    sym_escaped = _escape_html(r["symbol"])
-
-    msg  = f"{level_icon} <b>{sym_escaped} — {level_v19}</b>  #{rank}\n"
-    msg += f"<b>Score :</b> {r['score']} (W:{weighted_score:.0f}/100)  |  <b>Prob:</b> {pump_prob}%\n"
-    msg += f"<b>Rank  :</b> {rank_value:.1f}  |  <b>ETA :</b> {eta_e} {eta} ({urg})\n"
-
-    # FIX v19 #17: Escape pump_type yang bisa mengandung karakter spesial
-    pump_type_escaped = _escape_html(r.get("pump_type", ""))
-    msg += f"<b>Type  :</b> {pump_type_escaped}\n"
+    msg  = f"{level_icon} <b>{r['symbol']} — {level_v18}</b>  #{rank}\n"
+    msg += f"<b>Score :</b> {r['score']}  |  <b>Pump Prob:</b> {pump_prob}%\n"
+    msg += f"<b>ETA   :</b> {eta_e} {eta} ({urg})\n"
+    msg += f"<b>Type  :</b> {r['pump_type']}\n"
     msg += f"<b>Regime:</b> {market_regime}  |  <b>Scan:</b> {utc_now()}\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
 
@@ -3446,30 +3363,13 @@ def build_alert(r, rank=None):
         f"{r['candle_dir_ratio']:.0f}% candle hijau\n"
     )
 
-    # FIX v19 #6: EMA Trend Context
-    ema_label = _escape_html(et.get("label", "—"))
-    msg += f"<b>Trend :</b> {ema_label[:60]}\n"
-
-    # FIX v19 #4: Weighted Score Breakdown
-    msg += "━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"<b>📊 Score v19 [{weighted_score:.0f}/100 → Prob:{pump_prob}%]:</b>\n"
-    msg += (
-        f"  Vol:{wsd.get('volume_score',0):.0f}  "
-        f"Accel:{wsd.get('acceleration_score',0):.0f}  "
-        f"Mom:{wsd.get('momentum_score',0):.0f}  "
-        f"Liq:{wsd.get('liquidity_score',0):.0f}  "
-        f"Brk:{wsd.get('breakout_score',0):.0f}  "
-        f"RSI:{wsd.get('rsi_score',0):.0f}\n"
-    )
-
-    # Phase Signals v18 (dipertahankan)
+    # Phase Signals v18
     mm   = r.get("micro_mom", {})
 
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
-    msg += "<b>📊 Phase Signals:</b>\n"
+    msg += "<b>📊 Phase Signals v18:</b>\n"
     vol_str   = f"{vs.get('ratio', 0):.1f}x"   if vs else "—"
     buy_str   = f"{bp.get('buy_pct', 0):.0f}%" if bp else "—"
-
     # Micro momentum (5m)
     if mm and mm.get("is_accelerating"):
         m5   = mm.get("mom_5m", 0) * 100
@@ -3477,57 +3377,39 @@ def build_alert(r, rank=None):
         micro_str = f"⚡{accel_val:+.3f}% (5m:{m5:+.3f}%)"
     else:
         micro_str = "—"
-
+    # 1h momentum fallback
     accel_1h = (f"+{ma.get('acceleration',0)*100:.2f}%"
                 if ma and ma.get("is_accelerating") else "—")
-
+    # Whale confidence
     wh_conf   = wo.get("confidence","") if wo else ""
     whale_str = (f"✅ {wo.get('mult',0):.1f}x [{wh_conf}]"
                  if wo and wo.get("is_whale") else "—")
-
+    # Fake severity
     fake_sev = fp.get("severity","") if fp and fp.get("is_fake") else ""
     fake_str = (f"⚠️ FAKE [{fake_sev}] ({fp.get('n_cond',0)}/4)"
                 if fp and fp.get("is_fake") else "✅ Clean")
-
+    # Timing
     timing_score = pt.get("timing_score", 0) if pt else 0
-
-    # FIX v19 #10: Z-score
-    vz   = r.get("vol_zscore", {})
-    z_str = (f"⚡{vz.get('z',0):.1f}σ ANOMALI"
-             if vz.get("is_anomaly") else f"{vz.get('z',0):.1f}σ")
-
-    # FIX v19 #11: Micro Breakout
-    mb   = r.get("micro_brkout", {})
-    mb_str = "✅ BREAKOUT" if mb.get("is_breakout") else "—"
-
-    # FIX v19 #12: OB Imbalance
-    ob   = r.get("ob_imbalance", {})
-    ob_str = (f"📗{ob.get('imbalance',0):.2f}x BULLISH"
-              if ob.get("is_bullish") else f"{ob.get('imbalance',1.0):.2f}x")
-
     msg += (
-        f"  Vol Spike   : {vol_str}  Z:{z_str}\n"
+        f"  Vol Spike   : {vol_str}\n"
         f"  Buy Pressure: {buy_str}\n"
         f"  Micro Mom5m : {micro_str}\n"
         f"  Mom 1h      : {accel_1h}\n"
         f"  Whale       : {whale_str}\n"
         f"  Fake Filter : {fake_str}\n"
-        f"  OB Imbalance: {ob_str}\n"
-        f"  Breakout20  : {mb_str}\n"
         f"  Timing Score: {timing_score:.2f}\n"
     )
 
-    # Entry / SL / TP v19
+    # Entry / SL / TP v18
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
-    sl_method = _escape_html(e.get("sl_method", ""))[:60]
-    msg += f"📍 <b>Entry :</b> <code>{_fmt_price(entry)}</code>  [{sl_method}]\n"
+    msg += f"📍 <b>Entry :</b> <code>{_fmt_price(entry)}</code>  [{e.get('sl_method','')}]\n"
     msg += f"🛑 <b>SL    :</b> <code>{_fmt_price(sl)}</code>  (-{e['sl_pct']:.2f}%)\n"
     rr3_str = e.get("rr3_str", e.get("rr2_str", "?"))
     msg += f"🎯 <b>TP1   :</b> <code>{_fmt_price(t1)}</code>  (+{e['gain_t1_pct']:.1f}%)  RR:{e['rr_str']}x\n"
     msg += f"🎯 <b>TP2   :</b> <code>{_fmt_price(t2)}</code>  (+{e['gain_t2_pct']:.1f}%)  RR:{e.get('rr2_str','?')}x\n"
     msg += f"🎯 <b>TP3   :</b> <code>{_fmt_price(t3)}</code>  (+{e.get('gain_t3_pct', 0):.1f}%)  RR:{rr3_str}x\n"
     msg += f"⚖️ <b>ATR   :</b> {e.get('atr_pct', r.get('atr_pct',0)):.2f}%  |  SL: -{e['sl_pct']:.2f}%\n"
-    msg += f"📌 <i>{_escape_html(e.get('trail_note',''))}</i>\n"
+    msg += f"📌 <i>{e.get('trail_note','')}</i>\n"
 
     # BTC correlation
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
@@ -3569,55 +3451,82 @@ def build_alert(r, rank=None):
     keywords = [
         "Phase", "Volume Spike", "Buy Pressure", "Acceleration",
         "Whale", "FAKE", "AKUMULASI", "BUILD-UP", "Squeeze", "Sweep",
-        "BOS", "Funding", "HTF", "OI", "ATR", "BB", "Z-Score",
-        "Breakout", "Imbalance", "EARLY PUMP", "EMA", "Downtrend"
+        "BOS", "Funding", "HTF", "OI", "ATR", "BB"
     ]
     for s in r["signals"]:
         if any(kw in s for kw in keywords):
             priority_signals.append(s)
-        if len(priority_signals) >= 8:
+        if len(priority_signals) >= 7:
             break
     for s in priority_signals:
-        s_short  = s[:90] + "…" if len(s) > 90 else s
-        # FIX v19 #17: escape signal text
-        s_escaped = _escape_html(s_short)
-        msg += f"• {s_escaped}\n"
+        s_short = s[:88] + "…" if len(s) > 88 else s
+        msg += f"• {s_short}\n"
 
-    msg += f"\n<i>Scanner v19 | ⚠️ Bukan financial advice</i>"
+    # AI Score breakdown
+    ai  = r.get("ai_score", {})
+    et  = r.get("ema_trend", {})
+    ep  = r.get("early_pump", False)
+    wca = r.get("whale_accum", {})
+    mbo = r.get("micro_breakout", {})
+
+    if ai:
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "<b>🤖 AI Score v19:</b>\n"
+        msg += (
+            f"  Weighted Score : {ai.get('weighted_score', 0):.1f}/100\n"
+            f"  Volume         : {ai.get('volume_score', 0):.0f}  "
+            f"Accel: {ai.get('acceleration_score', 0):.0f}  "
+            f"Mom: {ai.get('momentum_score', 0):.0f}\n"
+            f"  Liquidity      : {ai.get('liquidity_score', 0):.0f}  "
+            f"Breakout: {ai.get('breakout_score', 0):.0f}  "
+            f"RSI: {ai.get('rsi_score', 0):.0f}\n"
+        )
+    if et:
+        trend_str = et.get("trend", "?")
+        ema20_str = f"{et.get('ema20', 0):.4g}" if et.get("ema20") else "?"
+        ema50_str = f"{et.get('ema50', 0):.4g}" if et.get("ema50") else "?"
+        msg += f"📊 EMA Trend: {trend_str}  EMA20:{ema20_str}  EMA50:{ema50_str}\n"
+    if ep:
+        msg += "⚡ <b>EARLY PUMP SIGNAL AKTIF</b>\n"
+    if wca and wca.get("is_accum"):
+        msg += f"🐳 Whale Accum: {wca.get('label', '')}\n"
+    if mbo and mbo.get("is_breakout"):
+        msg += f"🚀 Micro Breakout: {mbo.get('gap_pct', 0):+.2f}% di atas high {mbo.get('period', 20)}c\n"
+
+    rank_val = r.get("rank_value", r.get("score", 0))
+    msg += f"\n<i>Scanner v19 | Rank:{rank_val:.1f} | ⚠️ Bukan financial advice</i>"
     return msg
 
 def build_summary(results):
-    """
-    FIX v19 #15 — Summary diurutkan berdasarkan rank_value (score × prob).
-    Menampilkan weighted_score dan pump_prob per coin.
-    """
     msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v19 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
-        lv19       = r.get("alert_level_v19", r.get("alert_level_v18", "ALERT"))
+        lv18       = r.get("alert_level_v19", "ALERT")
         prob       = r.get("pump_prob", 0)
-        wscore     = r.get("weighted_score", r.get("score", 0))
-        rank_val   = r.get("rank_value", 0)
         level_icon = "\U0001f525" if lv19 == "STRONG ALERT" else ("\U0001f4e1" if lv19 == "ALERT" else "\U0001f441")
         vs_ratio   = r.get("vol_spike", {}).get("ratio", 0)
         bp_pct     = r.get("buy_press", {}).get("buy_pct", 0)
         whale_tag  = " \U0001f433" if r.get("whale_order", {}).get("is_whale") else ""
         fake_tag   = " \u26a0\ufe0f"  if r.get("fake_pump",   {}).get("is_fake")  else ""
         accel_tag  = " \u26a1"   if r.get("mom_accel",   {}).get("is_accelerating") else ""
-        early_tag  = " \U0001f50d" if r.get("vol_zscore",  {}).get("is_anomaly")  else ""
-        sym_esc    = _escape_html(r["symbol"])
+        regime     = r.get("market_regime", "NEUTRAL")
         msg += (
-            f"{i}. {level_icon} <b>{sym_esc}</b> "
-            f"[{lv19} | W:{wscore:.0f}/100 | Prob:{prob}% | Rank:{rank_val:.1f}]\n"
+            f"{i}. {level_icon} <b>{r['symbol']}</b> "
+            f"[{lv18} | Score:{r['score']} | Prob:{prob}%]\n"
         )
         pt_r   = r.get("pump_timing", {})
         eta_r  = pt_r.get("eta", "?")
         eta_er = pt_r.get("eta_emoji", "")
+        ema_t  = r.get("ema_trend", {}).get("trend", "?")[:4]
+        ai_ws  = r.get("ai_score", {}).get("weighted_score", 0)
+        ep_tag = " ⚡EP" if r.get("early_pump") else ""
+        rv     = r.get("rank_value", r.get("score", 0))
         msg += (
-            f"   Vol:{vs_ratio:.1f}x | Buy:{bp_pct:.0f}%{whale_tag}{accel_tag}{fake_tag}{early_tag} | "
-            f"RSI:{r['rsi']} | ETA:{eta_er}{eta_r} | "
-            f"TP1:+{r['entry']['gain_t1_pct']}% TP3:+{r['entry'].get('gain_t3_pct',0):.1f}%\n"
+            f"   Vol:{vs_ratio:.1f}x | Buy:{bp_pct:.0f}%{whale_tag}{accel_tag}{fake_tag}{ep_tag} | "
+            f"RSI:{r['rsi']} | ETA:{eta_er}{eta_r} | EMA:{ema_t}\n"
+            f"   AI:{ai_ws:.0f} | TP1:+{r['entry']['gain_t1_pct']}% "
+            f"TP3:+{r['entry'].get('gain_t3_pct',0):.1f}% | Rank:{rv:.1f}\n"
         )
     return msg
 
@@ -3718,6 +3627,7 @@ def run_scan():
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
 
+    # FIX v18: load OI snapshots dari disk
     load_oi_snapshots()
 
     tickers = get_all_tickers()
@@ -3741,10 +3651,8 @@ def run_scan():
             res = master_score(sym, t)
             if res:
                 log.info(
-                    f"  ✅ W-Score={res['weighted_score']:.0f}/100 | "
-                    f"Prob={res['pump_prob']}% | Rank={res['rank_value']:.1f} | "
-                    f"{res['alert_level_v19']} | {res['pump_type']} | "
-                    f"pos:{res['price_pos_48']:.0%} | "
+                    f"  ✅ Score={res['score']} | {res['alert_level']} | "
+                    f"{res['pump_type']} | pos:{res['price_pos_48']:.0%} | "
                     f"T1:+{res['entry']['gain_t1_pct']}%"
                 )
                 results.append(res)
@@ -3756,13 +3664,16 @@ def run_scan():
     save_all_funding_snapshots()
     log.info("Funding snapshots disimpan ke disk.")
 
+    # FIX v18: simpan OI snapshots ke disk
     save_oi_snapshots()
     log.info("OI snapshots disimpan ke disk.")
 
-    # FIX v19 #15: Sort berdasarkan rank_value = weighted_score × probability
-    # Ini memastikan sinyal berkualitas TINGGI dan berkeyakinan TINGGI naik ke atas
-    results.sort(key=lambda x: x.get("rank_value", 0), reverse=True)
-    log.info(f"\nLolos threshold v19 (W-Score >= {CONFIG['score_watchlist']}): {len(results)} coin")
+    # STEP 15 v19 — Rank by score × probability (combined rank_value)
+    if CONFIG.get("rank_use_combined", True):
+        results.sort(key=lambda x: x.get("rank_value", x["score"]), reverse=True)
+    else:
+        results.sort(key=lambda x: x["score"], reverse=True)
+    log.info(f"\nLolos threshold: {len(results)} coin")
 
     if not results:
         log.info("Tidak ada sinyal yang memenuhi syarat saat ini.")
@@ -3779,9 +3690,8 @@ def run_scan():
         if ok:
             set_cooldown(r["symbol"])
             log.info(
-                f"✅ Alert #{rank}: {r['symbol']} W-Score={r['weighted_score']:.0f} "
-                f"Prob={r['pump_prob']}% Rank={r['rank_value']:.1f} "
-                f"Level={r['alert_level_v19']}"
+                f"✅ Alert #{rank}: {r['symbol']} Score={r['score']} "
+                f"Level={r['alert_level']}"
             )
         time.sleep(2)
 
@@ -3792,9 +3702,8 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v19                    ║")
-    log.info("║  20 Upgrades: Weighted Score, Logistic Prob, EMA Filter,    ║")
-    log.info("║  Adaptive Entry, Liquidity SL, Noise Filter, Early Pump     ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v19                                     ║")
+    log.info("║  Focus: OI Persistence Fix + Funding Guard + Higher Lookback║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
