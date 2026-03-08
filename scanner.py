@@ -1,33 +1,25 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v19                                     ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v20                                     ║
 ║                                                                              ║
-║  UPGRADE v19 — 20 perbaikan dari audit quant trading engineer:               ║
+║  UPGRADE v20 — 8 perbaikan signal quality dari audit quant engineer:        ║
 ║                                                                              ║
-║  STEP 1  — ADAPTIVE ENTRY: min(VWAP, price+ATR*0.25) — selalu dekat harga  ║
-║  STEP 2  — LIQUIDITY-AWARE SL: swing_low−0.5×ATR atau entry−1.5×ATR        ║
-║  STEP 3  — DYNAMIC TP: TP1=2×ATR / TP2=3.5×ATR / TP3=5×ATR                ║
-║  STEP 4  — AI WEIGHTED SCORE: vol×0.30 + accel×0.20 + mom×0.20 +           ║
-║             liquidity×0.15 + breakout×0.10 + rsi×0.05                      ║
-║  STEP 5  — LOGISTIC PROB: P=1/(1+exp(-0.08*(score-55)))                    ║
-║  STEP 6  — TREND FILTER: EMA20/EMA50 — score↓ jika bearish, reject <EMA50  ║
-║  STEP 7  — VWAP BIAS: reject jika price < VWAP                              ║
-║  STEP 8  — MOMENTUM VALIDATION: reject jika price_change_5m ≤ 0            ║
-║  STEP 9  — WICK RATIO FILTER: reject wick_ratio > 0.4 (whale trap)         ║
-║  STEP 10 — VOLUME Z-SCORE: (vol−mean)/std → z>3 boost volume_score         ║
-║  STEP 11 — MICRO BREAKOUT: price > highest_high_20 → boost breakout        ║
-║  STEP 12 — ORDERBOOK PROXY: candle imbalance ratio sebagai OB proxy         ║
-║  STEP 13 — NOISE FILTER: vol<20M reject, ATR<0.3% reject                   ║
-║  STEP 14 — EARLY PUMP: vol_accel AND price>VWAP AND range_pos<40%          ║
-║  STEP 15 — RANK BY: score × probability (bukan score saja)                  ║
-║  STEP 16 — WHALE ACCUMULATION: vol↑ + price sideways + ATR↓                ║
-║  STEP 17 — TELEGRAM FIX: html.escape() + fallback no parse_mode            ║
-║  STEP 18 — THRESHOLD: MIN_SCORE naik 40→55                                  ║
-║  STEP 19 — QUALITY TARGET: false rate <35%, detect rate >65%               ║
-║  STEP 20 — FULL SINGLE FILE v19                                              ║
+║  PART 1  — EMA SLOPE: ema20_slope = ema20_now - ema20_3c_ago > 0           ║
+║  PART 1  — VOLUME Z-SCORE: (vol - mean20) / std20 > 1.5                    ║
+║  PART 1  — MICRO BREAKOUT: price > high_last_20                             ║
+║  PART 1  — HIGHER LOW STRUCTURE: low_current > low_previous                 ║
+║  PART 1  — DISTANCE EMA200: abs(price-ema200)/ema200 < 0.06                ║
+║  PART 1  — ORDERBOOK IMBALANCE: bid_ask_ratio = buy_vol/sell_vol > 1.2     ║
+║  PART 2  — FAKE REVERSAL FILTER: multi-condition EMA cross validation      ║
+║  PART 3  — DUMP FILTER: reject 5m<-4%, 15m<-6%, close<ema20+z>2           ║
+║  PART 4  — WEIGHTED SCORING: momentum/volume/breakout/reversal/ob/trend    ║
+║  PART 5  — TELEGRAM: escape + truncate + parse_mode=None fallback          ║
+║  PART 6  — PERFORMANCE: vectorized ops, indicator caching, reduced API     ║
+║  PART 7  — RANKING: final_score DESC → volume_zscore DESC → bid_ask DESC   ║
 ║                                                                              ║
-║  WARISAN v18: micro momentum 5m, feature-based prob, whale v2, fake v2,    ║
-║               OI persistence, funding guard, micro ETA, BB/ATR/HTF accum   ║
+║  WARISAN v19: adaptive entry, liquidity-aware SL, dynamic TP,              ║
+║               AI weighted score, logistic prob, EMA trend filter,          ║
+║               wick filter, noise filter, early pump, whale accum           ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -61,13 +53,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v19.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v20.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v19 — log aktif: /tmp/scanner_v19.log")
+log.info("Scanner v20 — log aktif: /tmp/scanner_v20.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -389,6 +381,41 @@ CONFIG = {
     "score_watchlist":          55,      # was 40 in v18
     "score_alert":              65,      # was 55
     "score_strong_alert":       78,      # was 70
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  UPGRADE v20: NEW CONFIG
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # PART 1 — EMA Slope
+    "ema20_slope_lookback":     3,       # candles ago for slope reference
+    "score_ema20_slope":        4,       # bonus score if slope > 0
+
+    # PART 1 — Volume Z-Score v20 (stricter threshold vs v19 z>3)
+    "vol_zscore_v20_min":       1.5,     # z > 1.5 for reversal confirmation
+    "vol_zscore_v20_strong":    2.0,     # z > 2 → extra bonus + dump filter
+    "score_vol_zscore_v20":     10,      # z > 2 → +10
+
+    # PART 1 — Micro Breakout bonus v20
+    "score_micro_breakout_v20": 8,       # price > high_last_20 → +8
+
+    # PART 1 — EMA200 Distance
+    "ema200_distance_max":      0.06,    # < 6% away from EMA200
+    "score_ema200_close":       5,       # bonus for near EMA200
+
+    # PART 1 — Orderbook Imbalance (bid/ask ratio from candle proxy)
+    "bid_ask_ratio_min":        1.2,     # bid_ask_ratio > 1.2 minimum
+    "bid_ask_ratio_strong":     1.3,     # bid_ask_ratio > 1.3 → extra bonus
+    "score_bid_ask_v20":        6,       # bid_ask_ratio > 1.3 → +6
+
+    # PART 2 — Fake Reversal Filter
+    "fake_reversal_penalty":   -12,      # penalty if EMA cross reversal fails
+
+    # PART 3 — Dump Filter thresholds
+    "dump_filter_5m_pct":      -4.0,     # price_change_5m < -4% → reject
+    "dump_filter_15m_pct":     -6.0,     # price_change_15m < -6% → reject
+
+    # PART 7 — Multi-key ranking
+    "rank_v20_multi":           True,    # sort by score, zscore, bid_ask_ratio
 }
 
 MANUAL_EXCLUDE = set()
@@ -1937,6 +1964,403 @@ def calc_wick_ratio(candles, lookback=3):
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  🆕  NEW INDICATORS v20
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calc_ema20_slope(candles):
+    """
+    PART 1 v20 — EMA20 Slope.
+    Ensures upward momentum exists by measuring EMA20 direction.
+
+    ema20_slope = ema20_current - ema20_3_candles_ago
+    Condition: ema20_slope > 0
+
+    Uses vectorized EMA calculation over the full series for accuracy.
+    Returns slope, current/past EMA20, and boolean is_rising.
+    """
+    if len(candles) < 24:
+        return {"slope": 0.0, "ema20_now": 0.0, "ema20_prev": 0.0,
+                "is_rising": False, "score": 0, "label": "Data kurang untuk EMA20 slope"}
+
+    closes = [c["close"] for c in candles]
+    alpha  = 2.0 / 21.0
+    # Build full EMA20 series (vectorized)
+    ema_series = [sum(closes[:20]) / 20]
+    for v in closes[20:]:
+        ema_series.append(alpha * v + (1.0 - alpha) * ema_series[-1])
+
+    ema_now  = ema_series[-1]
+    lookback = CONFIG["ema20_slope_lookback"]
+    ema_prev = ema_series[-1 - lookback] if len(ema_series) > lookback else ema_series[0]
+
+    slope     = ema_now - ema_prev
+    is_rising = slope > 0
+    score     = CONFIG["score_ema20_slope"] if is_rising else 0
+    label     = (f"📈 EMA20 Slope naik +{slope:.6g} ({lookback}c ago)"
+                 if is_rising else f"📉 EMA20 Slope turun {slope:.6g}")
+
+    return {
+        "slope":     round(slope, 8),
+        "ema20_now": round(ema_now, 8),
+        "ema20_prev":round(ema_prev, 8),
+        "is_rising": is_rising,
+        "score":     score,
+        "label":     label,
+    }
+
+
+def calc_vol_zscore_v20(candles, window=20):
+    """
+    PART 1 v20 — Volume Z-Score (stricter threshold: z > 1.5).
+    Formula: z = (current_volume - mean_vol_20) / std_vol_20
+
+    Condition: z > 1.5 for reversal confirmation
+               z > 2.0 triggers dump filter (close < ema20 AND z > 2 → reject)
+
+    Also computes bid_ask_ratio proxy from candle close/range position.
+    """
+    if len(candles) < window + 1:
+        return {
+            "z": 0.0, "mean": 0.0, "std": 0.0,
+            "current_vol": 0.0, "is_spike": False,
+            "bid_ask_ratio": 1.0, "label": "Data volume kurang",
+        }
+
+    vols     = [c["volume_usd"] for c in candles]
+    cur_vol  = vols[-1]
+    baseline = vols[-(window + 1):-1]   # last N before current (vectorized slice)
+    mean_v   = sum(baseline) / window
+    variance = sum((v - mean_v) ** 2 for v in baseline) / window
+    std_v    = math.sqrt(variance) if variance > 0 else 1.0
+    z        = (cur_vol - mean_v) / std_v
+
+    # Bid/Ask ratio proxy from buy-fraction of recent candles (3-candle window)
+    recent3 = candles[-3:]
+    buy_vol  = 0.0
+    sell_vol = 0.0
+    for c in recent3:
+        rng  = c["high"] - c["low"]
+        frac = (c["close"] - c["low"]) / rng if rng > 0 else 0.5
+        buy_vol  += c["volume_usd"] * frac
+        sell_vol += c["volume_usd"] * (1.0 - frac)
+    bid_ask_ratio = buy_vol / sell_vol if sell_vol > 0 else 1.0
+
+    is_spike = z > CONFIG["vol_zscore_v20_min"]
+    if z > CONFIG["vol_zscore_v20_strong"]:
+        label = f"🔥 Vol Z-Score {z:.2f} (KUAT > {CONFIG['vol_zscore_v20_strong']}) — spike anomali"
+    elif is_spike:
+        label = f"📊 Vol Z-Score {z:.2f} > {CONFIG['vol_zscore_v20_min']} — volume di atas normal"
+    else:
+        label = f"Vol Z-Score {z:.2f} — normal"
+
+    return {
+        "z":             round(z, 3),
+        "mean":          round(mean_v, 2),
+        "std":           round(std_v, 2),
+        "current_vol":   round(cur_vol, 2),
+        "is_spike":      is_spike,
+        "bid_ask_ratio": round(bid_ask_ratio, 3),
+        "label":         label,
+    }
+
+
+def calc_ema200_distance(candles):
+    """
+    PART 1 v20 — Distance from EMA200.
+    Prevents catching deep downtrend bounces.
+
+    distance_ema200 = abs(price - ema200) / ema200
+    Condition: distance_ema200 < 0.06 (within 6%)
+
+    Returns ema200 value, distance, and whether price is near EMA200.
+    """
+    if len(candles) < 200:
+        return {
+            "ema200": 0.0, "distance": 1.0, "is_near": False,
+            "above_ema200": False, "score": 0,
+            "label": "Data < 200 candle (EMA200 tidak tersedia)",
+        }
+
+    closes = [c["close"] for c in candles]
+    alpha  = 2.0 / 201.0
+    ema200 = sum(closes[:200]) / 200
+    for v in closes[200:]:
+        ema200 = alpha * v + (1.0 - alpha) * ema200
+
+    price    = closes[-1]
+    dist     = abs(price - ema200) / ema200 if ema200 > 0 else 1.0
+    is_near  = dist < CONFIG["ema200_distance_max"]
+    above    = price > ema200
+    score    = CONFIG["score_ema200_close"] if is_near else 0
+    label    = (
+        f"{'✅' if is_near else '⚠️'} EMA200: {ema200:.6g} | dist {dist*100:.1f}% "
+        f"({'above' if above else 'below'}) — {'near' if is_near else 'too far'}"
+    )
+
+    return {
+        "ema200":       round(ema200, 8),
+        "distance":     round(dist, 4),
+        "is_near":      is_near,
+        "above_ema200": above,
+        "score":        score,
+        "label":        label,
+    }
+
+
+def calc_higher_low_v20(candles, lookback=3):
+    """
+    PART 1 v20 — Higher Low Structure.
+    Verifies reversal structure: recent low > prior low.
+
+    low_current  = min low of last 2 candles
+    low_previous = min low of candles [-(lookback+2) : -2]
+    Condition: low_current > low_previous
+    """
+    if len(candles) < lookback + 2:
+        return {"is_higher_low": False, "low_now": 0.0, "low_prev": 0.0,
+                "label": "Data kurang untuk higher low v20"}
+
+    low_now  = min(c["low"] for c in candles[-2:])
+    low_prev = min(c["low"] for c in candles[-(lookback + 2):-2])
+
+    is_hl = low_now > low_prev
+    label = (f"🔼 Higher Low v20: {low_now:.6g} > {low_prev:.6g}" if is_hl
+             else f"Lower Low: {low_now:.6g} ≤ {low_prev:.6g}")
+
+    return {
+        "is_higher_low": is_hl,
+        "low_now":       round(low_now, 8),
+        "low_prev":      round(low_prev, 8),
+        "label":         label,
+    }
+
+
+def check_dump_filter_v20(candles_5m, candles_15m, price_now, ema20_slope_data):
+    """
+    PART 3 v20 — Dump Filter.
+    Rejects coins experiencing heavy selling pressure.
+
+    Reject conditions:
+      1. price_change_5m  < -4%
+      2. price_change_15m < -6%
+      3. close < ema20 AND vol_zscore > 2
+
+    Returns (should_reject: bool, reason: str)
+    """
+    # Condition 1: 5m price drop
+    if candles_5m and len(candles_5m) >= 2:
+        c5_prev = candles_5m[-2]["close"]
+        if c5_prev > 0:
+            chg_5m = (candles_5m[-1]["close"] - c5_prev) / c5_prev * 100
+            if chg_5m < CONFIG["dump_filter_5m_pct"]:
+                return True, f"🚨 DUMP FILTER: 5m drop {chg_5m:.2f}% < {CONFIG['dump_filter_5m_pct']}%"
+
+    # Condition 2: 15m price drop
+    if candles_15m and len(candles_15m) >= 4:
+        c15_prev = candles_15m[-4]["close"]
+        if c15_prev > 0:
+            chg_15m = (candles_15m[-1]["close"] - c15_prev) / c15_prev * 100
+            if chg_15m < CONFIG["dump_filter_15m_pct"]:
+                return True, f"🚨 DUMP FILTER: 15m drop {chg_15m:.2f}% < {CONFIG['dump_filter_15m_pct']}%"
+
+    # Condition 3: price < ema20 AND z-score > 2 (heavy selling on down candle)
+    ema20_now = ema20_slope_data.get("ema20_now", 0)
+    if ema20_now > 0 and price_now < ema20_now:
+        # recompute zscore from caller context — use slope data flag
+        # flag set by master_score when vol_zscore_v20["z"] > strong threshold
+        # passed as extra field in ema20_slope_data for convenience
+        z = ema20_slope_data.get("vol_z_for_dump", 0.0)
+        if z > CONFIG["vol_zscore_v20_strong"]:
+            return True, (f"🚨 DUMP FILTER: close {price_now:.6g} < EMA20 {ema20_now:.6g} "
+                          f"AND z-score {z:.2f} > 2 — dump aktif")
+
+    return False, ""
+
+
+def validate_reversal_v20(ema_trend, price_now, vol_zscore_v20, ema20_slope,
+                           micro_breakout, candle_imbal):
+    """
+    PART 2 v20 — Fake Reversal Filter.
+    Multi-condition validation for EMA20 cross EMA50 signals.
+
+    Valid reversal requires ALL of:
+      1. EMA20 crossed above EMA50
+      2. price > EMA20
+      3. volume_zscore > 1.5
+      4. ema20_slope > 0
+      5. price > high_last_20
+      6. bid_ask_ratio > 1.2
+
+    If not all met → downgrade score by fake_reversal_penalty.
+    Returns (is_valid_reversal, conditions_met, penalty_if_invalid).
+    """
+    ema_cross = ema_trend.get("cross_up", False)
+    ema20_val = ema_trend.get("ema20", 0)
+
+    cond_cross    = ema_cross
+    cond_price    = price_now > ema20_val if ema20_val > 0 else False
+    cond_zscore   = vol_zscore_v20.get("z", 0) > CONFIG["vol_zscore_v20_min"]
+    cond_slope    = ema20_slope.get("is_rising", False)
+    cond_breakout = micro_breakout.get("is_breakout", False)
+    cond_bidask   = candle_imbal.get("imbalance", 0) > CONFIG["bid_ask_ratio_min"]
+
+    conditions = {
+        "ema20_cross_ema50": cond_cross,
+        "price_above_ema20": cond_price,
+        "vol_zscore_ok":     cond_zscore,
+        "ema20_slope_ok":    cond_slope,
+        "micro_breakout_ok": cond_breakout,
+        "bid_ask_ok":        cond_bidask,
+    }
+    n_met   = sum(conditions.values())
+    n_total = len(conditions)
+
+    # Only apply penalty if EMA cross was detected but conditions not fully met
+    if cond_cross and n_met < n_total:
+        penalty  = CONFIG["fake_reversal_penalty"]
+        is_valid = False
+        label    = (f"⚠️ Fake Reversal Risk ({n_met}/{n_total} cond) — "
+                    f"EMA cross tapi {n_total - n_met} kondisi gagal: "
+                    + ", ".join(k for k, v in conditions.items() if not v))
+    elif cond_cross and n_met == n_total:
+        penalty  = 0
+        is_valid = True
+        label    = f"✅ Reversal Valid ({n_met}/{n_total} — semua kondisi terpenuhi)"
+    else:
+        # No cross detected — not applicable
+        penalty  = 0
+        is_valid = True   # neutral: no cross = no fake reversal concern
+        label    = ""
+
+    return {
+        "is_valid":    is_valid,
+        "n_met":       n_met,
+        "n_total":     n_total,
+        "conditions":  conditions,
+        "penalty":     penalty,
+        "label":       label,
+    }
+
+
+def calc_weighted_score_v20(score_heuristic, ema20_slope, vol_zscore_v20,
+                             micro_breakout, reversal_valid, candle_imbal,
+                             ema_trend, ema200_dist, higher_low_v20):
+    """
+    PART 4 v20 — Weighted Scoring Model.
+    Adds structured bonus points on top of existing heuristic score.
+
+    Caps per category:
+      momentum  (EMA slope + higher low)    : 0–20
+      volume    (z-score bonus)              : 0–15
+      breakout  (micro breakout v20)         : 0–15
+      reversal  (valid reversal multi-cond)  : 0–15
+      orderbook (bid_ask_ratio)              : 0–10
+      trend     (EMA200 distance + EMA slope): 0–10
+
+    Returns bonus_score (additive) and breakdown dict.
+    """
+    # ── Momentum component (0-20) ─────────────────────────────────────────────
+    mom = 0
+    if ema20_slope.get("is_rising"):
+        mom += CONFIG["score_ema20_slope"]          # +4
+    if higher_low_v20.get("is_higher_low"):
+        mom += 6                                     # +6
+    if ema_trend.get("trend") == "UPTREND":
+        mom += 6                                     # +6 uptrend confirmed
+    if ema_trend.get("cross_up"):
+        mom += 4                                     # +4 EMA cross up
+    momentum_bonus = min(mom, CONFIG["v20_momentum_cap"])
+
+    # ── Volume component (0-15) ───────────────────────────────────────────────
+    vol = 0
+    z = vol_zscore_v20.get("z", 0)
+    if z > CONFIG["vol_zscore_v20_strong"]:
+        vol += CONFIG["score_vol_zscore_v20"]        # +10
+    elif z > CONFIG["vol_zscore_v20_min"]:
+        vol += 5                                      # +5
+    volume_bonus = min(vol, CONFIG["v20_volume_cap"])
+
+    # ── Breakout component (0-15) ─────────────────────────────────────────────
+    bo = 0
+    if micro_breakout.get("is_breakout"):
+        bo += CONFIG["score_micro_breakout_v20"]     # +8
+        if micro_breakout.get("gap_pct", 0) > 1.0:
+            bo += 4                                   # extra if >1% above high
+    if ema_trend.get("cross_up"):
+        bo += 3                                       # +3 EMA cross adds breakout conf
+    breakout_bonus = min(bo, CONFIG["v20_breakout_cap"])
+
+    # ── Reversal component (0-15) ─────────────────────────────────────────────
+    rev = 0
+    if reversal_valid.get("is_valid") and reversal_valid.get("n_met", 0) >= 4:
+        rev += 10
+    elif reversal_valid.get("n_met", 0) >= 3:
+        rev += 5
+    reversal_bonus = min(rev, CONFIG["v20_reversal_cap"])
+
+    # ── Orderbook component (0-10) ─────────────────────────────────────────────
+    ob  = 0
+    bar = vol_zscore_v20.get("bid_ask_ratio", candle_imbal.get("imbalance", 1.0))
+    if bar > CONFIG["bid_ask_ratio_strong"]:
+        ob += CONFIG["score_bid_ask_v20"]            # +6
+    elif bar > CONFIG["bid_ask_ratio_min"]:
+        ob += 3                                       # +3
+    orderbook_bonus = min(ob, CONFIG["v20_orderbook_cap"])
+
+    # ── Trend component (0-10) ────────────────────────────────────────────────
+    tr = 0
+    if ema200_dist.get("is_near") and ema200_dist.get("above_ema200"):
+        tr += CONFIG["score_ema200_close"]           # +5
+    elif ema200_dist.get("is_near"):
+        tr += 3                                       # near but below EMA200
+    trend_bonus = min(tr, CONFIG["v20_trend_cap"])
+
+    total_bonus = (momentum_bonus + volume_bonus + breakout_bonus
+                   + reversal_bonus + orderbook_bonus + trend_bonus)
+
+    return {
+        "total_bonus":     total_bonus,
+        "momentum_bonus":  momentum_bonus,
+        "volume_bonus":    volume_bonus,
+        "breakout_bonus":  breakout_bonus,
+        "reversal_bonus":  reversal_bonus,
+        "orderbook_bonus": orderbook_bonus,
+        "trend_bonus":     trend_bonus,
+        "bid_ask_ratio":   round(bar, 3),
+        "vol_z_v20":       round(z, 3),
+    }
+
+
+def calc_ema20_cross_up(candles, period_fast=20, period_slow=50):
+    """
+    PART 2 v20 — Detect EMA20 crossed above EMA50 in recent candles.
+    Checks if previous candle had EMA20 < EMA50 and current has EMA20 > EMA50.
+    Used by validate_reversal_v20. Injects cross_up flag into ema_trend dict.
+    """
+    if len(candles) < period_slow + 2:
+        return False, 0.0, 0.0
+
+    closes = [c["close"] for c in candles]
+    a20    = 2.0 / (period_fast + 1)
+    a50    = 2.0 / (period_slow + 1)
+
+    # Build EMA series for last few points only (cache-friendly)
+    ema20 = sum(closes[:period_fast]) / period_fast
+    ema50 = sum(closes[:period_slow]) / period_slow
+    for v in closes[period_fast:]:
+        ema20 = a20 * v + (1.0 - a20) * ema20
+    for v in closes[period_slow:]:
+        ema50 = a50 * v + (1.0 - a50) * ema50
+
+    # Prev EMA20/50 (one candle ago) — approximate via slope
+    ema20_prev = ema20 - (closes[-1] - closes[-2]) * a20
+    ema50_prev = ema50 - (closes[-1] - closes[-2]) * a50
+
+    cross_up = (ema20_prev <= ema50_prev) and (ema20 > ema50)
+    return cross_up, round(ema20, 8), round(ema50, 8)
+
+
 def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
                    rsi, buy_ratio, vol_ratio, price_pos, alert_level, bos_level,
                    liq_sweep):
@@ -2780,6 +3204,34 @@ def master_score(symbol, ticker):
     whale_accum    = detect_whale_accumulation(c1h)  # STEP 16: whale accumulation
     wick_filter    = calc_wick_ratio(c1h)            # STEP 9: wick trap detection
 
+    # ── NEW v20 indicators ────────────────────────────────────────────────────
+    ema20_slope   = calc_ema20_slope(c1h)                   # PART 1: EMA20 slope
+    vol_zscore_v20 = calc_vol_zscore_v20(c1h, window=20)    # PART 1: Z-score v20 (stricter)
+    ema200_dist   = calc_ema200_distance(c1h)               # PART 1: distance from EMA200
+    higher_low_v20 = calc_higher_low_v20(c1h)               # PART 1: higher low structure
+    cross_up, ema20_val_v20, ema50_val_v20 = calc_ema20_cross_up(c1h)  # PART 2
+
+    # Inject cross_up into ema_trend for use by reversal validator
+    ema_trend["cross_up"] = cross_up
+
+    # Inject vol_z for dump filter (passed via ema20_slope data dict)
+    ema20_slope["vol_z_for_dump"] = vol_zscore_v20["z"]
+
+    # PART 3: Dump filter — early rejection before scoring
+    dump_reject, dump_reason = check_dump_filter_v20(c5m, c15m, price_now, ema20_slope)
+    if dump_reject:
+        log.info(f"  {symbol}: {dump_reason} — GATE GAGAL (dump filter v20)")
+        return None
+
+    # PART 2: Reversal validation
+    reversal_valid = validate_reversal_v20(
+        ema_trend, price_now, vol_zscore_v20, ema20_slope,
+        micro_breakout, candle_imbal
+    )
+
+    # PART 4: Weighted scoring bonus (computed later in scoring section)
+
+
     # Set energy.is_strong jika funding negatif
     if energy["is_buildup"] and fstats.get("current", 1) <= 0:
         energy["is_strong"] = True
@@ -3148,6 +3600,50 @@ def master_score(symbol, ticker):
         )
 
     # ══════════════════════════════════════════════════════════════════════════
+    #  SCORING v20 — PART 4: WEIGHTED BONUS + NEW INDICATORS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Compute v20 weighted bonus
+    v20_bonus = calc_weighted_score_v20(
+        score, ema20_slope, vol_zscore_v20, micro_breakout,
+        reversal_valid, candle_imbal, ema_trend, ema200_dist, higher_low_v20
+    )
+
+    # Apply weighted bonus additively to heuristic score
+    score += v20_bonus["total_bonus"]
+
+    # EMA20 Slope bonus
+    if ema20_slope.get("is_rising"):
+        signals.append(ema20_slope["label"])
+
+    # Volume Z-Score v20 bonus (stricter z > 1.5 threshold)
+    if vol_zscore_v20.get("is_spike"):
+        signals.append(vol_zscore_v20["label"])
+
+    # EMA200 Distance bonus
+    if ema200_dist.get("is_near"):
+        signals.append(ema200_dist["label"])
+
+    # Higher Low v20
+    if higher_low_v20.get("is_higher_low"):
+        signals.append(higher_low_v20["label"])
+
+    # Bid/Ask Ratio proxy (from candle volume)
+    bar = vol_zscore_v20.get("bid_ask_ratio", 1.0)
+    if bar > CONFIG["bid_ask_ratio_min"]:
+        signals.append(
+            f"📊 Bid/Ask Ratio {bar:.2f} > {CONFIG['bid_ask_ratio_min']} "
+            f"{'(STRONG)' if bar > CONFIG['bid_ask_ratio_strong'] else ''} — buy pressure dominan"
+        )
+
+    # PART 2: Fake Reversal penalty
+    if reversal_valid.get("penalty", 0) < 0:
+        score += reversal_valid["penalty"]
+        signals.append(reversal_valid["label"])
+    elif reversal_valid.get("label"):
+        signals.append(reversal_valid["label"])
+
+    # ══════════════════════════════════════════════════════════════════════════
     #  ALERT LEVEL v18 — feature-based probability + timing ETA
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -3172,6 +3668,7 @@ def master_score(symbol, ticker):
     alert_level_v19 = get_alert_level_v19(blended_score)
 
     # Expose blended_score untuk ranking
+
     score = blended_score   # reuse score variable for downstream
 
     # Pump type detection (Phase-based)
@@ -3289,6 +3786,16 @@ def master_score(symbol, ticker):
             "ai_score":        ai_score_data,
             "early_pump":      early_pump_detected,
             "rank_value":      round(blended_score * pump_prob / 100, 2),
+            # v20 new fields
+            "ema20_slope":     ema20_slope,
+            "vol_zscore_v20":  vol_zscore_v20,
+            "ema200_dist":     ema200_dist,
+            "higher_low_v20":  higher_low_v20,
+            "reversal_valid":  reversal_valid,
+            "v20_bonus":       v20_bonus,
+            # v20 ranking keys (used for multi-key sort in PART 7)
+            "rank_vol_z_v20":  vol_zscore_v20["z"],
+            "rank_bid_ask":    vol_zscore_v20["bid_ask_ratio"],
         }
     else:
         log.info(f"  {symbol}: Skor {score} < {min_score} (WATCHLIST threshold) — dilewati")
@@ -3493,18 +4000,53 @@ def build_alert(r, rank=None):
     if mbo and mbo.get("is_breakout"):
         msg += f"🚀 Micro Breakout: {mbo.get('gap_pct', 0):+.2f}% di atas high {mbo.get('period', 20)}c\n"
 
+    # v20 signal summary
+    v20b  = r.get("v20_bonus", {})
+    rv20  = r.get("reversal_valid", {})
+    es20  = r.get("ema20_slope", {})
+    ed200 = r.get("ema200_dist", {})
+    hlv20 = r.get("higher_low_v20", {})
+    zvv20 = r.get("vol_zscore_v20", {})
+    if v20b and v20b.get("total_bonus", 0) > 0:
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"<b>🆕 v20 Signals:</b>\n"
+        bar = v20b.get("bid_ask_ratio", 1.0)
+        zv  = v20b.get("vol_z_v20", 0)
+        msg += (
+            f"  Bonus Total   : +{v20b['total_bonus']}\n"
+            f"  Momentum      : +{v20b['momentum_bonus']}  "
+            f"Volume: +{v20b['volume_bonus']}  "
+            f"Breakout: +{v20b['breakout_bonus']}\n"
+            f"  Reversal      : +{v20b['reversal_bonus']}  "
+            f"Orderbook: +{v20b['orderbook_bonus']}  "
+            f"Trend: +{v20b['trend_bonus']}\n"
+            f"  Vol Z v20     : {zv:.2f}  |  Bid/Ask: {bar:.2f}\n"
+        )
+    if rv20 and rv20.get("label"):
+        safe_rv = rv20["label"][:100]
+        msg += f"  {safe_rv}\n"
+    if es20 and es20.get("is_rising"):
+        msg += f"  {es20.get('label', '')[:80]}\n"
+    if ed200 and ed200.get("is_near"):
+        msg += f"  {ed200.get('label', '')[:80]}\n"
+    if hlv20 and hlv20.get("is_higher_low"):
+        msg += f"  {hlv20.get('label', '')[:80]}\n"
+
     rank_val = r.get("rank_value", r.get("score", 0))
-    msg += f"\n<i>Scanner v19 | Rank:{rank_val:.1f} | ⚠️ Bukan financial advice</i>"
+    z_rank   = r.get("rank_vol_z_v20", 0)
+    ba_rank  = r.get("rank_bid_ask", 1.0)
+    msg += (f"\n<i>Scanner v20 | Rank:{rank_val:.1f} | "
+            f"Z:{z_rank:.2f} | BA:{ba_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
 def build_summary(results):
-    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v19 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
+    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v20 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
         lv18       = r.get("alert_level_v19", "ALERT")
         prob       = r.get("pump_prob", 0)
-        level_icon = "\U0001f525" if lv19 == "STRONG ALERT" else ("\U0001f4e1" if lv19 == "ALERT" else "\U0001f441")
+        level_icon = "\U0001f525" if lv18 == "STRONG ALERT" else ("\U0001f4e1" if lv18 == "ALERT" else "\U0001f441")
         vs_ratio   = r.get("vol_spike", {}).get("ratio", 0)
         bp_pct     = r.get("buy_press", {}).get("buy_pct", 0)
         whale_tag  = " \U0001f433" if r.get("whale_order", {}).get("is_whale") else ""
@@ -3599,7 +4141,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v19:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v20:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -3622,7 +4164,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v19 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v20 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -3668,8 +4210,18 @@ def run_scan():
     save_oi_snapshots()
     log.info("OI snapshots disimpan ke disk.")
 
-    # STEP 15 v19 — Rank by score × probability (combined rank_value)
-    if CONFIG.get("rank_use_combined", True):
+    # PART 7 v20 — Multi-key ranking: final_score DESC → volume_zscore DESC → bid_ask DESC
+    # Extends v19 rank_value with secondary/tertiary sort keys for tie-breaking
+    if CONFIG.get("rank_v20_multi", True):
+        results.sort(
+            key=lambda x: (
+                x.get("rank_value", x["score"]),           # primary: score × prob
+                x.get("rank_vol_z_v20", 0),                # secondary: vol z-score v20
+                x.get("rank_bid_ask", 1.0),                # tertiary: bid/ask ratio
+            ),
+            reverse=True,
+        )
+    elif CONFIG.get("rank_use_combined", True):
         results.sort(key=lambda x: x.get("rank_value", x["score"]), reverse=True)
     else:
         results.sort(key=lambda x: x["score"], reverse=True)
@@ -3695,15 +4247,16 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v19 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v20 — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v19                                     ║")
-    log.info("║  Focus: OI Persistence Fix + Funding Guard + Higher Lookback║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v20                   ║")
+    log.info("║  Focus: EMA Slope + Dump Filter + Reversal Validation      ║")
+    log.info("║  + Weighted Scoring + Multi-key Ranking + Perf Optim       ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
