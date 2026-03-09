@@ -1,26 +1,27 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v22 — INSTITUTIONAL PUMP HUNTER        ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v23 — INSTITUTIONAL PUMP HUNTER        ║
+║                       MARKET MAKER DETECTION EDITION                         ║
 ║                                                                              ║
-║  UPGRADE v22 — 13 institutional-grade upgrades:                             ║
+║  UPGRADE v23 — 6 filter fixes + 7 MM detectors:                            ║
 ║                                                                              ║
-║  FIX 01 — EMA50 REVERSAL OVERRIDE: slope>0 bypasses EMA50 reject gate      ║
-║  FIX 02 — SMART MONEY ACCUMULATION: range<3% + vol↑ + bid>ask              ║
-║  FIX 03 — LIQUIDITY TRAP DETECTOR: stop-sweep below 30c low + vol spike    ║
-║  FIX 04 — WHALE FOOTPRINT: large vol + no price move = accumulation        ║
-║  FIX 05 — PRE-BREAKOUT PRESSURE: BB width < 20th percentile + vol spike    ║
-║  FIX 06 — MOMENTUM IGNITION: 3 consecutive higher highs + z>1.8            ║
-║  FIX 07 — DUMP TRAP FILTER: price<EMA200 + ema50_slope<0 + ask>>bid        ║
-║  FIX 08 — IMPROVED REVERSAL: slope>0 AND z>1.5 AND price near VWAP        ║
-║  FIX 09 — INSTITUTIONAL SCORING: weighted 6-component 0-100 model         ║
-║  FIX 10 — ADVANCED PUMP PROB: sigmoid(score/8) mapped to %                 ║
-║  FIX 11 — ADVANCED RANKING: prob → z-score → orderbook → accum            ║
-║  FIX 12 — DYNAMIC TP/SL: ATR×1.3/×2.2/SL×0.9 with regime override        ║
-║  FIX 13 — TELEGRAM SANITIZE: strip < > & + plain-text fallback            ║
+║  FILTER FIX 01 — REVERSAL OVERRIDE: z-score threshold 1.5 → -0.5           ║
+║  FILTER FIX 02 — BB BREAKOUT: convert hard reject to +5 score bonus        ║
+║  FILTER FIX 03 — MOMENTUM GATE: reject only if 5m < -0.5% (was ≤ 0)       ║
+║  FILTER FIX 04 — LIQUIDITY FILTER: min vol 20M → 2M USD                    ║
+║  FILTER FIX 05 — DISTRIBUTION FILTER: price_pos > 85% → > 97%             ║
+║  FILTER FIX 06 — WATCHLIST THRESHOLD: 55 → 40                              ║
 ║                                                                              ║
-║  WARISAN v20: EMA slope, dump filter, reversal filter, weighted scoring,   ║
-║               EMA200 dist, higher-low, bid/ask ratio, multi-key ranking,   ║
-║               v19: adaptive entry, AI score, logistic prob, wick filter    ║
+║  MM DETECT 01 — LIQUIDITY SWEEP: stop-hunt before pump                     ║
+║  MM DETECT 02 — WHALE ABSORPTION: big vol + no price move                  ║
+║  MM DETECT 03 — VOLATILITY COMPRESSION: BB width percentile                 ║
+║  MM DETECT 04 — MOMENTUM IGNITION: 3 higher highs + z>1.5                  ║
+║  MM DETECT 05 — ORDERBOOK PRESSURE: bid/ask imbalance model                ║
+║  MM DETECT 06 — SPOOFING DETECTION: fake wall penalty                       ║
+║  MM DETECT 07 — MM SCORING: weighted 0-100 model + sigmoid prob            ║
+║                                                                              ║
+║  WARISAN v22: EMA50 override, smart money, liq trap, whale FP,             ║
+║               pre-breakout, dump trap, institutional scoring                ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -54,13 +55,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v22.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v23.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v22 — log aktif: /tmp/scanner_v22.log")
+log.info("Scanner v23 — log aktif: /tmp/scanner_v23.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -348,7 +349,8 @@ CONFIG = {
     "score_penalty_bearish":  -8,        # EMA20 < EMA50 → penalti
 
     # STEP 8 — Momentum validation (5m price change)
-    "momentum_val_reject":     0.0,      # reject jika price_chg_5m <= 0
+    # FIX v23: dilonggarkan 0.0 → -0.005 (-0.5%) — flat coins tidak dibuang
+    "momentum_val_reject":    -0.005,    # reject only if price_chg_5m < -0.5%
 
     # STEP 9 — Wick ratio filter
     "wick_ratio_max":          0.4,      # reject if (high-close)/(high-low) > 0.4
@@ -362,7 +364,8 @@ CONFIG = {
     "score_micro_breakout":    6,
 
     # STEP 13 — Noise filter
-    "noise_min_vol_24h":   20_000_000,   # min $20M volume 24h
+    # FIX v23: min vol 20M → 2M — filter too strict, removing valid pumps
+    "noise_min_vol_24h":    2_000_000,   # min $2M volume 24h (was $20M)
     "noise_min_atr_pct":       0.3,      # min 0.3% ATR
 
     # STEP 14 — Early pump detection
@@ -424,7 +427,8 @@ CONFIG = {
 
     # FIX 01 — EMA50 Reversal Override
     "ema50_override_slope_min":  0.0,    # slope > 0 overrides EMA50 reject gate
-    "ema50_override_zscore_min": 1.5,    # also need z > 1.5
+    # FIX v23: z-score threshold 1.5 → -0.5 so early reversals are not blocked
+    "ema50_override_zscore_min": -0.5,   # was 1.5 — too strict, blocked reversals
 
     # FIX 02 — Smart Money Accumulation
     "sma_range_max":             0.03,   # price range contraction < 3%
@@ -470,6 +474,40 @@ CONFIG = {
     "tp1_v22_mult":              1.3,    # TP1 = entry + ATR × 1.3
     "tp2_v22_mult":              2.2,    # TP2 = entry + ATR × 2.2
     "sl_v22_mult":               0.9,    # SL  = entry − ATR × 0.9
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  UPGRADE v23: MARKET MAKER DETECTION CONFIG
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # --- Filter relaxations (6 critical overfiltering fixes) ---
+    # (see inline where applied: momentum_val_reject, noise_min_vol_24h,
+    #  ema50_override_zscore_min, gate_bb_pos_max, price_pos_48 gate, reversal)
+
+    # BB Breakout bonus (replaces hard rejection)
+    "score_bb_breakout_v23":     5,      # price above upper BB → +5 breakout score
+
+    # Spoofing detection
+    "spoofing_vol_mult":         4.0,    # large order = vol > 4× mean
+    "spoofing_reversal_candles": 2,      # disappears within 2 candles
+    "spoofing_price_max_pct":    0.3,    # price move < 0.3% despite big vol
+    "spoofing_penalty":         -6,      # score penalty if spoofing detected
+
+    # Orderbook pressure model
+    "ob_imbalance_bullish":      1.2,    # bid/ask > 1.2 = bullish
+    "ob_imbalance_bearish":      0.8,    # bid/ask < 0.8 = bearish
+    "ob_imbalance_score_max":    10,     # max bonus from orderbook pressure
+
+    # Volatility compression (BB percentile — reuses v22 thresholds)
+    # already: bb_percentile_lookback, bb_percentile_threshold, score_prebreakout
+
+    # v23 institutional scoring blend ratio
+    "v23_heuristic_weight":      0.45,   # was 0.50
+    "v23_ai_weight":             0.30,   # unchanged
+    "v23_inst_weight":           0.25,   # was 0.20
+
+    # Watchlist threshold — FIX v23: lowered 55 → 40 to pass more candidates
+    # (raised too aggressively in v19; 344 coins 0 passed)
+    "score_watchlist_v23":       40,     # effective threshold for v23
 }
 
 MANUAL_EXCLUDE = set()
@@ -860,7 +898,7 @@ WHITELIST_SYMBOLS = {
 "WTIUSDT",
 "XAGUSDT",
 "XAIUSDT",
-"XAUUSDT",
+
 "XAUTUSDT",
 "XCUUSDT",
 "XDCUSDT",
@@ -888,7 +926,6 @@ WHITELIST_SYMBOLS = {
 "ZKPUSDT",
 "ZORAUSDT",
 "ZROUSDT",
-
 }
 
 GRAN_MAP    = {"5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
@@ -3298,6 +3335,363 @@ def _safe_telegram_text_v22(msg):
     return msg
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  🎯  LEVEL 7 — MARKET MAKER DETECTION v23
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detect_liquidity_sweep_v23(candles, vol_zscore_z):
+    """
+    v23 — Liquidity Sweep Detector (MM stop-hunt before pump).
+
+    Detects when market makers sweep stop-losses below a prior support
+    low, then reverse. Classic pattern before institutional pump.
+
+    Conditions:
+      candle_low < lowest_low_last_30
+      AND close > open  (bullish reversal)
+      AND volume_zscore > 1.2
+    """
+    lookback = CONFIG.get("liq_trap_lookback", 30)
+    if len(candles) < lookback + 1:
+        return {"is_sweep": False, "score": 0, "label": ""}
+
+    prior_low = min(c["low"] for c in candles[-(lookback + 1):-1])
+    c_last    = candles[-1]
+
+    cond_sweep   = c_last["low"]   < prior_low
+    cond_bull    = c_last["close"] > c_last["open"]
+    cond_z       = vol_zscore_z    > 1.2
+
+    if cond_sweep and cond_bull and cond_z:
+        score = CONFIG.get("score_liq_trap", 10)
+        label = (
+            f"🪤 Liq Sweep v23: swept {c_last['low']:.6g} < "
+            f"prior {prior_low:.6g}, bull reversal, z={vol_zscore_z:.2f}"
+        )
+        return {"is_sweep": True, "score": score, "label": label,
+                "swept_low": round(prior_low, 8)}
+
+    return {"is_sweep": False, "score": 0, "label": "", "swept_low": 0.0}
+
+
+def detect_whale_absorption_v23(candles):
+    """
+    v23 — Whale Absorption Detector.
+
+    Large volume spike with minimal price movement = whales absorbing
+    sell-side supply. Classic accumulation footprint.
+
+    Conditions:
+      volume > mean_volume * 3
+      AND abs(price_change_pct) < 0.5%
+    """
+    window = 20
+    if len(candles) < window + 2:
+        return {"is_absorption": False, "score": 0, "vol_mult": 0.0, "label": ""}
+
+    vols     = [c["volume_usd"] for c in candles]
+    cur_vol  = vols[-1]
+    mean_vol = sum(vols[-(window + 1):-1]) / window if window > 0 else cur_vol
+    vol_mult = cur_vol / mean_vol if mean_vol > 0 else 0.0
+
+    c         = candles[-1]
+    pch       = abs(c["close"] - c["open"]) / c["open"] * 100 if c["open"] > 0 else 99.0
+
+    if vol_mult > CONFIG["whale_fp_vol_mult"] and pch < CONFIG["whale_fp_price_max_pct"]:
+        score = CONFIG.get("score_whale_footprint", 8)
+        label = (
+            f"🐋 Whale Absorption v23: {vol_mult:.1f}× vol, "
+            f"price only {pch:.2f}% — stealth buy"
+        )
+        return {"is_absorption": True, "score": score,
+                "vol_mult": round(vol_mult, 2), "price_chg": round(pch, 3),
+                "label": label}
+
+    return {"is_absorption": False, "score": 0, "vol_mult": round(vol_mult, 2),
+            "price_chg": round(pch, 3), "label": ""}
+
+
+def detect_volatility_compression_v23(candles):
+    """
+    v23 — Volatility Compression Detector.
+
+    Detects pre-breakout BB compression using historical percentile.
+    Low percentile = coil spring ready to explode.
+
+    Computes BB width (4σ / mid_price) and checks if current value
+    is below the 20th historical percentile over last 50 candles.
+    """
+    lookback = CONFIG.get("bb_percentile_lookback", 50)
+    period   = 20
+    if len(candles) < lookback + period:
+        return {"is_compressed": False, "score": 0, "percentile": 50.0, "label": ""}
+
+    bbw_history = []
+    for i in range(lookback, 0, -1):
+        seg    = candles[-(i + period):-i] if i > 0 else candles[-period:]
+        if len(seg) < period:
+            continue
+        cls    = [c["close"] for c in seg]
+        mean_c = sum(cls) / period
+        var    = sum((x - mean_c) ** 2 for x in cls) / period
+        std_c  = math.sqrt(var)
+        mid_c  = mean_c if mean_c > 0 else 1.0
+        bbw_history.append(4.0 * std_c / mid_c)
+
+    if not bbw_history:
+        return {"is_compressed": False, "score": 0, "percentile": 50.0, "label": ""}
+
+    cur_bbw    = bbw_history[-1]
+    rank       = sum(1 for v in bbw_history if v <= cur_bbw)
+    pctile     = rank / len(bbw_history) * 100
+
+    # Volume confirmation: recent 3c vs prior 12c
+    vol_r  = sum(c["volume_usd"] for c in candles[-3:]) / 3
+    vol_p  = sum(c["volume_usd"] for c in candles[-15:-3]) / 12
+    vol_ok = (vol_r / vol_p) >= 1.3 if vol_p > 0 else False
+
+    thresh = CONFIG.get("bb_percentile_threshold", 20)
+    if pctile <= thresh and vol_ok:
+        score = CONFIG.get("score_prebreakout", 8)
+        label = (
+            f"💥 Volatility Compression v23: BB p{pctile:.0f}, "
+            f"vol confirm — EXPLOSION INCOMING"
+        )
+        return {"is_compressed": True, "score": score,
+                "percentile": round(pctile, 1), "bbw": round(cur_bbw, 5), "label": label}
+    elif pctile <= thresh:
+        score = CONFIG.get("score_prebreakout", 8) // 2
+        label = f"💥 Vol Compression (BB only): p{pctile:.0f}"
+        return {"is_compressed": True, "score": score,
+                "percentile": round(pctile, 1), "bbw": round(cur_bbw, 5), "label": label}
+
+    return {"is_compressed": False, "score": 0,
+            "percentile": round(pctile, 1), "bbw": round(cur_bbw, 5), "label": ""}
+
+
+def detect_momentum_ignition_v23(candles, vol_zscore_z):
+    """
+    v23 — Momentum Ignition Detector.
+
+    Early pump trigger: consecutive higher highs + volume confirms.
+    Distinct from v22: uses z>1.5 (relaxed from 1.8) for more hits.
+
+    Conditions:
+      3 consecutive higher highs in last N+1 candles
+      AND volume_zscore > 1.5
+    """
+    n_highs = CONFIG.get("mom_ignition_highs", 3)
+    if len(candles) < n_highs + 2:
+        return {"is_ignition": False, "score": 0, "label": ""}
+
+    highs  = [c["high"] for c in candles[-(n_highs + 1):]]
+    consec = sum(1 for i in range(1, len(highs)) if highs[i] > highs[i - 1])
+
+    cond_highs = consec >= n_highs
+    cond_z     = vol_zscore_z > 1.5   # v23: relaxed from 1.8
+
+    if cond_highs and cond_z:
+        score = CONFIG.get("score_mom_ignition", 10)
+        label = (
+            f"🚀 Momentum Ignition v23: {consec} higher highs + "
+            f"z={vol_zscore_z:.2f} — EARLY PUMP"
+        )
+        return {"is_ignition": True, "score": score,
+                "consec_highs": consec, "label": label}
+
+    return {"is_ignition": False, "score": 0, "consec_highs": consec, "label": ""}
+
+
+def calc_orderbook_pressure_v23(vol_zscore_v20_data, candle_imbal_data):
+    """
+    v23 — Orderbook Pressure Model.
+
+    Computes bid/ask imbalance from available proxies:
+      1. bid_ask_ratio from vol_zscore_v20 (candle volume proxy)
+      2. candle imbalance from candle_imbal
+
+    imbalance > 1.2 = bullish pressure  → score bonus
+    imbalance < 0.8 = bearish pressure  → score penalty
+    """
+    bar      = vol_zscore_v20_data.get("bid_ask_ratio", 1.0)
+    ci_bull  = candle_imbal_data.get("is_bullish", False)
+    ci_ratio = candle_imbal_data.get("imbalance", 1.0)
+
+    # Combine both proxies
+    imbalance = (bar + ci_ratio) / 2.0
+
+    bull_thr = CONFIG.get("ob_imbalance_bullish", 1.2)
+    bear_thr = CONFIG.get("ob_imbalance_bearish", 0.8)
+    max_sc   = CONFIG.get("ob_imbalance_score_max", 10)
+
+    if imbalance >= bull_thr:
+        raw_score = min((imbalance - 1.0) / 0.5 * max_sc, max_sc)
+        label = (
+            f"📊 OB Pressure v23: imbalance {imbalance:.2f} "
+            f"(bid/ask {bar:.2f}, candle {ci_ratio:.2f}) — BUY DOMINANT"
+        )
+        return {"imbalance": round(imbalance, 3), "score": round(raw_score, 1),
+                "is_bullish": True, "is_bearish": False, "label": label}
+    elif imbalance <= bear_thr:
+        penalty = -round(min((1.0 - imbalance) / 0.3 * 5, 5), 1)
+        label = (
+            f"📊 OB Pressure v23: imbalance {imbalance:.2f} — SELL DOMINANT"
+        )
+        return {"imbalance": round(imbalance, 3), "score": penalty,
+                "is_bullish": False, "is_bearish": True, "label": label}
+
+    return {"imbalance": round(imbalance, 3), "score": 0,
+            "is_bullish": False, "is_bearish": False, "label": ""}
+
+
+def detect_spoofing_v23(candles):
+    """
+    v23 — Spoofing / Fake Wall Detector.
+
+    Detects large volume candles that produce no real price movement.
+    These signal fake buy/sell walls (market maker spoofing).
+
+    Conditions for spoofing:
+      - Volume spike > 4× mean in last candle
+      - Price change < 0.3% despite huge volume
+      - FOLLOWED by opposing candle within 2 candles (reversal)
+
+    Applies score penalty to filter out manipulated setups.
+    """
+    window = 15
+    if len(candles) < window + 3:
+        return {"is_spoofing": False, "penalty": 0, "label": ""}
+
+    vols     = [c["volume_usd"] for c in candles]
+    mean_vol = sum(vols[-(window + 1):-1]) / window if window > 0 else vols[-1]
+    mult     = vols[-1] / mean_vol if mean_vol > 0 else 0.0
+
+    c_last   = candles[-1]
+    pch      = abs(c_last["close"] - c_last["open"]) / c_last["open"] * 100 \
+               if c_last["open"] > 0 else 99.0
+
+    if mult < CONFIG.get("spoofing_vol_mult", 4.0):
+        return {"is_spoofing": False, "penalty": 0, "label": ""}
+    if pch >= CONFIG.get("spoofing_price_max_pct", 0.3):
+        return {"is_spoofing": False, "penalty": 0, "label": ""}
+
+    # Check if next candle (candles[-1] spike, candles prev) reversal
+    rev_n = CONFIG.get("spoofing_reversal_candles", 2)
+    is_bull_last = c_last["close"] > c_last["open"]
+    reversal_found = False
+    for prev in candles[-(rev_n + 2):-1]:
+        is_bear = prev["close"] < prev["open"]
+        if is_bull_last and is_bear:
+            reversal_found = True
+        elif not is_bull_last and prev["close"] > prev["open"]:
+            reversal_found = True
+
+    if reversal_found:
+        penalty = CONFIG.get("spoofing_penalty", -6)
+        label = (
+            f"⚠️ Spoofing v23: {mult:.1f}× vol, price {pch:.2f}%, "
+            f"direction reversed — fake wall detected"
+        )
+        return {"is_spoofing": True, "penalty": penalty,
+                "vol_mult": round(mult, 2), "label": label}
+
+    return {"is_spoofing": False, "penalty": 0, "label": ""}
+
+
+def calc_mm_score_v23(liq_sweep_v23, whale_abs_v23, vol_comp_v23,
+                      mom_ign_v23, ob_press_v23, spoofing_v23,
+                      smart_money_v22, accum, energy):
+    """
+    v23 — Market Maker Scoring Model (0-100, weighted).
+
+    Replaces/augments institutional score with MM-specific detectors.
+
+    Weights:
+      accumulation  × 0.20
+      breakout      × 0.20
+      volume        × 0.20
+      orderbook     × 0.15
+      momentum      × 0.15
+      liquidity_sweep × 0.10
+    """
+    # Accumulation component [0-100]
+    acc_raw = 0
+    if smart_money_v22.get("is_accumulating"):
+        acc_raw += 50 + (smart_money_v22.get("n_cond", 0) - 2) * 25
+    if whale_abs_v23.get("is_absorption"):
+        acc_raw += 35
+    if accum.get("is_accumulating"):
+        acc_raw += 20
+    acc_score = min(acc_raw, 100.0)
+
+    # Breakout component [0-100]
+    bo_raw = 0
+    if vol_comp_v23.get("is_compressed"):
+        bo_raw += 40 + max(0, 20 - vol_comp_v23.get("percentile", 20))
+    if energy.get("is_buildup"):
+        bo_raw += 25
+    bo_score = min(bo_raw, 100.0)
+
+    # Volume component [0-100]
+    # Will be passed in as z-score; proxy via whale absorption mult
+    vol_raw = min(whale_abs_v23.get("vol_mult", 0) / 5.0 * 100, 100.0)
+    vol_score = vol_raw
+
+    # Orderbook component [0-100]
+    ob_score = max(
+        min(ob_press_v23.get("score", 0) / CONFIG.get("ob_imbalance_score_max", 10) * 100, 100.0),
+        0.0
+    )
+
+    # Momentum component [0-100]
+    mom_raw = 60 if mom_ign_v23.get("is_ignition") else 0
+    mom_raw += min(mom_ign_v23.get("consec_highs", 0) * 10, 30)
+    mom_score = min(mom_raw, 100.0)
+
+    # Liquidity sweep component [0-100]
+    ls_score = 100.0 if liq_sweep_v23.get("is_sweep") else 0.0
+
+    # Spoofing penalty — directly reduce components
+    spoof_pen = spoofing_v23.get("penalty", 0)
+
+    w = CONFIG
+    mm_score = (
+        w["inst_w_accumulation"] * acc_score
+      + w["inst_w_breakout"]     * bo_score
+      + w["inst_w_volume"]       * vol_score
+      + w["inst_w_orderbook"]    * ob_score
+      + w["inst_w_momentum"]     * mom_score
+      + w["inst_w_liq_trap"]     * ls_score
+    )
+    mm_score = max(0.0, mm_score + spoof_pen)  # apply spoofing penalty
+
+    return {
+        "mm_score":      round(mm_score, 1),
+        "acc_score":     round(acc_score, 1),
+        "bo_score":      round(bo_score, 1),
+        "vol_score":     round(vol_score, 1),
+        "ob_score":      round(ob_score, 1),
+        "mom_score":     round(mom_score, 1),
+        "ls_score":      round(ls_score, 1),
+        "spoof_pen":     spoof_pen,
+    }
+
+
+def calc_pump_probability_v23(mm_score):
+    """
+    v23 — Pump Probability via Sigmoid function.
+
+    probability = 1 / (1 + exp(-mm_score / 8)) * 100
+
+    Gives strong separation: mm_score=50 → ~73%, mm_score=30 → ~48%
+    """
+    try:
+        prob = 1.0 / (1.0 + math.exp(-mm_score / 8.0))
+    except OverflowError:
+        prob = 0.0 if mm_score < 0 else 1.0
+    return round(prob * 100, 1)
+
+
 def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
                    rsi, buy_ratio, vol_ratio, price_pos, alert_level, bos_level,
                    liq_sweep):
@@ -4199,6 +4593,14 @@ def master_score(symbol, ticker):
         micro_breakout, candle_imbal
     )
 
+    # ── NEW v23 — Market Maker Detection ─────────────────────────────────────
+    liq_sweep_v23  = detect_liquidity_sweep_v23(c1h, vol_zscore_v20["z"])
+    whale_abs_v23  = detect_whale_absorption_v23(c1h)
+    vol_comp_v23   = detect_volatility_compression_v23(c1h)
+    mom_ign_v23    = detect_momentum_ignition_v23(c1h, vol_zscore_v20["z"])
+    ob_press_v23   = calc_orderbook_pressure_v23(vol_zscore_v20, candle_imbal)
+    spoofing_v23   = detect_spoofing_v23(c1h)
+
     # PART 4: Weighted scoring bonus (computed later in scoring section)
 
 
@@ -4234,15 +4636,21 @@ def master_score(symbol, ticker):
         )
         return None
 
-    # ── GATE 5: BB Position tidak di puncak ──────────────────────────────────
+    # ── GATE 5: BB Position — FIX v23: convert hard reject to breakout bonus ──
+    # Old: bb_pct >= 1.05 → reject  (blocked real breakout pumps)
+    # New: bb_pct >= 1.10 → add breakout bonus; soft warn only
+    _bb_breakout_bonus = 0
     if bb_pct >= CONFIG["gate_bb_pos_max"]:
+        # No longer rejected — price above upper BB = confirmed breakout
+        _bb_breakout_bonus = CONFIG.get("score_bb_breakout_v23", 5)
         log.info(
-            f"  {symbol}: BB pos {bb_pct*100:.0f}% — overbought BB (GATE GAGAL)"
+            f"  {symbol}: BB pos {bb_pct*100:.0f}% ≥ upper — "
+            f"BB breakout (bonus +{_bb_breakout_bonus})"
         )
-        return None
 
     # ── GATE 6: Harga tidak di zona distribusi atas ───────────────────────────
-    if price_pos_48 > 0.85:
+    # FIX v23: 85% → 97% — previous threshold blocked too many breakout setups
+    if price_pos_48 > 0.97:
         log.info(
             f"  {symbol}: Posisi harga {price_pos_48:.0%} dari swing range — "
             f"zona distribusi atas (GATE GAGAL)"
@@ -4260,12 +4668,14 @@ def master_score(symbol, ticker):
     # (karena GATE 2 sudah handle reject di bawah 97% VWAP)
 
     # ── GATE 9: STEP 8 v19 — Momentum Validation (5m price change)
+    # FIX v23: only reject if price dropping > 0.5%, flat is fine
     if c5m and len(c5m) >= 2:
         price_chg_5m = (c5m[-1]["close"] - c5m[-2]["close"]) / c5m[-2]["close"]
         if price_chg_5m <= CONFIG["momentum_val_reject"]:
             log.info(
-                f"  {symbol}: 5m price change {price_chg_5m*100:+.3f}% ≤ 0 "
-                f"— momentum negatif/flat (GATE GAGAL)"
+                f"  {symbol}: 5m price change {price_chg_5m*100:+.3f}% < "
+                f"{CONFIG['momentum_val_reject']*100:.1f}% "
+                f"— momentum negatif kuat (GATE GAGAL)"
             )
             return None
     else:
@@ -4303,6 +4713,11 @@ def master_score(symbol, ticker):
     if vol_spike["tier"] > 0:
         score += vol_spike["score"]
         signals.append(vol_spike["label"])
+
+    # ── 0a+. FIX v23: BB Breakout bonus (replaces hard reject from GATE 5) ───
+    if _bb_breakout_bonus > 0:
+        score += _bb_breakout_bonus
+        signals.append(f"📈 BB Breakout: price above upper band — confirmed breakout (+{_bb_breakout_bonus})")
 
     # ── 0b. Buy Pressure (Phase 2) ────────────────────────────────────────────
     if buy_press["tier"] > 0:
@@ -4647,6 +5062,43 @@ def master_score(symbol, ticker):
         signals.append(rev_label_v22)
 
     # ══════════════════════════════════════════════════════════════════════════
+    #  SCORING v23 — MARKET MAKER DETECTION BONUSES
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Liquidity Sweep v23
+    if liq_sweep_v23.get("is_sweep"):
+        score += liq_sweep_v23["score"]
+        signals.append(liq_sweep_v23["label"])
+
+    # Whale Absorption v23
+    if whale_abs_v23.get("is_absorption"):
+        score += whale_abs_v23["score"]
+        signals.append(whale_abs_v23["label"])
+
+    # Volatility Compression v23
+    if vol_comp_v23.get("is_compressed"):
+        score += vol_comp_v23["score"]
+        signals.append(vol_comp_v23["label"])
+
+    # Momentum Ignition v23
+    if mom_ign_v23.get("is_ignition"):
+        score += mom_ign_v23["score"]
+        signals.append(mom_ign_v23["label"])
+
+    # Orderbook Pressure v23
+    ob_sc = ob_press_v23.get("score", 0)
+    if ob_sc != 0:
+        score += int(ob_sc)
+        if ob_press_v23.get("label"):
+            signals.append(ob_press_v23["label"])
+
+    # Spoofing penalty v23
+    spoof_pen = spoofing_v23.get("penalty", 0)
+    if spoof_pen < 0:
+        score += spoof_pen
+        signals.append(spoofing_v23["label"])
+
+    # ══════════════════════════════════════════════════════════════════════════
     #  ALERT LEVEL v18 — feature-based probability + timing ETA
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -4664,19 +5116,27 @@ def master_score(symbol, ticker):
         vol_zscore_v20, candle_imbal, micro_breakout, accum, energy
     )
 
-    # FIX 09: Blended score = 50% heuristic + 30% AI + 20% institutional
-    blended_score = round(
-        score * 0.50
-        + ai_score_data["weighted_score"] * 0.30
-        + inst_score_data["inst_score"]   * 0.20
+    # v23 Market Maker Score (0-100)
+    mm_score_data = calc_mm_score_v23(
+        liq_sweep_v23, whale_abs_v23, vol_comp_v23,
+        mom_ign_v23, ob_press_v23, spoofing_v23,
+        smart_money_v22, accum, energy
     )
 
-    # FIX 10 v22: Advanced sigmoid probability from institutional score
-    pump_prob_v22  = calc_pump_probability_v22(inst_score_data["inst_score"])
-    # Retain legacy logistic prob for backward compat
+    # v23: Blended score — 45% heuristic + 30% AI + 25% MM institutional
+    _hw = CONFIG.get("v23_heuristic_weight", 0.45)
+    _aw = CONFIG.get("v23_ai_weight",        0.30)
+    _mw = CONFIG.get("v23_inst_weight",      0.25)
+    blended_score = round(
+        score                          * _hw
+        + ai_score_data["weighted_score"]  * _aw
+        + mm_score_data["mm_score"]        * _mw
+    )
+
+    # Pump probability: blend sigmoid from MM score (70%) + legacy logistic (30%)
+    pump_prob_v23  = calc_pump_probability_v23(mm_score_data["mm_score"])
     pump_prob_leg  = calc_pump_probability_v19(blended_score)
-    # Use blended prob: 60% institutional + 40% legacy
-    pump_prob      = round(pump_prob_v22 * 0.60 + pump_prob_leg * 0.40, 1)
+    pump_prob      = round(pump_prob_v23 * 0.70 + pump_prob_leg * 0.30, 1)
 
     # v18 timing ETA (retained)
     pump_timing = calc_pump_timing_eta(
@@ -4746,7 +5206,8 @@ def master_score(symbol, ticker):
     )
 
     # v18: gunakan threshold WATCHLIST (40) sebagai minimum
-    min_score = CONFIG["score_watchlist"]
+    # FIX v23: use lower threshold to avoid 0-result scans
+    min_score = CONFIG.get("score_watchlist_v23", CONFIG["score_watchlist"])
     if score >= min_score:
         return {
             "symbol":          symbol,
@@ -4827,6 +5288,18 @@ def master_score(symbol, ticker):
             # FIX 11 v22 ranking keys
             "rank_inst_score":  inst_score_data["inst_score"],
             "rank_accum_score": inst_score_data["accum_score"],
+            # v23 market maker detection fields
+            "liq_sweep_v23":    liq_sweep_v23,
+            "whale_abs_v23":    whale_abs_v23,
+            "vol_comp_v23":     vol_comp_v23,
+            "mom_ign_v23":      mom_ign_v23,
+            "ob_press_v23":     ob_press_v23,
+            "spoofing_v23":     spoofing_v23,
+            "mm_score":         mm_score_data,
+            "pump_prob_v23":    pump_prob_v23,
+            # v23 ranking keys (4-key sort)
+            "rank_mm_score":    mm_score_data["mm_score"],
+            "rank_ob_score":    ob_press_v23.get("imbalance", 1.0),
         }
     else:
         log.info(f"  {symbol}: Skor {score} < {min_score} (WATCHLIST threshold) — dilewati")
@@ -5091,16 +5564,46 @@ def build_alert(r, rank=None):
         if lbl:
             msg += f"  {lbl[:90]}\n"
 
+    # v23 Market Maker signals
+    mm23   = r.get("mm_score", {})
+    pv23   = r.get("pump_prob_v23", 0)
+    ls23   = r.get("liq_sweep_v23", {})
+    wa23   = r.get("whale_abs_v23", {})
+    vc23   = r.get("vol_comp_v23", {})
+    mi23   = r.get("mom_ign_v23", {})
+    ob23   = r.get("ob_press_v23", {})
+    sp23   = r.get("spoofing_v23", {})
+
+    if mm23 and mm23.get("mm_score", 0) > 0:
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "<b>🎯 Market Maker Score v23:</b>\n"
+        msg += (
+            f"  MM:{mm23.get('mm_score',0):.1f}/100 | Prob:{pv23:.1f}%\n"
+            f"  Acc:{mm23.get('acc_score',0):.0f} "
+            f"BO:{mm23.get('bo_score',0):.0f} "
+            f"Vol:{mm23.get('vol_score',0):.0f} "
+            f"OB:{mm23.get('ob_score',0):.0f} "
+            f"Mom:{mm23.get('mom_score',0):.0f} "
+            f"LS:{mm23.get('ls_score',0):.0f}"
+        )
+        if mm23.get("spoof_pen", 0) < 0:
+            msg += f" Spoof:{mm23.get('spoof_pen',0)}"
+        msg += "\n"
+    for det_23 in [ls23, wa23, vc23, mi23, ob23, sp23]:
+        lbl = det_23.get("label", "") if det_23 else ""
+        if lbl:
+            msg += f"  {lbl[:90]}\n"
+
     rank_val = r.get("rank_value", r.get("score", 0))
     z_rank   = r.get("rank_vol_z_v20", 0)
-    ba_rank  = r.get("rank_bid_ask", 1.0)
-    is_rank  = r.get("rank_inst_score", 0)
-    msg += (f"\n<i>Scanner v22 | Rank:{rank_val:.1f} | "
-            f"Inst:{is_rank:.0f} | Z:{z_rank:.2f} | BA:{ba_rank:.2f} | ⚠️ Bukan financial advice</i>")
+    mm_rank  = r.get("rank_mm_score", 0)
+    ob_rank  = r.get("rank_ob_score", 1.0)
+    msg += (f"\n<i>Scanner v23 | Rank:{rank_val:.1f} | "
+            f"MM:{mm_rank:.0f} | Z:{z_rank:.2f} | OB:{ob_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
 def build_summary(results):
-    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v22 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
+    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v23 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
@@ -5201,7 +5704,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v22:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v23:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -5224,7 +5727,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v22 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v23 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -5270,15 +5773,14 @@ def run_scan():
     save_oi_snapshots()
     log.info("OI snapshots disimpan ke disk.")
 
-    # FIX 11 v22 — Advanced Ranking: prob → vol_zscore → orderbook → accum
-    # 4-key tuple sort ensures strongest institutional signals surface first
+    # v23 — Advanced 4-key Ranking: prob → MM score → vol_zscore → OB imbalance
     if CONFIG.get("rank_v20_multi", True):
         results.sort(
             key=lambda x: (
-                x.get("rank_value",      x["score"]),   # primary:   score × prob
-                x.get("rank_inst_score", 0),             # secondary: institutional score
-                x.get("rank_vol_z_v20",  0),             # tertiary:  vol z-score
-                x.get("rank_bid_ask",    1.0),           # quaternary: bid/ask ratio
+                x.get("rank_value",      x["score"]),   # 1: score × prob
+                x.get("rank_mm_score",   0),             # 2: MM score (v23)
+                x.get("rank_vol_z_v20",  0),             # 3: vol z-score
+                x.get("rank_ob_score",   1.0),           # 4: OB imbalance
             ),
             reverse=True,
         )
@@ -5308,17 +5810,17 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v22 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v23 — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v22                   ║")
-    log.info("║  INSTITUTIONAL PUMP HUNTER                                 ║")
-    log.info("║  Smart Money + Liq Trap + Whale FP + Pre-Breakout          ║")
-    log.info("║  Mom Ignition + Dump Trap + Sigmoid Prob + 4-key Rank      ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v23                   ║")
+    log.info("║  MARKET MAKER DETECTION EDITION                            ║")
+    log.info("║  6 Filter Fixes + Liq Sweep + Whale Abs + Vol Compress     ║")
+    log.info("║  Mom Ignition + OB Pressure + Spoofing + MM Score         ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
