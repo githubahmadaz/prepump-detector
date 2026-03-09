@@ -1,27 +1,20 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v23 — INSTITUTIONAL PUMP HUNTER        ║
-║                       MARKET MAKER DETECTION EDITION                         ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v24 — ANTI-OVERFILTERING EDITION       ║
 ║                                                                              ║
-║  UPGRADE v23 — 6 filter fixes + 7 MM detectors:                            ║
+║  UPGRADE v24 — 7 targeted patches to fix 344-coin → 0-result problem:      ║
 ║                                                                              ║
-║  FILTER FIX 01 — REVERSAL OVERRIDE: z-score threshold 1.5 → -0.5           ║
-║  FILTER FIX 02 — BB BREAKOUT: convert hard reject to +5 score bonus        ║
-║  FILTER FIX 03 — MOMENTUM GATE: reject only if 5m < -0.5% (was ≤ 0)       ║
-║  FILTER FIX 04 — LIQUIDITY FILTER: min vol 20M → 2M USD                    ║
-║  FILTER FIX 05 — DISTRIBUTION FILTER: price_pos > 85% → > 97%             ║
-║  FILTER FIX 06 — WATCHLIST THRESHOLD: 55 → 40                              ║
+║  PATCH 1 — DUMP TRAP: hard reject → score -= 10                            ║
+║  PATCH 2 — EMA50 DOWNTREND: hard reject → score -= 5                       ║
+║  PATCH 3 — VWAP GATE: hard reject → score -= 3                             ║
+║  PATCH 4 — REVERSAL Z-SCORE: threshold -0.5 → -2.0                         ║
+║  PATCH 5 — LIQUIDITY THRESHOLD: $2M → $500K                                ║
+║  PATCH 6 — BUG FIX: v20_momentum_cap + 5 sibling caps now defined          ║
+║  PATCH 7 — SCORING BEFORE FILTERING: deferred penalties applied in score    ║
 ║                                                                              ║
-║  MM DETECT 01 — LIQUIDITY SWEEP: stop-hunt before pump                     ║
-║  MM DETECT 02 — WHALE ABSORPTION: big vol + no price move                  ║
-║  MM DETECT 03 — VOLATILITY COMPRESSION: BB width percentile                 ║
-║  MM DETECT 04 — MOMENTUM IGNITION: 3 higher highs + z>1.5                  ║
-║  MM DETECT 05 — ORDERBOOK PRESSURE: bid/ask imbalance model                ║
-║  MM DETECT 06 — SPOOFING DETECTION: fake wall penalty                       ║
-║  MM DETECT 07 — MM SCORING: weighted 0-100 model + sigmoid prob            ║
-║                                                                              ║
-║  WARISAN v22: EMA50 override, smart money, liq trap, whale FP,             ║
-║               pre-breakout, dump trap, institutional scoring                ║
+║  WARISAN v23: 6 filter fixes + 7 MM detectors (liq sweep, whale abs,       ║
+║               vol compression, mom ignition, OB pressure, spoofing)         ║
+║  WARISAN v22: EMA50 override, smart money, liq trap, institutional score    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -55,13 +48,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v23.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v24.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v23 — log aktif: /tmp/scanner_v23.log")
+log.info("Scanner v24 — log aktif: /tmp/scanner_v24.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -365,7 +358,8 @@ CONFIG = {
 
     # STEP 13 — Noise filter
     # FIX v23: min vol 20M → 2M — filter too strict, removing valid pumps
-    "noise_min_vol_24h":    2_000_000,   # min $2M volume 24h (was $20M)
+    # FIX v24: further relaxed 2M → 500k — allow smaller cap altcoins
+    "noise_min_vol_24h":      500_000,   # min $500K volume 24h (was $2M)
     "noise_min_atr_pct":       0.3,      # min 0.3% ATR
 
     # STEP 14 — Early pump detection
@@ -418,6 +412,14 @@ CONFIG = {
     "dump_filter_5m_pct":      -4.0,     # price_change_5m < -4% → reject
     "dump_filter_15m_pct":     -6.0,     # price_change_15m < -6% → reject
 
+    # PART 4 — Weighted score caps (FIX v24: these were used but never defined)
+    "v20_momentum_cap":         20,      # max bonus from momentum component
+    "v20_volume_cap":           15,      # max bonus from volume component
+    "v20_breakout_cap":         15,      # max bonus from breakout component
+    "v20_reversal_cap":         15,      # max bonus from reversal component
+    "v20_orderbook_cap":        10,      # max bonus from orderbook component
+    "v20_trend_cap":            10,      # max bonus from trend component
+
     # PART 7 — Multi-key ranking
     "rank_v20_multi":           True,    # sort by score, zscore, bid_ask_ratio
 
@@ -428,7 +430,8 @@ CONFIG = {
     # FIX 01 — EMA50 Reversal Override
     "ema50_override_slope_min":  0.0,    # slope > 0 overrides EMA50 reject gate
     # FIX v23: z-score threshold 1.5 → -0.5 so early reversals are not blocked
-    "ema50_override_zscore_min": -0.5,   # was 1.5 — too strict, blocked reversals
+    # FIX v24: further relaxed -0.5 → -2.0 — allow even very early reversals
+    "ema50_override_zscore_min": -2.0,   # was -0.5 (v23) → now -2.0 (v24)
 
     # FIX 02 — Smart Money Accumulation
     "sma_range_max":             0.03,   # price range contraction < 3%
@@ -476,8 +479,16 @@ CONFIG = {
     "sl_v22_mult":               0.9,    # SL  = entry − ATR × 0.9
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  UPGRADE v23: MARKET MAKER DETECTION CONFIG
+    #  UPGRADE v24: ANTI-OVERFILTERING PATCHES
     # ══════════════════════════════════════════════════════════════════════════
+
+    # FIX v24: Penalties for soft-gates (replace hard rejects)
+    "penalty_below_vwap_v24":   -3,     # VWAP gate breach → -3 score
+    "penalty_below_ema50_v24":  -5,     # EMA50 downtrend  → -5 score
+    "penalty_dump_trap_v24":   -10,     # Dump trap active  → -10 score
+
+    # FIX v24: Watchlist threshold further lowered for more candidates
+    "score_watchlist_v24":       30,    # was 40 in v23 (target: 20-40 alerts)
 
     # --- Filter relaxations (6 critical overfiltering fixes) ---
     # (see inline where applied: momentum_val_reject, noise_min_vol_24h,
@@ -518,7 +529,7 @@ EXCLUDED_KEYWORDS = ["XAU", "PAXG", "BTC", "ETH", "USDC", "DAI", "BUSD", "UST"]
 #  📋  WHITELIST
 # ══════════════════════════════════════════════════════════════════════════════
 WHITELIST_SYMBOLS = {
-   "4USDT",
+    "4USDT",
 "0GUSDT",
 "1000BONKUSDT",
 "1000PEPEUSDT",
@@ -4498,12 +4509,15 @@ def master_score(symbol, ticker):
     # ── GATE 2: VWAP dengan toleransi ────────────────────────────────────────
     vwap            = calc_vwap(c1h, lookback=24)
     vwap_gate_level = vwap * CONFIG["vwap_gate_tolerance"]
+    # FIX v24: no longer hard-reject on VWAP — apply score penalty instead
+    # Coins below VWAP can still be valid reversal setups
+    _vwap_penalty = 0
     if price_now < vwap_gate_level:
+        _vwap_penalty = CONFIG.get("penalty_below_vwap_v24", -3)
         log.info(
             f"  {symbol}: Harga ${price_now:.6g} < VWAP gate ${vwap_gate_level:.6g} "
-            f"— GATE GAGAL"
+            f"— penalti {_vwap_penalty} (tidak reject)"
         )
-        return None
 
     # ── Hitung semua indikator ────────────────────────────────────────────────
     bbw, bb_pct      = calc_bbw(c1h)
@@ -4576,11 +4590,15 @@ def master_score(symbol, ticker):
     prebreakout_v22  = detect_prebreakout_pressure_v22(c1h)
     mom_ignition_v22 = detect_momentum_ignition_v22(c1h, vol_zscore_v20["z"])
 
-    # FIX 07: Dump Trap Filter (institutional sell pressure)
+    # FIX 07: Dump Trap Filter — FIX v24: penalise instead of hard-reject
+    # price < EMA200 + slope < 0 + ask>>bid → score -= 10, not return None
+    _dump_trap_penalty = 0
     dump_trap_reject, dump_trap_reason = check_dump_trap_v22(c1h, ema200_dist, vol_zscore_v20)
     if dump_trap_reject:
-        log.info(f"  {symbol}: {dump_trap_reason} — GATE GAGAL (dump trap v22)")
-        return None
+        _dump_trap_penalty = CONFIG.get("penalty_dump_trap_v24", -10)
+        log.info(
+            f"  {symbol}: {dump_trap_reason} — penalti {_dump_trap_penalty} (tidak reject v24)"
+        )
 
     # FIX 08: Improved reversal check (informational, used in scoring)
     rev_valid_v22, rev_conf_v22, rev_label_v22 = calc_improved_reversal_v22(
@@ -4657,10 +4675,15 @@ def master_score(symbol, ticker):
         )
         return None
 
-    # ── GATE 7: STEP 6 v19 — EMA Trend Filter (price < EMA50 = strong downtrend)
+    # ── GATE 7: STEP 6 v19 — EMA Trend Filter
+    # FIX v24: price < EMA50 no longer hard-rejects — apply score penalty instead
+    # Keeps reversal setups alive while penalising bearish trend
+    _ema50_penalty = 0
     if ema_trend["should_reject"]:
-        log.info(f"  {symbol}: {ema_trend['label']} — GATE GAGAL")
-        return None
+        _ema50_penalty = CONFIG.get("penalty_below_ema50_v24", -5)
+        log.info(
+            f"  {symbol}: {ema_trend['label']} — penalti {_ema50_penalty} (não reject v24)"
+        )
 
     # ── GATE 8: STEP 7 v19 — VWAP Bias (pump setup mulai di atas VWAP)
     # Sudah ada vwap_gate_tolerance (0.97) di GATE 2, tapi STEP 7 lebih ketat
@@ -4708,6 +4731,25 @@ def master_score(symbol, ticker):
     # ══════════════════════════════════════════════════════════════════════════
     score   = 0
     signals = []
+
+    # ── v24: Apply deferred soft penalties (VWAP, EMA50, dump trap) ──────────
+    # These were converted from hard-rejects to score deductions so that
+    # candidates are ranked low rather than silently dropped.
+    if _vwap_penalty < 0:
+        score += _vwap_penalty
+        signals.append(
+            f"⚠️ Below VWAP gate — penalti {_vwap_penalty}"
+        )
+    if _ema50_penalty < 0:
+        score += _ema50_penalty
+        signals.append(
+            f"⚠️ {ema_trend['label']} — penalti {_ema50_penalty}"
+        )
+    if _dump_trap_penalty < 0:
+        score += _dump_trap_penalty
+        signals.append(
+            f"⚠️ Dump trap aktif — penalti {_dump_trap_penalty}"
+        )
 
     # ── 0a. Volume Spike (Phase 1) ────────────────────────────────────────────
     if vol_spike["tier"] > 0:
@@ -5206,8 +5248,8 @@ def master_score(symbol, ticker):
     )
 
     # v18: gunakan threshold WATCHLIST (40) sebagai minimum
-    # FIX v23: use lower threshold to avoid 0-result scans
-    min_score = CONFIG.get("score_watchlist_v23", CONFIG["score_watchlist"])
+    # FIX v24: use lower threshold to produce 20-40 candidates
+    min_score = CONFIG.get("score_watchlist_v24", CONFIG.get("score_watchlist_v23", CONFIG["score_watchlist"]))
     if score >= min_score:
         return {
             "symbol":          symbol,
@@ -5598,12 +5640,12 @@ def build_alert(r, rank=None):
     z_rank   = r.get("rank_vol_z_v20", 0)
     mm_rank  = r.get("rank_mm_score", 0)
     ob_rank  = r.get("rank_ob_score", 1.0)
-    msg += (f"\n<i>Scanner v23 | Rank:{rank_val:.1f} | "
+    msg += (f"\n<i>Scanner v24 | Rank:{rank_val:.1f} | "
             f"MM:{mm_rank:.0f} | Z:{z_rank:.2f} | OB:{ob_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
 def build_summary(results):
-    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v23 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
+    msg = f"\U0001f4cb <b>TOP CANDIDATES Scanner v24 \u2014 {utc_now()}</b>\n{chr(9473)*28}\n"
     for i, r in enumerate(results, 1):
         vol_str    = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                       else f"${r['vol_24h']/1e3:.0f}K")
@@ -5704,7 +5746,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v23:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v24:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -5727,7 +5769,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v23 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v24 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -5810,17 +5852,17 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v23 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v24 — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v23                   ║")
-    log.info("║  MARKET MAKER DETECTION EDITION                            ║")
-    log.info("║  6 Filter Fixes + Liq Sweep + Whale Abs + Vol Compress     ║")
-    log.info("║  Mom Ignition + OB Pressure + Spoofing + MM Score         ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v24                   ║")
+    log.info("║  ANTI-OVERFILTERING EDITION                                ║")
+    log.info("║  Soft gates: VWAP -3 | EMA50 -5 | DumpTrap -10            ║")
+    log.info("║  Vol min $500K | Z-score -2 | Bug fix v20 caps             ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
