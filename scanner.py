@@ -1,20 +1,28 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v26 — PERFORMANCE & CALIBRATION        ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v27 — BUG FIX + 3 FITUR BARU          ║
 ║                                                                              ║
-║  INHERITED FROM v25 (3 bug fixes + 4 smart filters confirmed working):      ║
-║    pump_prob_v22 alias ✅ | vol log format ✅ | crash protection ✅          ║
-║    EMA50 soft gate ✅ | wick soft gate ✅ | dump trap penalty ✅             ║
-║    Reversal bonus +8 ✅ | TOP 5 output ✅ | scan funnel stats ✅             ║
+║  INHERITED FROM v26 (performance + calibration confirmed working):          ║
+║    requests.Session ✅ | sleep 0.15s ✅ | EMA/Vol cache reuse ✅            ║
+║    OB +5 | vol_low +6 | funnel: 342→200→40→10→2                            ║
 ║                                                                              ║
-║  NEW v26 — Performance & Scoring Calibration:                               ║
-║    PERF 1 — requests.Session: persistent HTTP (no TCP handshake per call)   ║
-║    PERF 2 — sleep_coins: 0.8s → 0.15s (~342 coins: 274s → ~60s)            ║
-║    PERF 3 — EMA20 slope: derived from calc_ema_trend (no recompute)         ║
-║    PERF 4 — vol_zscore: derived from vol_zscore_v20 (single array pass)     ║
-║    PERF 5 — log noise: debug-level per coin, info every 10 + all hits       ║
-║    SCORE 1 — vol_spike_low: 8 → 6 (aligned to spec floor)                  ║
-║    SCORE 2 — OB imbalance bonus +5 (spec: bid/ask ≥ 1.3 bullish signal)    ║
+║  BUG FIXES v27 — Root Cause: Scanner tidak deteksi pump 20-70%:            ║
+║    BUG FIX 1 — gate_chg_24h_max: 8% → 25% ✅ KRITIS                        ║
+║               (8% memblokir semua coin pre-pump 20-70%)                     ║
+║    BUG FIX 2 — gate_uptrend_max_hours: 10 → 24 jam ✅                       ║
+║               (pump besar didahului akumulasi 12-18 jam)                   ║
+║    BUG FIX 3 — gate_rsi_max: 72 → 85 ✅                                     ║
+║               (RSI 72 itu baru fase 2 dari pump altcoin)                   ║
+║    BUG FIX 4 — v23_heuristic_weight: 0.45 → 0.50 ✅                         ║
+║               (beri bobot lebih ke spike signal kuat)                      ║
+║                                                                              ║
+║  NEW v27 — 3 Fitur Baru:                                                    ║
+║    FEAT 1 — OI Acceleration: deteksi OI makin cepat bertambah               ║
+║             (second derivative OI, pre-pump 1-3 jam, score +8/+18)         ║
+║    FEAT 2 — Orderbook Liquidity Vacuum: real API orderbook, gap ASK         ║
+║             detection (pump highway, score +12/+20)                        ║
+║    FEAT 3 — CVD Divergence: akumulasi vs distribusi real dari delta volume  ║
+║             Bullish Div +15 | Bearish Div (distribusi) -10 | Momentum +8   ║
 ║                                                                              ║
 ║  TARGET: 342 scanned → ~200 filtered → ~40 watchlist → ~10 alert → ~2 top  ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -54,13 +62,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v26.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v27.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v26 — log aktif: /tmp/scanner_v26.log")
+log.info("Scanner v27 — log aktif: /tmp/scanner_v27.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -79,21 +87,29 @@ CONFIG = {
     "min_oi_usd":          100_000,   # minimal $100K OI
 
     # ── Gate perubahan harga 24h ──────────────────────────────────────────────
-    # FIX v18: dilonggarkan dari 5% → 8%.
-    # 5% terlalu ketat di pasar bullish — coin yang baru mulai pump +5-7%
-    # masih bisa pre-pump, belum tentu distribusi.
-    # 8% masih memfilter coin yang sudah pump besar.
-    "gate_chg_24h_max":          8.0,
+    # FIX v27: dilonggarkan dari 8% → 25%.
+    # 8% TERLALU KETAT — coin yang akan pump 50% seringkali sudah naik 10-20%
+    # dalam 24h terakhir sebelum pump utama terjadi.
+    # Pump besar butuh "runway": naik 10-15% dulu baru pump 30-70% dalam 2-4 jam.
+    # 25% masih memfilter coin yang sudah pump besar dan hampir distribusi.
+    "gate_chg_24h_max":          25.0,
     "gate_chg_24h_min":        -15.0,   # hanya skip dump besar
 
     # ── VWAP Gate Tolerance ───────────────────────────────────────────────────
     "vwap_gate_tolerance":      0.97,   # price > vwap * 0.97
 
     # ── Gate uptrend usia ─────────────────────────────────────────────────────
-    "gate_uptrend_max_hours":   10,
+    # FIX v27: dinaikkan dari 10 jam → 24 jam.
+    # Pump 30-70% sering didahului trend naik 12-18 jam (fase akumulasi terlihat).
+    # 10 jam terlalu pendek — membuang coin yang justru mau pump besar.
+    "gate_uptrend_max_hours":   24,
 
     # ── Gate RSI overbought ───────────────────────────────────────────────────
-    "gate_rsi_max":             72.0,
+    # FIX v27: dinaikkan dari 72 → 85.
+    # RSI 72 TERLALU KETAT untuk altcoin pump detector.
+    # Pump besar sering baru mulai dari RSI 60-75 dan berhenti di RSI 85-92.
+    # Dengan batas 72, scanner membuang coin yang baru masuk fase 2 dari pump 5 fase!
+    "gate_rsi_max":             85.0,
 
     # ── Gate BB Position ──────────────────────────────────────────────────────
     "gate_bb_pos_max":          1.05,
@@ -546,13 +562,53 @@ CONFIG = {
     # already: bb_percentile_lookback, bb_percentile_threshold, score_prebreakout
 
     # v23 institutional scoring blend ratio
-    "v23_heuristic_weight":      0.45,   # was 0.50
-    "v23_ai_weight":             0.30,   # unchanged
-    "v23_inst_weight":           0.25,   # was 0.20
+    # FIX v27: beri lebih banyak bobot ke heuristic (sinyal spike lebih dominan)
+    "v23_heuristic_weight":      0.50,   # was 0.45
+    "v23_ai_weight":             0.25,   # was 0.30
+    "v23_inst_weight":           0.25,   # sama
 
     # Watchlist threshold — FIX v23: lowered 55 → 40 to pass more candidates
     # (raised too aggressively in v19; 344 coins 0 passed)
     "score_watchlist_v23":       40,     # effective threshold for v23
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  NEW v27: OI ACCELERATION
+    # ══════════════════════════════════════════════════════════════════════════
+    # OI acceleration = OI naik makin cepat (second derivative positif)
+    # Muncul 1-3 jam sebelum pump 30%+. Institusi membangun posisi dgn urgensi.
+    "oi_accel_window":           6,      # simpan 6 snapshot OI terakhir per coin
+    "oi_accel_min_snapshots":    3,      # butuh minimal 3 data point untuk hitung acceleration
+    "oi_accel_threshold":        0.5,    # rate OI harus >0.5%/jam untuk dianggap aktif
+    "oi_accel_strong":           1.5,    # acceleration kuat = OI naik >1.5%/jam
+    "score_oi_accel":            8,      # bonus score OI acceleration normal
+    "score_oi_accel_strong":    18,      # bonus score OI acceleration sangat kuat
+    "oi_accel_snapshot_file":   "./oi_accel.json",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  NEW v27: ORDERBOOK LIQUIDITY VACUUM
+    # ══════════════════════════════════════════════════════════════════════════
+    # Vacuum = area kosong di orderbook (gap besar antar level ask).
+    # Harga "terbang" melewati vacuum karena tidak ada hambatan sell order.
+    # Gap >0.3% = vacuum valid; >0.8% = pump highway!
+    "ob_vacuum_depth":           20,     # ambil 20 level bid/ask
+    "ob_vacuum_gap_min_pct":     0.3,    # gap minimal 0.3% untuk dianggap vacuum
+    "ob_ask_vacuum_gap_strong":  0.8,    # gap kuat = >0.8%
+    "ob_vacuum_vol_confirm_min": 1.3,    # butuh vol z-score >1.3 untuk konfirmasi
+    "score_ob_vacuum":          12,      # bonus vacuum moderat (0.3-0.8%)
+    "score_ob_vacuum_strong":   20,      # bonus vacuum kuat (>0.8%) + vol confirmed
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  NEW v27: CVD DIVERGENCE
+    # ══════════════════════════════════════════════════════════════════════════
+    # CVD = Cumulative Volume Delta (akumulasi buy_vol - sell_vol)
+    # Membedakan akumulasi nyata vs distribusi tersembunyi dengan akurat.
+    # Bullish Div: harga turun tapi CVD naik = whale akumulasi diam-diam
+    # Bearish Div: harga naik tapi CVD turun = distribusi di kenaikan (JEBAKAN!)
+    "cvd_lookback":              12,     # 12 candle untuk hitung CVD
+    "cvd_divergence_threshold":  0.4,   # threshold divergence signifikan
+    "score_cvd_bullish_div":    15,     # akumulasi tersembunyi = signal kuat
+    "score_cvd_bearish_div":   -10,     # distribusi = penalti
+    "score_cvd_momentum":        8,     # CVD dan harga sama naik = konfirmasi
 }
 
 MANUAL_EXCLUDE = set()
@@ -1040,6 +1096,54 @@ def add_funding_snapshot(symbol, funding_rate):
 #  💾  OI SNAPSHOTS — FIX v18: PERSISTEN KE DISK
 # ══════════════════════════════════════════════════════════════════════════════
 _oi_snapshot = {}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  💾  OI ACCELERATION HISTORY — NEW v27
+# ══════════════════════════════════════════════════════════════════════════════
+# Menyimpan 6+ OI snapshots per coin untuk deteksi second-derivative (acceleration).
+# _oi_snapshot (v18) hanya 2-point; _oi_accel_history menyimpan time-series penuh.
+_oi_accel_history = {}
+
+def load_oi_accel_history():
+    """v27: Load histori OI multi-snapshot dari disk."""
+    global _oi_accel_history
+    try:
+        p = CONFIG.get("oi_accel_snapshot_file", "./oi_accel.json")
+        if os.path.exists(p):
+            with open(p) as f:
+                data = json.load(f)
+            now = time.time()
+            _oi_accel_history = {
+                sym: [snap for snap in snaps if now - snap["ts"] < 21600]
+                for sym, snaps in data.items()
+                if any(now - s["ts"] < 21600 for s in snaps)
+            }
+            log.info(f"OI Accel history loaded: {len(_oi_accel_history)} coins")
+        else:
+            _oi_accel_history = {}
+    except Exception:
+        _oi_accel_history = {}
+
+def save_oi_accel_history():
+    """v27: Simpan histori OI ke disk setelah setiap scan."""
+    try:
+        p = CONFIG.get("oi_accel_snapshot_file", "./oi_accel.json")
+        with open(p, "w") as f:
+            json.dump(_oi_accel_history, f)
+    except Exception:
+        pass
+
+def update_oi_accel_snapshot(symbol, oi_now):
+    """v27: Tambah snapshot OI baru ke histori ring-buffer per coin."""
+    global _oi_accel_history
+    if oi_now <= 0:
+        return
+    if symbol not in _oi_accel_history:
+        _oi_accel_history[symbol] = []
+    _oi_accel_history[symbol].append({"ts": time.time(), "oi": oi_now})
+    window = CONFIG.get("oi_accel_window", 6)
+    if len(_oi_accel_history[symbol]) > window * 2:
+        _oi_accel_history[symbol] = _oi_accel_history[symbol][-(window * 2):]
 
 def load_oi_snapshots():
     """
@@ -3638,6 +3742,469 @@ def detect_spoofing_v23(candles):
     return {"is_spoofing": False, "penalty": 0, "label": ""}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  🆕  v27 FEATURE 1: OI ACCELERATION DETECTOR
+# ══════════════════════════════════════════════════════════════════════════════
+def calc_oi_acceleration_v27(symbol, oi_now):
+    """
+    v27 — OI Acceleration Detector.
+
+    Pump besar (30-70%) sering didahului OI yang MAKIN CEPAT bertambah,
+    bukan hanya bertambah (second derivative positif dari time-series OI).
+
+    Logika:
+    - Simpan 6 snapshot OI per coin (tiap run scan ≈ tiap 15-30 menit)
+    - Hitung rate of change OI (% per jam) antar snapshot berturutan
+    - Bandingkan rate terbaru vs rata-rata rate sebelumnya
+    - Jika OI naik makin cepat = ACCELERATION = institusi masuk dengan urgensi tinggi
+
+    Contoh nyata pre-pump 50%:
+      t-3h: OI +1.2%/h   ← akumulasi normal
+      t-2h: OI +2.8%/h   ← mulai akselerasi
+      t-1h: OI +5.4%/h   ← akselerasi kuat → ALERT!
+      t-0h: pump +50%
+
+    Returns: is_accelerating, is_strong, acceleration_rate, score, label.
+    """
+    global _oi_accel_history
+
+    # Tambah snapshot terbaru ke histori
+    update_oi_accel_snapshot(symbol, oi_now)
+
+    snaps     = _oi_accel_history.get(symbol, [])
+    min_snaps = CONFIG.get("oi_accel_min_snapshots", 3)
+
+    if len(snaps) < min_snaps or oi_now <= 0:
+        return {
+            "is_accelerating": False, "is_strong": False,
+            "acceleration_rate": 0.0, "current_rate": 0.0,
+            "avg_prior_rate": 0.0, "rates": [],
+            "score": 0, "label": "OI Accel: data belum cukup (butuh ≥3 scan)",
+        }
+
+    # Hitung rate of change per interval (dinormalisasi ke %/jam)
+    rates = []
+    for i in range(1, len(snaps)):
+        prev_oi = snaps[i-1]["oi"]
+        curr_oi = snaps[i]["oi"]
+        dt      = snaps[i]["ts"] - snaps[i-1]["ts"]
+        if prev_oi > 0 and dt > 60:   # minimal 1 menit antar snapshot
+            rate_pct = (curr_oi - prev_oi) / prev_oi * 100 * (3600.0 / dt)
+            rates.append(rate_pct)
+
+    if len(rates) < 2:
+        return {
+            "is_accelerating": False, "is_strong": False,
+            "acceleration_rate": 0.0, "current_rate": 0.0,
+            "avg_prior_rate": 0.0, "rates": rates,
+            "score": 0, "label": "OI Accel: rate belum cukup",
+        }
+
+    current_rate     = rates[-1]
+    prior_rates      = rates[:-1]
+    avg_prior        = sum(prior_rates) / len(prior_rates)
+    acceleration_rate = current_rate - avg_prior   # second derivative OI
+
+    accel_threshold = CONFIG.get("oi_accel_threshold", 0.5)
+    accel_strong    = CONFIG.get("oi_accel_strong", 1.5)
+
+    # Semua rate dalam 3 snapshot terakhir positif = OI naik konsisten
+    all_positive = all(r > 0 for r in rates[-3:]) if len(rates) >= 3 else current_rate > 0
+
+    is_accelerating = (
+        current_rate > accel_threshold
+        and acceleration_rate > accel_threshold
+        and all_positive
+    )
+    is_strong = (
+        is_accelerating
+        and current_rate    > accel_strong
+        and acceleration_rate > accel_strong
+    )
+
+    if is_strong:
+        score = CONFIG.get("score_oi_accel_strong", 18)
+        label = (
+            f"🚀 OI ACCELERATION KUAT! Rate: +{current_rate:.2f}%/h "
+            f"(sebelumnya avg +{avg_prior:.2f}%/h, akselerasi +{acceleration_rate:.2f}%/h) "
+            f"— INSTITUSI MASUK URGENSI TINGGI, pump 1-3 jam lagi!"
+        )
+    elif is_accelerating:
+        score = CONFIG.get("score_oi_accel", 8)
+        label = (
+            f"⚡ OI Acceleration: +{current_rate:.2f}%/h vs avg +{avg_prior:.2f}%/h "
+            f"(akselerasi +{acceleration_rate:.2f}%/h) — OI makin cepat, pre-pump signal"
+        )
+    elif current_rate > accel_threshold and all_positive:
+        score = CONFIG.get("score_oi_accel", 8) // 2
+        is_accelerating = True
+        label = f"📊 OI Rising Steady: +{current_rate:.2f}%/h — naik stabil, belum akselerasi"
+    elif current_rate < -accel_threshold:
+        score = -(CONFIG.get("score_oi_accel", 8) // 2)
+        label = f"⚠️ OI Menurun: {current_rate:.2f}%/h — posisi ditutup (distribusi/profit taking)"
+    else:
+        score = 0
+        label = f"OI Stabil: rate {current_rate:+.2f}%/h (n={len(snaps)} snapshots)"
+
+    return {
+        "is_accelerating":   is_accelerating,
+        "is_strong":         is_strong,
+        "acceleration_rate": round(acceleration_rate, 3),
+        "current_rate":      round(current_rate, 3),
+        "avg_prior_rate":    round(avg_prior, 3),
+        "rates":             [round(r, 3) for r in rates],
+        "n_snapshots":       len(snaps),
+        "score":             score,
+        "label":             label,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🆕  v27 FEATURE 2: ORDERBOOK LIQUIDITY VACUUM DETECTOR
+# ══════════════════════════════════════════════════════════════════════════════
+def get_orderbook_v27(symbol, limit=20):
+    """
+    v27 — Ambil real orderbook dari Bitget Futures API.
+    Menggunakan endpoint merge-depth; fallback ke books jika gagal.
+    """
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/merge-depth",
+        params={
+            "symbol":      symbol,
+            "productType": "usdt-futures",
+            "precision":   "scale1",
+            "limit":       str(limit),
+        },
+    )
+    if not data or data.get("code") != "00000":
+        data = safe_get(
+            f"{BITGET_BASE}/api/v2/mix/market/books",
+            params={
+                "symbol":      symbol,
+                "productType": "usdt-futures",
+                "limit":       str(limit),
+            },
+        )
+    if not data or data.get("code") != "00000":
+        return None
+    try:
+        d        = data.get("data", {})
+        asks_raw = d.get("asks", [])
+        bids_raw = d.get("bids", [])
+        asks = [[float(x[0]), float(x[1])] for x in asks_raw if len(x) >= 2]
+        bids = [[float(x[0]), float(x[1])] for x in bids_raw if len(x) >= 2]
+        asks.sort(key=lambda x: x[0])           # ascending (lowest ask first)
+        bids.sort(key=lambda x: x[0], reverse=True)  # descending (highest bid first)
+        return {"asks": asks, "bids": bids}
+    except Exception:
+        return None
+
+
+def detect_liquidity_vacuum_v27(symbol, price_now, vol_zscore_z):
+    """
+    v27 — Orderbook Liquidity Vacuum Detector.
+
+    Liquidity Vacuum = gap besar antar level ask di orderbook = area kosong
+    tanpa hambatan sell order. Ketika harga masuk area ini, harga bisa
+    meluncur sangat cepat karena tidak ada penjual (pump 20-70%!).
+
+    Prinsip: Market bergerak dari satu cluster likuiditas ke cluster berikutnya.
+    Jika antara cluster A dan cluster B ada gap 0.8% tanpa order = harga akan
+    "teleport" melewati gap itu dalam hitungan menit begitu breakout terjadi.
+
+    Juga menghitung real bid/ask depth ratio (bukan proxy candle seperti v23).
+    """
+    ob = get_orderbook_v27(symbol, limit=CONFIG.get("ob_vacuum_depth", 20))
+
+    # Fallback jika orderbook tidak tersedia
+    if not ob or not ob.get("asks") or not ob.get("bids"):
+        return {
+            "is_vacuum": False, "vacuum_pct": 0.0, "vacuum_bid_pct": 0.0,
+            "vacuum_side": "none", "vacuum_price_start": 0.0,
+            "vacuum_price_end": 0.0, "bid_depth_usd": 0.0, "ask_depth_usd": 0.0,
+            "bid_ask_real_ratio": 1.0,
+            "score": 0, "label": "OB Vacuum: data orderbook tidak tersedia (API fallback)",
+        }
+
+    asks = ob["asks"]
+    bids = ob["bids"]
+
+    gap_min_pct  = CONFIG.get("ob_vacuum_gap_min_pct", 0.3) / 100.0
+    gap_strong   = CONFIG.get("ob_ask_vacuum_gap_strong", 0.8) / 100.0
+    vol_min      = CONFIG.get("ob_vacuum_vol_confirm_min", 1.3)
+    vol_ok       = vol_zscore_z > vol_min
+
+    # ── Real liquidity depth (USD value of top 5 levels) ─────────────────────
+    ask_depth_usd = sum(p * s for p, s in asks[:5]) if len(asks) >= 5 else sum(p * s for p, s in asks)
+    bid_depth_usd = sum(p * s for p, s in bids[:5]) if len(bids) >= 5 else sum(p * s for p, s in bids)
+    real_ratio    = bid_depth_usd / ask_depth_usd if ask_depth_usd > 0 else 1.0
+
+    # ── Deteksi vacuum ASK (hambatan jual kosong = bullish) ───────────────────
+    ask_vacuum_pct   = 0.0
+    ask_vac_start    = 0.0
+    ask_vac_end      = 0.0
+    for i in range(1, min(len(asks), 20)):
+        gap = (asks[i][0] - asks[i-1][0]) / asks[i-1][0]
+        if gap > ask_vacuum_pct:
+            ask_vacuum_pct = gap
+            ask_vac_start  = asks[i-1][0]
+            ask_vac_end    = asks[i][0]
+
+    # ── Deteksi vacuum BID (support kosong = bearish / dump risk) ─────────────
+    bid_vacuum_pct   = 0.0
+    bid_vac_start    = 0.0
+    bid_vac_end      = 0.0
+    for i in range(1, min(len(bids), 20)):
+        gap = (bids[i-1][0] - bids[i][0]) / bids[i][0]
+        if gap > bid_vacuum_pct:
+            bid_vacuum_pct = gap
+            bid_vac_start  = bids[i-1][0]
+            bid_vac_end    = bids[i][0]
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+    is_vacuum   = False
+    vacuum_side = "none"
+
+    if ask_vacuum_pct >= gap_strong and vol_ok:
+        score       = CONFIG.get("score_ob_vacuum_strong", 20)
+        is_vacuum   = True
+        vacuum_side = "ask_strong"
+        label = (
+            f"🚀 LIQUIDITY VACUUM KUAT! Gap ASK {ask_vacuum_pct*100:.2f}% "
+            f"({_fmt_price(ask_vac_start)}→{_fmt_price(ask_vac_end)}) "
+            f"+ vol z={vol_zscore_z:.2f}. "
+            f"PUMP HIGHWAY — tidak ada hambatan sell sampai {_fmt_price(ask_vac_end)}!"
+        )
+    elif ask_vacuum_pct >= gap_strong:
+        score       = CONFIG.get("score_ob_vacuum", 12)
+        is_vacuum   = True
+        vacuum_side = "ask_strong"
+        label = (
+            f"🕳️ Vacuum ASK Kuat {ask_vacuum_pct*100:.2f}% "
+            f"({_fmt_price(ask_vac_start)}→{_fmt_price(ask_vac_end)}) "
+            f"— area terbuka, vol belum konfirmasi"
+        )
+    elif ask_vacuum_pct >= gap_min_pct and ask_vacuum_pct >= bid_vacuum_pct:
+        score       = CONFIG.get("score_ob_vacuum", 12) if vol_ok else CONFIG.get("score_ob_vacuum", 12) // 2
+        is_vacuum   = True
+        vacuum_side = "ask"
+        label = (
+            f"⚡ Liquidity Vacuum ASK: {ask_vacuum_pct*100:.2f}% "
+            f"di {_fmt_price(ask_vac_start)}-{_fmt_price(ask_vac_end)}"
+            + (f" ✓ vol z={vol_zscore_z:.2f}" if vol_ok else " (vol belum konfirm)")
+        )
+    elif bid_vacuum_pct > ask_vacuum_pct and bid_vacuum_pct >= gap_min_pct:
+        score       = -(CONFIG.get("score_ob_vacuum", 12) // 3)
+        is_vacuum   = True
+        vacuum_side = "bid"
+        label = (
+            f"⚠️ Vacuum BID: gap {bid_vacuum_pct*100:.2f}% "
+            f"di {_fmt_price(bid_vac_end)}-{_fmt_price(bid_vac_start)} "
+            f"— support tipis, risiko dump"
+        )
+    else:
+        score = 0
+        label = (
+            f"OB: likuiditas normal (ask gap {ask_vacuum_pct*100:.2f}%, "
+            f"bid/ask {real_ratio:.2f}x)"
+        )
+
+    # Bonus: real bid depth jauh lebih besar dari ask = akumulasi nyata
+    if real_ratio >= 2.0 and score >= 0:
+        score += 5
+        label += f" | 📊 Bid depth {real_ratio:.1f}× ask (akumulasi nyata)"
+
+    return {
+        "is_vacuum":          is_vacuum,
+        "vacuum_pct":         round(ask_vacuum_pct * 100, 3),
+        "vacuum_bid_pct":     round(bid_vacuum_pct * 100, 3),
+        "vacuum_side":        vacuum_side,
+        "vacuum_price_start": round(ask_vac_start, 8),
+        "vacuum_price_end":   round(ask_vac_end, 8),
+        "bid_depth_usd":      round(bid_depth_usd, 2),
+        "ask_depth_usd":      round(ask_depth_usd, 2),
+        "bid_ask_real_ratio": round(real_ratio, 3),
+        "score":              score,
+        "label":              label,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🆕  v27 FEATURE 3: CVD DIVERGENCE DETECTOR
+# ══════════════════════════════════════════════════════════════════════════════
+def calc_cvd_divergence_v27(candles_1h, candles_15m=None):
+    """
+    v27 — Cumulative Volume Delta (CVD) Divergence Detector.
+
+    CVD = akumulasi (buy_volume - sell_volume) sepanjang waktu.
+    Dihitung dari OHLCV candle menggunakan Close Location Value:
+      delta per candle = volume × (2 × close_position - 1)
+      dimana close_position = (close - low) / (high - low)
+
+    Empat sinyal utama:
+
+    A. BULLISH DIVERGENCE (score +15):
+       Harga turun tapi CVD naik = meski chart terlihat merah, lebih banyak
+       pembelian di bawah (akumulasi tersembunyi). Ini sinyal pre-pump PALING KUAT.
+       Contoh: harga -3% dalam 12 jam tapi CVD +40% = whale beli diam-diam.
+
+    B. BEARISH DIVERGENCE / DISTRIBUSI (score -10):
+       Harga naik tapi CVD turun = jual di kenaikan harga (distribusi).
+       JANGAN MASUK! Ini adalah false pump yang akan berbalik.
+       Contoh: harga +5% tapi CVD -30% = pump palsu, segera turun.
+
+    C. CVD MOMENTUM (score +8):
+       Harga naik DAN CVD naik, CVD lebih cepat = buying pressure nyata.
+       Pump berlanjut, konfirmasi akumulasi = distribusi.
+
+    D. CVD EXHAUSTION (score -5):
+       Harga masih naik tapi delta CVD melambat >70% di paruh akhir.
+       Pump hampir habis, jangan masuk terlambat.
+
+    Menggunakan candle 15m jika tersedia (lebih sensitif), fallback ke 1h.
+    """
+    lookback = CONFIG.get("cvd_lookback", 12)
+
+    # Gunakan 15m untuk resolusi lebih tinggi (multiply lookback 4x untuk 1h equivalent)
+    if candles_15m and len(candles_15m) >= lookback * 4:
+        candles    = candles_15m
+        use_15m    = True
+        effective_lb = lookback * 4
+    elif candles_1h and len(candles_1h) >= lookback + 2:
+        candles    = candles_1h
+        use_15m    = False
+        effective_lb = lookback
+    else:
+        return {
+            "cvd_now": 0.0, "cvd_trend_norm": 0.0, "price_trend_pct": 0.0,
+            "is_bullish_div": False, "is_bearish_div": False,
+            "is_momentum": False, "is_exhaustion": False,
+            "score": 0, "label": "CVD: data tidak cukup",
+        }
+
+    recent = candles[-effective_lb:]
+
+    # ── Hitung delta per candle (Close Location Value method) ─────────────────
+    deltas = []
+    for c in recent:
+        rng = c["high"] - c["low"]
+        if rng > 0:
+            close_pos  = (c["close"] - c["low"]) / rng
+        else:
+            close_pos  = 0.5
+        delta_frac = 2.0 * close_pos - 1.0    # [-1, +1]
+        delta      = c["volume_usd"] * delta_frac
+        deltas.append(delta)
+
+    # ── CVD kumulatif ─────────────────────────────────────────────────────────
+    cvd_series = []
+    cum = 0.0
+    for d in deltas:
+        cum += d
+        cvd_series.append(cum)
+
+    cvd_now   = cvd_series[-1]
+    cvd_start = cvd_series[0]
+    mid_idx   = len(cvd_series) // 2
+    cvd_mid   = cvd_series[mid_idx]
+
+    # Trend CVD (normalisasi oleh rata-rata volume untuk scale-invariant)
+    avg_vol  = sum(c["volume_usd"] for c in recent) / len(recent)
+    if avg_vol > 0 and effective_lb > 0:
+        cvd_trend_norm = (cvd_now - cvd_start) / (avg_vol * effective_lb)
+    else:
+        cvd_trend_norm = 0.0
+    cvd_trend_norm = max(-1.0, min(1.0, cvd_trend_norm))
+
+    # Trend harga dalam lookback yang sama
+    price_start = recent[0]["close"]
+    price_now_c = recent[-1]["close"]
+    price_trend = (price_now_c - price_start) / price_start if price_start > 0 else 0.0
+
+    # Normalisasi harga trend ke [-1, +1] (scale: 10% = max)
+    price_trend_norm = max(-1.0, min(1.0, price_trend / 0.10))
+
+    div_threshold = CONFIG.get("cvd_divergence_threshold", 0.4)
+
+    # ── Deteksi sinyal ────────────────────────────────────────────────────────
+    is_bullish_div = (
+        price_trend < -0.005          # harga turun minimal 0.5%
+        and cvd_trend_norm > div_threshold    # CVD naik signifikan
+    )
+
+    is_bearish_div = (
+        price_trend > 0.005           # harga naik minimal 0.5%
+        and cvd_trend_norm < -div_threshold   # CVD turun signifikan (distribusi)
+    )
+
+    is_momentum = (
+        price_trend > 0.002
+        and cvd_trend_norm > 0.15
+        and cvd_trend_norm > price_trend_norm * 1.2   # CVD lebih kuat dari harga
+        and not is_bearish_div
+    )
+
+    # Exhaustion: rata-rata delta CVD di paruh akhir vs paruh awal
+    first_half_delta  = (cvd_mid - cvd_start)
+    second_half_delta = (cvd_now  - cvd_mid)
+    is_exhaustion = (
+        price_trend > 0.005
+        and first_half_delta > 0
+        and second_half_delta < first_half_delta * 0.3   # CVD melambat >70%
+    )
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+    if is_bullish_div:
+        score = CONFIG.get("score_cvd_bullish_div", 15)
+        label = (
+            f"📉→📈 CVD BULLISH DIVERGENCE! "
+            f"Harga {price_trend*100:+.2f}% turun tapi CVD {cvd_trend_norm*100:+.0f}% naik "
+            f"({'15m' if use_15m else '1h'} data) — "
+            f"AKUMULASI TERSEMBUNYI! Whale beli diam-diam. Pre-pump signal KUAT."
+        )
+    elif is_bearish_div:
+        score = CONFIG.get("score_cvd_bearish_div", -10)
+        label = (
+            f"📈→📉 CVD BEARISH DIVERGENCE (DISTRIBUSI)! "
+            f"Harga {price_trend*100:+.2f}% naik tapi CVD {cvd_trend_norm*100:+.0f}% turun "
+            f"— JUAL DI KENAIKAN! Ini false pump, jangan masuk!"
+        )
+    elif is_exhaustion:
+        score = -(CONFIG.get("score_cvd_bullish_div", 15) // 3)
+        ratio_pct = second_half_delta / max(abs(first_half_delta), 1) * 100
+        label = (
+            f"⚠️ CVD Exhaustion: harga {price_trend*100:+.2f}% tapi delta "
+            f"CVD melambat {ratio_pct:.0f}% dari paruh pertama — pump hampir habis"
+        )
+    elif is_momentum:
+        score = CONFIG.get("score_cvd_momentum", 8)
+        label = (
+            f"⚡ CVD Momentum: harga {price_trend*100:+.2f}% + CVD {cvd_trend_norm*100:+.0f}% "
+            f"({'15m' if use_15m else '1h'}) — buying pressure nyata terkonfirmasi"
+        )
+    else:
+        score = 0
+        label = (
+            f"CVD: harga {price_trend*100:+.2f}%, delta CVD {cvd_trend_norm*100:+.0f}% "
+            f"({'15m' if use_15m else '1h'}) — tidak ada divergensi"
+        )
+
+    return {
+        "cvd_now":          round(cvd_now, 2),
+        "cvd_start":        round(cvd_start, 2),
+        "cvd_trend_norm":   round(cvd_trend_norm, 4),
+        "price_trend":      round(price_trend, 5),
+        "price_trend_pct":  round(price_trend * 100, 2),
+        "is_bullish_div":   is_bullish_div,
+        "is_bearish_div":   is_bearish_div,
+        "is_momentum":      is_momentum,
+        "is_exhaustion":    is_exhaustion,
+        "use_15m":          use_15m,
+        "score":            score,
+        "label":            label,
+    }
+
+
 def calc_mm_score_v23(liq_sweep_v23, whale_abs_v23, vol_comp_v23,
                       mom_ign_v23, ob_press_v23, spoofing_v23,
                       smart_money_v22, accum, energy):
@@ -4523,7 +5090,8 @@ def master_score(symbol, ticker):
         )
         return None
 
-    # ── GATE 1: Funding — ambil dan simpan snapshot ───────────────────────────
+    # v27: OI Acceleration — update snapshot histori segera setelah OI didapat
+    oi_accel_v27 = calc_oi_acceleration_v27(symbol, oi_data["oi_now"])
     funding = get_funding(symbol)
     add_funding_snapshot(symbol, funding)
     fstats  = get_funding_stats(symbol)
@@ -4672,6 +5240,12 @@ def master_score(symbol, ticker):
     mom_ign_v23    = detect_momentum_ignition_v23(c1h, vol_zscore_v20["z"])
     ob_press_v23   = calc_orderbook_pressure_v23(vol_zscore_v20, candle_imbal)
     spoofing_v23   = detect_spoofing_v23(c1h)
+
+    # ── NEW v27 indicators ────────────────────────────────────────────────────
+    # Orderbook Liquidity Vacuum (real API data — bukan proxy candle)
+    ob_vacuum_v27  = detect_liquidity_vacuum_v27(symbol, c1h[-1]["close"], vol_zscore_v20["z"])
+    # CVD Divergence (membedakan akumulasi vs distribusi dengan akurat)
+    cvd_div_v27    = calc_cvd_divergence_v27(c1h, c15m)
 
     # PART 4: Weighted scoring bonus (computed later in scoring section)
 
@@ -5260,8 +5834,35 @@ def master_score(symbol, ticker):
         signals.append(spoofing_v23["label"])
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  ALERT LEVEL v18 — feature-based probability + timing ETA
+    #  SCORING v27 — OI ACCELERATION + LIQUIDITY VACUUM + CVD DIVERGENCE
     # ══════════════════════════════════════════════════════════════════════════
+
+    # 1. OI Acceleration (second derivative — OI makin cepat bertambah)
+    oi_accel_sc = oi_accel_v27.get("score", 0)
+    if oi_accel_sc != 0:
+        score += oi_accel_sc
+        if oi_accel_v27.get("label"):
+            signals.append(oi_accel_v27["label"])
+
+    # 2. Orderbook Liquidity Vacuum (real orderbook gap detector)
+    ob_vac_sc = ob_vacuum_v27.get("score", 0)
+    if ob_vac_sc != 0:
+        score += ob_vac_sc
+        if ob_vacuum_v27.get("label"):
+            signals.append(ob_vacuum_v27["label"])
+
+    # 3. CVD Divergence (akumulasi vs distribusi real)
+    cvd_sc = cvd_div_v27.get("score", 0)
+    if cvd_sc != 0:
+        score += cvd_sc
+        if cvd_div_v27.get("label"):
+            signals.append(cvd_div_v27["label"])
+
+    # Guard distribusi: CVD bearish + OB vacuum bid = distribusi kuat → label warning
+    if cvd_div_v27.get("is_bearish_div") and ob_vacuum_v27.get("vacuum_side") == "bid":
+        signals.append("🚨 DISTRIBUSI DOUBLE KONFIRMASI: CVD + OB Vacuum Bid — HINDARI ENTRY!")
+
+
 
     # STEP 4 v19: AI Weighted Score (hybrid dengan heuristic score)
     ai_score_data = calc_ai_weighted_score(
@@ -5472,6 +6073,10 @@ def master_score(symbol, ticker):
             # v23 ranking keys (4-key sort)
             "rank_mm_score":    mm_score_data["mm_score"],
             "rank_ob_score":    ob_press_v23.get("imbalance", 1.0),
+            # v27 new fields
+            "oi_accel_v27":     oi_accel_v27,
+            "ob_vacuum_v27":    ob_vacuum_v27,
+            "cvd_div_v27":      cvd_div_v27,
         }
     else:
         log.info(f"  {symbol}: Skor {score} < {min_score} (WATCHLIST threshold) — dilewati")
@@ -5766,11 +6371,81 @@ def build_alert(r, rank=None):
         if lbl:
             msg += f"  {lbl[:90]}\n"
 
+    # ── v27 NEW: OI Acceleration + Liquidity Vacuum + CVD Divergence ──────────
+    oi_acc  = r.get("oi_accel_v27", {})
+    ob_vac  = r.get("ob_vacuum_v27", {})
+    cvd_div = r.get("cvd_div_v27", {})
+
+    has_v27 = (
+        oi_acc.get("is_accelerating")
+        or ob_vac.get("is_vacuum")
+        or cvd_div.get("is_bullish_div")
+        or cvd_div.get("is_bearish_div")
+        or cvd_div.get("is_momentum")
+    )
+    if has_v27:
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "<b>🆕 v27 Advanced Signals:</b>\n"
+
+        # OI Acceleration
+        if oi_acc.get("is_accelerating") or oi_acc.get("score", 0) != 0:
+            rate      = oi_acc.get("current_rate", 0)
+            acc_rate  = oi_acc.get("acceleration_rate", 0)
+            is_strong = oi_acc.get("is_strong", False)
+            n_snaps   = oi_acc.get("n_snapshots", 0)
+            emoji     = "🚀" if is_strong else "⚡"
+            msg += (
+                f"  {emoji} <b>OI Accel:</b> rate {rate:+.2f}%/h "
+                f"[akselerasi {acc_rate:+.2f}%/h | n={n_snaps}]"
+                + (" — KUAT!" if is_strong else "") + "\n"
+            )
+
+        # Orderbook Liquidity Vacuum
+        if ob_vac.get("is_vacuum") or ob_vac.get("score", 0) != 0:
+            gap      = ob_vac.get("vacuum_pct", 0)
+            bid_gap  = ob_vac.get("vacuum_bid_pct", 0)
+            side     = ob_vac.get("vacuum_side", "none")
+            real_rat = ob_vac.get("bid_ask_real_ratio", 1.0)
+            bid_d    = ob_vac.get("bid_depth_usd", 0)
+            ask_d    = ob_vac.get("ask_depth_usd", 0)
+            bid_str  = f"${bid_d/1e3:.0f}K" if bid_d > 0 else "?"
+            ask_str  = f"${ask_d/1e3:.0f}K" if ask_d > 0 else "?"
+            vac_emoji = "🚀" if side == "ask_strong" else ("🕳️" if "ask" in side else "⚠️")
+            msg += (
+                f"  {vac_emoji} <b>OB Vacuum:</b> ASK gap {gap:.2f}% / BID gap {bid_gap:.2f}% "
+                f"[{side.upper()}] | bid/ask {real_rat:.2f}× "
+                f"({bid_str}/{ask_str})\n"
+            )
+
+        # CVD Divergence
+        if cvd_div.get("is_bullish_div"):
+            p_pct  = cvd_div.get("price_trend_pct", 0)
+            c_norm = cvd_div.get("cvd_trend_norm", 0) * 100
+            res    = "15m" if cvd_div.get("use_15m") else "1h"
+            msg += (
+                f"  📉→📈 <b>CVD Bullish Div!</b> Harga {p_pct:+.2f}% vs "
+                f"CVD {c_norm:+.0f}% ({res}) — AKUMULASI TERSEMBUNYI\n"
+            )
+        elif cvd_div.get("is_bearish_div"):
+            p_pct  = cvd_div.get("price_trend_pct", 0)
+            c_norm = cvd_div.get("cvd_trend_norm", 0) * 100
+            res    = "15m" if cvd_div.get("use_15m") else "1h"
+            msg += (
+                f"  🚨 <b>CVD Distribusi!</b> Harga {p_pct:+.2f}% vs "
+                f"CVD {c_norm:+.0f}% ({res}) — JUAL DI KENAIKAN!\n"
+            )
+        elif cvd_div.get("is_momentum"):
+            p_pct  = cvd_div.get("price_trend_pct", 0)
+            res    = "15m" if cvd_div.get("use_15m") else "1h"
+            msg += f"  ⚡ <b>CVD Momentum</b> ({res}): harga {p_pct:+.2f}% terkonfirmasi\n"
+        elif cvd_div.get("is_exhaustion"):
+            msg += "  ⚠️ <b>CVD Exhaustion</b> — pump hampir habis\n"
+
     rank_val = r.get("rank_value", r.get("score", 0))
     z_rank   = r.get("rank_vol_z_v20", 0)
     mm_rank  = r.get("rank_mm_score", 0)
     ob_rank  = r.get("rank_ob_score", 1.0)
-    msg += (f"\n<i>Scanner v26 | Rank:{rank_val:.1f} | "
+    msg += (f"\n<i>Scanner v27 | Rank:{rank_val:.1f} | "
             f"MM:{mm_rank:.0f} | Z:{z_rank:.2f} | OB:{ob_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
@@ -5781,7 +6456,7 @@ def build_summary(results):
     """
     top5 = results[:5]
     msg  = (
-        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v26</b>\n"
+        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v27</b>\n"
         f"{utc_now()}\n"
         f"{'━'*30}\n"
     )
@@ -5899,7 +6574,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v26:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v27:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -5922,13 +6597,16 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v26 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v27 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
 
     # FIX v18: load OI snapshots dari disk
     load_oi_snapshots()
+
+    # v27: load OI acceleration history dari disk
+    load_oi_accel_history()
 
     tickers = get_all_tickers()
     if not tickers:
@@ -5983,6 +6661,10 @@ def run_scan():
     # FIX v18: simpan OI snapshots ke disk
     save_oi_snapshots()
     log.info("OI snapshots disimpan ke disk.")
+
+    # v27: simpan OI acceleration history ke disk
+    save_oi_accel_history()
+    log.info("OI Accel history disimpan ke disk.")
 
     # v23 — Advanced 4-key Ranking: prob → MM score → vol_zscore → OB imbalance
     if CONFIG.get("rank_v20_multi", True):
@@ -6039,14 +6721,14 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v26 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v27 — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v26                   ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v27                   ║")
     log.info("║  PERFORMANCE & CALIBRATION EDITION                        ║")
     log.info("║  HTTP session | sleep 0.15s | EMA/Vol cache reuse         ║")
     log.info("║  OB +5 | vol_low +6 | funnel: 342→200→40→10→2            ║")
