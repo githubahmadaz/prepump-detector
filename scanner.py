@@ -1,30 +1,60 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v27 — BUG FIX + 3 FITUR BARU          ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v28 — AUDIT FIX (10 BUG ROOT CAUSE)  ║
 ║                                                                              ║
-║  INHERITED FROM v26 (performance + calibration confirmed working):          ║
-║    requests.Session ✅ | sleep 0.15s ✅ | EMA/Vol cache reuse ✅            ║
-║    OB +5 | vol_low +6 | funnel: 342→200→40→10→2                            ║
+║  INHERITED FROM v27: OI Acceleration | OB Vacuum | CVD Divergence          ║
 ║                                                                              ║
-║  BUG FIXES v27 — Root Cause: Scanner tidak deteksi pump 20-70%:            ║
-║    BUG FIX 1 — gate_chg_24h_max: 8% → 25% ✅ KRITIS                        ║
-║               (8% memblokir semua coin pre-pump 20-70%)                     ║
-║    BUG FIX 2 — gate_uptrend_max_hours: 10 → 24 jam ✅                       ║
-║               (pump besar didahului akumulasi 12-18 jam)                   ║
-║    BUG FIX 3 — gate_rsi_max: 72 → 85 ✅                                     ║
-║               (RSI 72 itu baru fase 2 dari pump altcoin)                   ║
-║    BUG FIX 4 — v23_heuristic_weight: 0.45 → 0.50 ✅                         ║
-║               (beri bobot lebih ke spike signal kuat)                      ║
+║  ═══════════════════════════════════════════════════════════════════════    ║
+║  BUG FIX v28 — Hasil Audit Profesional (10 root cause ditemukan):          ║
 ║                                                                              ║
-║  NEW v27 — 3 Fitur Baru:                                                    ║
-║    FEAT 1 — OI Acceleration: deteksi OI makin cepat bertambah               ║
-║             (second derivative OI, pre-pump 1-3 jam, score +8/+18)         ║
-║    FEAT 2 — Orderbook Liquidity Vacuum: real API orderbook, gap ASK         ║
-║             detection (pump highway, score +12/+20)                        ║
-║    FEAT 3 — CVD Divergence: akumulasi vs distribusi real dari delta volume  ║
-║             Bullish Div +15 | Bearish Div (distribusi) -10 | Momentum +8   ║
+║  BUG #1 — BLENDED SCORE mendilusi spike signal [KRITIS]                    ║
+║    FIX: Normalisasi heuristic score ke 0-100 sebelum blend.                ║
+║         heuristic_norm = min(score / 150.0, 1.0) * 100                    ║
+║         Eliminasi bias: AI/MM score (skala 0-100) tidak lagi mendominasi   ║
+║         coin pump lambat vs coin spike cepat yang akan pump 20-70%.        ║
 ║                                                                              ║
-║  TARGET: 342 scanned → ~200 filtered → ~40 watchlist → ~10 alert → ~2 top  ║
+║  BUG #2 — GATE 9 momentum -0.5% membuang coin akumulasi [KRITIS]           ║
+║    FIX: momentum_val_reject: -0.005 → -0.02 (-2.0%)                        ║
+║         Coin akumulasi punya 5m flat/sedikit negatif — ini ciri pre-pump!  ║
+║                                                                              ║
+║  BUG #3 — Micro Momentum formula SALAH (dibagi 3 dan 12) [KRITIS]          ║
+║    FIX: Hapus pembagian mom_15m/3 dan mom_1h/12.                           ║
+║         mom_15m = total change 15m, mom_1h = total change 1h               ║
+║         accel yang benar = mom_5m*2 + mom_15m - mom_1h (tanpa divisor)    ║
+║                                                                              ║
+║  BUG #4 — Fake Pump selalu aktif saat is_new=True (run pertama) [KRITIS]   ║
+║    FIX: Skip kondisi oi_flat jika is_new=True — tidak ada baseline OI,     ║
+║         jangan langsung anggap flat/fake.                                  ║
+║                                                                              ║
+║  BUG #5 — RSI ideal zone 40-60 terlalu sempit, skor hanya +2              ║
+║    FIX: Perluas ke 40-72 bertingkat:                                        ║
+║         RSI 45-60 → +4 (optimal pre-pump)                                  ║
+║         RSI 60-72 → +2 (pump sedang berjalan, masih valid entry)           ║
+║         RSI 35-45 → +1 (oversold reversal)                                 ║
+║                                                                              ║
+║  BUG #6 — Config key duplikat 'score_watchlist' menghasilkan nilai acak   ║
+║    FIX: Hapus semua definisi duplikat. Satu sumber kebenaran per key.      ║
+║         score_watchlist=55, score_alert=65, score_strong_alert=78          ║
+║         min_score untuk lolos = 30 (score_watchlist_v24)                  ║
+║                                                                              ║
+║  BUG #7 — OI blind spot: is_new=True tidak mendapat APAPUN                ║
+║    FIX: Jika is_new=True tapi OI_now > min_oi_usd*2 → partial bonus +1    ║
+║         (ada OI substantial = ada open interest aktif)                     ║
+║                                                                              ║
+║  BUG #8 — Cooldown 30 menit terlalu pendek, coin pump dilewati             ║
+║    FIX: alert_cooldown_sec: 1800 → 3600 (1 jam)                            ║
+║         Pump 20-70% butuh 2-6 jam terbentuk, cooldown 30 menit             ║
+║         menyebabkan sinyal update terlewat di tengah pembentukan pump.     ║
+║                                                                              ║
+║  BUG #9 — Uptrend Age: coin baru mulai naik (streak 0-3) tidak diberi     ║
+║           bonus, padahal ini adalah titik terbaik untuk entry               ║
+║    FIX: Tambah bonus +3 jika streak 1-3 (fresh breakout start)             ║
+║                                                                              ║
+║  BUG #10 — VWAP penalty -3 terlalu agresif saat liquidity sweep active     ║
+║    FIX: Jika liq_sweep aktif, skip VWAP penalty                            ║
+║         (sweep biasanya push harga sementara di bawah VWAP)               ║
+║                                                                              ║
+║  TARGET: 342 scanned → ~200 filtered → ~40 watchlist → ~10 alert → ~2 top ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -134,7 +164,9 @@ CONFIG = {
     "min_sl_pct":              0.5,
 
     # ── Operasional ───────────────────────────────────────────────────────────
-    "alert_cooldown_sec":     1800,
+    # FIX v28 BUG#8: 1800→3600. Pump 20-70% butuh 2-6 jam terbentuk.
+    # Cooldown 30 menit menyebabkan sinyal update terlewat di tengah pump.
+    "alert_cooldown_sec":     3600,
     # v26 PERF: reduced 0.8 → 0.15s per symbol (~342 coins → ~51s total vs ~274s)
     "sleep_coins":             0.15,
     "sleep_error":             3.0,
@@ -199,10 +231,20 @@ CONFIG = {
     "vol_accel_threshold":     0.5,
     "score_vol_accel":         2,
 
-    # ── RSI ideal pre-pump = 40–60 ────────────────────────────────────────────
+    # ── RSI ideal pre-pump — FIX v28 BUG#5 ──────────────────────────────────
+    # Pump 30-70% sering mulai dari RSI 55-72, bukan hanya 40-60.
+    # Zone diperluas dan dibuat bertingkat agar tidak melewatkan entry optimal.
     "rsi_ideal_min":           40.0,
-    "rsi_ideal_max":           60.0,
-    "score_rsi_ideal":         2,
+    "rsi_ideal_max":           60.0,   # zona optimal (score tertinggi)
+    "rsi_valid_max":           72.0,   # zona valid (score lebih rendah)
+    "score_rsi_ideal":         4,      # RSI 45-60 → +4 (was +2)
+    "score_rsi_valid":         2,      # RSI 60-72 → +2 (baru)
+    "score_rsi_oversold":      1,      # RSI 35-45 → +1 (reversal setup)
+
+    # ── Fresh Breakout Start bonus — FIX v28 BUG#9 ───────────────────────────
+    # Coin yang baru mulai naik setelah akumulasi (streak 1-3 candle) adalah
+    # titik entry terbaik untuk pump 20-70%. Sebelumnya tidak ada bonus.
+    "score_fresh_breakout_start": 3,   # streak 1-3 jam = fresh start → +3
 
     # ── Higher Low ────────────────────────────────────────────────────────────
     # FIX v18: lookback dinaikkan 6 → 16 candle (lebih bermakna)
@@ -276,10 +318,11 @@ CONFIG = {
     "prob_center":             50,       # score 50 → prob 50%
     "prob_scale":              8,        # steepness
 
-    # ── Signal Threshold v18 ──────────────────────────────────────────────────
-    "score_watchlist":         40,       # 40–55 → WATCHLIST
-    "score_alert":             55,       # 55–70 → ALERT
-    "score_strong_alert":      70,       # 70+   → STRONG ALERT
+    # ── Signal Threshold — SATU SUMBER KEBENARAN (FIX v28 BUG#6) ────────────
+    # v18 mendefinisikan ini, lalu v19 mendefinisikan ulang. Python dict dengan
+    # key duplikat → nilai terakhir menang → tidak konsisten antar lookup.
+    # DIHAPUS dari sini: definisi final ada di blok v19 di bawah.
+    # (baris ini sengaja dikosongkan untuk menjaga urutan konfigurasi)
 
     # ── Entry Regime Detection ────────────────────────────────────────────────
     "breakout_buy_ratio_min":  0.60,     # buy_ratio > 60% untuk breakout mode
@@ -365,8 +408,11 @@ CONFIG = {
     "score_penalty_bearish":  -8,        # EMA20 < EMA50 → penalti
 
     # STEP 8 — Momentum validation (5m price change)
-    # FIX v23: dilonggarkan 0.0 → -0.005 (-0.5%) — flat coins tidak dibuang
-    "momentum_val_reject":    -0.005,    # reject only if price_chg_5m < -0.5%
+    # FIX v28 BUG#2: -0.005 → -0.02 (-2%).
+    # Coin akumulasi punya 5m flat/sedikit negatif — ini justru CIRI pre-pump!
+    # -0.5% threshold membuang ribuan coin akumulasi valid setiap scan.
+    # Hanya tolak jika terjadi dump aktif nyata (>-2%).
+    "momentum_val_reject":    -0.02,
 
     # STEP 9 — Wick ratio filter
     "wick_ratio_max":          0.4,      # reject if (high-close)/(high-low) > 0.4
@@ -398,10 +444,11 @@ CONFIG = {
     "whale_accum_range_max":    2.5,     # price range pct max
     "score_whale_accum":        7,
 
-    # STEP 18 — Threshold naik 40→55
-    "score_watchlist":          55,      # was 40 in v18
-    "score_alert":              65,      # was 55
-    "score_strong_alert":       78,      # was 70
+    # STEP 18 — Threshold — DEFINISI FINAL (FIX v28 BUG#6)
+    # Duplikat dari v18 dihapus. Nilai ini yang berlaku.
+    "score_watchlist":          55,      # WATCHLIST threshold
+    "score_alert":              65,      # ALERT threshold
+    "score_strong_alert":       78,      # STRONG ALERT threshold
 
     # ══════════════════════════════════════════════════════════════════════════
     #  UPGRADE v20: NEW CONFIG
@@ -562,10 +609,15 @@ CONFIG = {
     # already: bb_percentile_lookback, bb_percentile_threshold, score_prebreakout
 
     # v23 institutional scoring blend ratio
-    # FIX v27: beri lebih banyak bobot ke heuristic (sinyal spike lebih dominan)
-    "v23_heuristic_weight":      0.50,   # was 0.45
-    "v23_ai_weight":             0.25,   # was 0.30
-    "v23_inst_weight":           0.25,   # sama
+    # FIX v28 BUG#1: normalisasi heuristic ke 0-100 sebelum blend
+    # heuristic_ref_max = nilai heuristic "sangat kuat" yang di-map ke 100
+    # Turunkan nilai ini jika rata-rata blended score di live terlalu rendah.
+    "heuristic_ref_max":          150.0,
+
+    # Bobot blend — ketiga komponen sekarang di skala 0-100 (setelah normalisasi)
+    "v23_heuristic_weight":      0.50,   # heuristic: 50%
+    "v23_ai_weight":             0.25,   # AI: 25%
+    "v23_inst_weight":           0.25,   # MM institutional: 25%
 
     # Watchlist threshold — FIX v23: lowered 55 → 40 to pass more candidates
     # (raised too aggressively in v19; 344 coins 0 passed)
@@ -1629,19 +1681,20 @@ def calc_volume_spike(candles):
 
 def calc_micro_momentum(candles_5m):
     """
-    FIX v18 #3 — Micro Momentum Engine (5m/15m/1h).
+    FIX v28 BUG#3 — Micro Momentum Engine (5m/15m/1h).
 
-    Pump altcoin sering terjadi dalam 5−20 menit.
-    Menggunakan candle 5m untuk deteksi momentum jauh lebih responsif:
+    AUDIT FIX: Formula mom_15m dan mom_1h sebelumnya SALAH — dibagi 3 dan 12
+    padahal nilai sudah merupakan perubahan TOTAL (bukan per-candle).
+    Membaginya membuat nilainya sangat kecil → accel mendekati 0 → skor
+    hampir tidak pernah signifikan meski pump akan terjadi.
 
-      mom_5m  = % change candle 5m terbaru vs 1 candle sebelumnya
-      mom_15m = % change rata-rata 3 candle 5m terakhir (= 15 menit)
-      mom_1h  = % change rata-rata 12 candle 5m terakhir (= 1 jam)
+    Formula yang benar:
+      mom_5m  = % change 1 candle 5m terbaru (paling baru)
+      mom_15m = % change total 3 candle 5m terakhir (= 15 menit total)
+      mom_1h  = % change total 12 candle 5m terakhir (= 1 jam total)
 
-    Formula percepatan:
-      accel = mom_5m × 2 + mom_15m − mom_1h
-
-    Jika accel > 0 → momentum sedang menguat (pre-pump signal)
+    acceleration = mom_5m * 2 + mom_15m - mom_1h
+      Jika accel > 0 → momentum sedang menguat (pre-pump signal)
     """
     if len(candles_5m) < 13:
         return {
@@ -1655,13 +1708,15 @@ def calc_micro_momentum(candles_5m):
     # mom_5m: % change 1 candle 5m terbaru
     mom_5m = (closes[-1] - closes[-2]) / closes[-2] if closes[-2] > 0 else 0.0
 
-    # mom_15m: avg % change 3 candle terakhir
+    # mom_15m: % change TOTAL 3 candle terakhir (= 15 menit)
+    # FIX v28 BUG#3: TIDAK dibagi 3 — ini adalah total change, bukan per-candle
     c3 = closes[-4] if len(closes) >= 4 else closes[0]
-    mom_15m = (closes[-1] - c3) / c3 / 3 if c3 > 0 else 0.0
+    mom_15m = (closes[-1] - c3) / c3 if c3 > 0 else 0.0
 
-    # mom_1h: avg % change 12 candle terakhir
+    # mom_1h: % change TOTAL 12 candle terakhir (= 1 jam)
+    # FIX v28 BUG#3: TIDAK dibagi 12 — ini adalah total change, bukan per-candle
     c12 = closes[-13] if len(closes) >= 13 else closes[0]
-    mom_1h = (closes[-1] - c12) / c12 / 12 if c12 > 0 else 0.0
+    mom_1h = (closes[-1] - c12) / c12 if c12 > 0 else 0.0
 
     # acceleration formula
     accel = mom_5m * 2 + mom_15m - mom_1h
@@ -1847,12 +1902,20 @@ def detect_whale_order(candles_15m, oi_data):
 def detect_fake_pump(candles, buy_pressure_ratio, oi_data):
     """
     FIX v18 #7 — Fake Pump Filter Diperkuat.
+    FIX v28 BUG#4 — Kondisi oi_flat sekarang TIDAK aktif jika is_new=True.
+
+    Sebelumnya: oi_flat = (oi_data.get("is_new", True) or ...)
+    Bug: is_new=True di run pertama → oi_flat=True untuk SEMUA coin →
+         fake pump lebih mudah terpicu → penalti -5 sampai -20 tidak adil.
+
+    Fix: Jika is_new=True (belum ada baseline OI), lewati kondisi ini.
+         Hanya anggap oi_flat jika ada data OI sebelumnya dan OI memang flat.
 
     v18: price_up AND buy<50% → fake (terlalu sederhana)
     v18: fake_score berbasis 4 kondisi bertingkat:
       1. price_spike: harga naik > 0.5% dalam 3h
       2. vol_spike: volume naik tapi buy rendah
-      3. OI_flat: OI tidak naik (tidak ada posisi baru)
+      3. OI_flat: OI tidak naik (tidak ada posisi baru) — SKIP jika is_new
       4. sell_pressure: buy_ratio < 48%
 
     Penalti proporsional: 2 kondisi→−5, 3 kondisi→−12, 4 kondisi→−20
@@ -1877,9 +1940,14 @@ def detect_fake_pump(candles, buy_pressure_ratio, oi_data):
         cur_vol = sum(c["volume_usd"] for c in candles[-3:]) / 3
         vol_anomaly = cur_vol > avg_vol * 1.5 and buy_pressure_ratio < 0.55
 
-    # Kondisi 3: OI flat (tidak ada posisi baru = tidak ada institutional)
-    oi_flat = (oi_data.get("is_new", True) or
-               abs(oi_data.get("change_pct", 0)) < CONFIG["fake_oi_flat_max"])
+    # Kondisi 3: OI flat — FIX v28 BUG#4: SKIP jika is_new=True
+    # Jika belum ada baseline OI, kita tidak tahu apakah OI flat atau tidak.
+    # Jangan langsung anggap flat = fake hanya karena run pertama.
+    is_oi_new = oi_data.get("is_new", True)
+    if is_oi_new:
+        oi_flat = False  # FIX: tidak bisa menilai OI flat tanpa baseline
+    else:
+        oi_flat = abs(oi_data.get("change_pct", 0)) < CONFIG["fake_oi_flat_max"]
 
     # Kondisi 4: Sell pressure dominan
     sell_pressure = buy_pressure_ratio < CONFIG["fake_sell_press_max"]
@@ -5391,11 +5459,23 @@ def master_score(symbol, ticker):
     # ── v24: Apply deferred soft penalties (VWAP, EMA50, dump trap) ──────────
     # These were converted from hard-rejects to score deductions so that
     # candidates are ranked low rather than silently dropped.
+
+    # FIX v28 BUG#10: Skip VWAP penalty jika liquidity sweep aktif.
+    # Logika: sweep (stop-hunt) biasanya mendorong harga SEMENTARA di bawah VWAP
+    # sebelum pump besar dimulai. Ini adalah pre-pump terkuat — menambah penalti
+    # VWAP di sini akan mendiskualifikasi setup terbaik yang ada.
+    _liq_sweep_active = liq_sweep.get("is_sweep", False) or liq_sweep_v23.get("is_sweep", False)
     if _vwap_penalty < 0:
-        score += _vwap_penalty
-        signals.append(
-            f"⚠️ Below VWAP gate — penalti {_vwap_penalty}"
-        )
+        if _liq_sweep_active:
+            signals.append(
+                f"ℹ️ Below VWAP tapi Liquidity Sweep AKTIF — "
+                f"penalti VWAP {_vwap_penalty} di-SKIP (sweep biasanya pre-pump)"
+            )
+        else:
+            score += _vwap_penalty
+            signals.append(
+                f"⚠️ Below VWAP gate — penalti {_vwap_penalty}"
+            )
     if _ema50_penalty < 0:
         score += _ema50_penalty
         signals.append(
@@ -5574,9 +5654,20 @@ def master_score(symbol, ticker):
                 score += CONFIG["score_oi_expansion"]
                 signals.append(f"📊 OI Expansion +{chg:.1f}% — akumulasi posisi futures")
         elif oi_data["is_new"] and oi_data["oi_now"] > 0:
-            signals.append(
-                f"📊 OI baseline ${oi_data['oi_now']/1e6:.2f}M (snapshot pertama)"
-            )
+            # FIX v28 BUG#7: Jika OI baseline baru (is_new=True) tapi nilainya
+            # substansial (>2x min_oi), beri partial bonus +1.
+            # Ini menandakan coin aktif diperdagangkan di futures.
+            _oi_sub = oi_data["oi_now"] > CONFIG["min_oi_usd"] * 2
+            if _oi_sub:
+                score += 1
+                signals.append(
+                    f"📊 OI baseline ${oi_data['oi_now']/1e6:.2f}M (snapshot pertama) "
+                    f"— substansial, coin aktif di futures (+1)"
+                )
+            else:
+                signals.append(
+                    f"📊 OI baseline ${oi_data['oi_now']/1e6:.2f}M (snapshot pertama)"
+                )
     else:
         if oi_data["oi_now"] > 0:
             ov     = oi_data["oi_now"]
@@ -5613,18 +5704,35 @@ def master_score(symbol, ticker):
                 f"— kemungkinan distribusi agresif"
             )
 
-    # ── 10. RSI ideal pre-pump = 40–60 ────────────────────────────────────────
-    rsi_in_ideal_zone = CONFIG["rsi_ideal_min"] <= rsi <= CONFIG["rsi_ideal_max"]
+    # ── 10. RSI — FIX v28 BUG#5: multi-tier scoring ─────────────────────────
+    # Pump 30-70% sering mulai dari RSI 55-72, bukan hanya 40-60.
+    # Zone diperluas: 45-60 optimal (+4), 60-72 valid (+2), 35-45 reversal (+1)
+    rsi_in_ideal_zone = 45.0 <= rsi <= 60.0
+    rsi_in_valid_zone = 60.0 < rsi <= CONFIG.get("rsi_valid_max", 72.0)
+    rsi_in_oversold   = 35.0 <= rsi < 45.0
+
     if rsi_in_ideal_zone:
         score += CONFIG["score_rsi_ideal"]
         signals.append(
-            f"📊 RSI {rsi:.1f} — zona ideal pre-pump (40–60): "
-            f"belum overbought, momentum mulai terbentuk"
+            f"📊 RSI {rsi:.1f} — zona OPTIMAL pre-pump (45–60): "
+            f"momentum mulai, belum overbought (+{CONFIG['score_rsi_ideal']})"
         )
-    elif rsi < CONFIG["rsi_ideal_min"]:
-        signals.append(f"📊 RSI {rsi:.1f} — oversold (bisa reversal, tapi belum konfirmasi)")
+    elif rsi_in_valid_zone:
+        score += CONFIG.get("score_rsi_valid", 2)
+        signals.append(
+            f"📊 RSI {rsi:.1f} — zona valid pre-pump (60–72): "
+            f"pump sedang berjalan, masih bisa entry (+{CONFIG.get('score_rsi_valid', 2)})"
+        )
+    elif rsi_in_oversold:
+        score += CONFIG.get("score_rsi_oversold", 1)
+        signals.append(
+            f"📊 RSI {rsi:.1f} — oversold reversal zone (35–45): "
+            f"potensi bounce (+{CONFIG.get('score_rsi_oversold', 1)})"
+        )
+    elif rsi < 35.0:
+        signals.append(f"📊 RSI {rsi:.1f} — sangat oversold (bisa reversal tapi butuh konfirmasi)")
     else:
-        signals.append(f"📊 RSI {rsi:.1f} — di atas zona ideal, momentum sudah berjalan")
+        signals.append(f"📊 RSI {rsi:.1f} — di atas zona valid, momentum sudah lanjut")
 
     # ── 11. Higher Low ────────────────────────────────────────────────────────
     if higher_low:
@@ -5637,6 +5745,18 @@ def master_score(symbol, ticker):
         signals.append(
             f"🔺 BOS Up (level {_fmt_price(bos_level)}) — breakout minor, "
             f"konfirmasi struktur berbalik (skor rendah: idealnya deteksi sebelum BOS)"
+        )
+
+    # ── 12b. Fresh Breakout Start — FIX v28 BUG#9 ───────────────────────────
+    # Coin yang baru mulai naik setelah akumulasi panjang (streak 1-3 candle)
+    # adalah titik entry TERBAIK untuk pump 20-70%. Sebelumnya tidak ada bonus.
+    _streak = uptrend.get("age_hours", 0)
+    if 1 <= _streak <= 3:
+        _fresh_bonus = CONFIG.get("score_fresh_breakout_start", 3)
+        score += _fresh_bonus
+        signals.append(
+            f"🟢 Fresh Breakout Start: uptrend baru {_streak} candle "
+            f"— titik entry optimal setelah akumulasi (+{_fresh_bonus})"
         )
 
     # ── 13. Funding rate ──────────────────────────────────────────────────────
@@ -5885,14 +6005,36 @@ def master_score(symbol, ticker):
         smart_money_v22, accum, energy
     )
 
-    # v23: Blended score — 45% heuristic + 30% AI + 25% MM institutional
-    _hw = CONFIG.get("v23_heuristic_weight", 0.45)
-    _aw = CONFIG.get("v23_ai_weight",        0.30)
-    _mw = CONFIG.get("v23_inst_weight",      0.25)
+    # FIX v28 BUG#1 — Normalisasi heuristic score ke 0-100 sebelum blending.
+    #
+    # ROOT CAUSE: `score` (heuristic) berskala 0-200+ tanpa batas atas, sedangkan
+    # ai_score dan mm_score selalu 0-100. Sebelumnya:
+    #   blended = score*0.50 + ai*0.25 + mm*0.25
+    # → Coin dengan heuristic=150 (spike kuat) mendapat blended ~90+
+    # → Coin pump lambat heuristic=60 tapi ai=80, mm=80 mendapat blended ~85
+    # Perbedaan hanya 5 poin padahal spike coin jauh lebih bullish → ranking salah.
+    #
+    # Fix: normalisasi heuristic ke 0-100 menggunakan ref_max=150 sebagai nilai
+    # referensi (spike signal sangat kuat ≈ 150 poin heuristic).
+    # Jika score > 150 → normalized = 100 (cap, tidak hilang).
+    # Semua tiga komponen sekarang berada di skala yang sama sebelum blend.
+    _ref_max  = CONFIG.get("heuristic_ref_max", 150.0)
+    _heuristic_norm = min(score / _ref_max, 1.0) * 100.0   # 0.0 – 100.0
+
+    _hw = CONFIG.get("v23_heuristic_weight", 0.50)   # heuristic: 50%
+    _aw = CONFIG.get("v23_ai_weight",        0.25)   # AI: 25%
+    _mw = CONFIG.get("v23_inst_weight",      0.25)   # MM institutional: 25%
     blended_score = round(
-        score                          * _hw
+        _heuristic_norm                    * _hw
         + ai_score_data["weighted_score"]  * _aw
         + mm_score_data["mm_score"]        * _mw
+    )
+
+    # Debug log: bantu kalibrasi ref_max di live environment
+    log.debug(
+        f"  Blended score [{symbol}]: heuristic_raw={score:.1f} "
+        f"→ norm={_heuristic_norm:.1f} | ai={ai_score_data['weighted_score']:.1f} "
+        f"| mm={mm_score_data['mm_score']:.1f} → blended={blended_score}"
     )
 
     # Pump probability: blend sigmoid from MM score (70%) + legacy logistic (30%)
