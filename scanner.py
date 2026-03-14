@@ -1,58 +1,45 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v28 — AUDIT FIX (10 BUG ROOT CAUSE)  ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v29 — AUDIT FIX (5 BUG BARU)         ║
+║  Ditemukan dari case MELANIA 13-14 Maret 2026 (sinyal terlambat 17 jam)    ║
 ║                                                                              ║
-║  INHERITED FROM v27: OI Acceleration | OB Vacuum | CVD Divergence          ║
+║  INHERITED FROM v28: 10 bug root cause sudah diperbaiki.                   ║
 ║                                                                              ║
 ║  ═══════════════════════════════════════════════════════════════════════    ║
-║  BUG FIX v28 — Hasil Audit Profesional (10 root cause ditemukan):          ║
+║  BUG FIX v29 — 5 bug arsitektur baru ditemukan dari case MELANIA:          ║
 ║                                                                              ║
-║  BUG #1 — BLENDED SCORE mendilusi spike signal [KRITIS]                    ║
-║    FIX: Normalisasi heuristic score ke 0-100 sebelum blend.                ║
-║         heuristic_norm = min(score / 150.0, 1.0) * 100                    ║
-║         Eliminasi bias: AI/MM score (skala 0-100) tidak lagi mendominasi   ║
-║         coin pump lambat vs coin spike cepat yang akan pump 20-70%.        ║
+║  BUG-A — LIQUIDITY SWEEP STALE: tidak ada batas waktu [KRITIS]             ║
+║    Masalah: Sweep jam 19:30 masih aktif 17 jam kemudian karena tidak        ║
+║    ada expiry check. Fix BUG#10 (skip VWAP saat sweep) menjadi bumerang:   ║
+║    VWAP penalty di-skip untuk sweep yang sudah expired.                    ║
+║    FIX: Sweep dianggap valid HANYA dalam 6 jam setelah terjadi.            ║
+║         Parameter baru: liq_sweep_expiry_candles = 6                       ║
 ║                                                                              ║
-║  BUG #2 — GATE 9 momentum -0.5% membuang coin akumulasi [KRITIS]           ║
-║    FIX: momentum_val_reject: -0.005 → -0.02 (-2.0%)                        ║
-║         Coin akumulasi punya 5m flat/sedikit negatif — ini ciri pre-pump!  ║
+║  BUG-B — BUY PRESSURE proxy tidak bisa bedakan akumulasi vs retracement    ║
+║    Masalah: (close-low)/(high-low) menghasilkan buy_ratio tinggi saat       ║
+║    retracement karena candle menutup di atas low dengan range sempit.       ║
+║    FIX: Tambah konfirmasi: buy_pressure hanya tier>=2 jika SEKALIGUS        ║
+║         buy_ratio tinggi DAN harga naik dari candle sebelumnya (upward      ║
+║         close confirmation). Jika harga turun, maksimum tier 1.            ║
 ║                                                                              ║
-║  BUG #3 — Micro Momentum formula SALAH (dibagi 3 dan 12) [KRITIS]          ║
-║    FIX: Hapus pembagian mom_15m/3 dan mom_1h/12.                           ║
-║         mom_15m = total change 15m, mom_1h = total change 1h               ║
-║         accel yang benar = mom_5m*2 + mom_15m - mom_1h (tanpa divisor)    ║
+║  BUG-C — INKONSISTENSI: Score IGNORE tapi pump_prob 75%+ [KRITIS]          ║
+║    Masalah: calc_pump_probability_v23 menggunakan mm_score (bukan           ║
+║    blended_score) sehingga pump_prob bisa 75%+ meski score=IGNORE.         ║
+║    User melihat kontradiksi fatal: "IGNORE #2 | Pump Prob: 75.4%"          ║
+║    FIX: Pump prob di-cap berdasarkan alert_level. IGNORE → max 40%,        ║
+║         WATCHLIST → max 60%, ALERT → max 80%, STRONG ALERT → 100%.        ║
 ║                                                                              ║
-║  BUG #4 — Fake Pump selalu aktif saat is_new=True (run pertama) [KRITIS]   ║
-║    FIX: Skip kondisi oi_flat jika is_new=True — tidak ada baseline OI,     ║
-║         jangan langsung anggap flat/fake.                                  ║
+║  BUG-D — ENERGY BUILDUP hanya lihat 3 candle (3 jam) [KRITIS]              ║
+║    Masalah: Akumulasi real berlangsung 8-18 jam. Window 3h tidak cukup     ║
+║    untuk mendeteksi pola absorption yang meaningful.                        ║
+║    FIX: Perluas ke 8 candle (8 jam) untuk volume dan price_stuck check.    ║
+║         Kondisi "minimal 5 dari 8 candle bullish" menggantikan "2 dari 3". ║
 ║                                                                              ║
-║  BUG #5 — RSI ideal zone 40-60 terlalu sempit, skor hanya +2              ║
-║    FIX: Perluas ke 40-72 bertingkat:                                        ║
-║         RSI 45-60 → +4 (optimal pre-pump)                                  ║
-║         RSI 60-72 → +2 (pump sedang berjalan, masih valid entry)           ║
-║         RSI 35-45 → +1 (oversold reversal)                                 ║
-║                                                                              ║
-║  BUG #6 — Config key duplikat 'score_watchlist' menghasilkan nilai acak   ║
-║    FIX: Hapus semua definisi duplikat. Satu sumber kebenaran per key.      ║
-║         score_watchlist=55, score_alert=65, score_strong_alert=78          ║
-║         min_score untuk lolos = 30 (score_watchlist_v24)                  ║
-║                                                                              ║
-║  BUG #7 — OI blind spot: is_new=True tidak mendapat APAPUN                ║
-║    FIX: Jika is_new=True tapi OI_now > min_oi_usd*2 → partial bonus +1    ║
-║         (ada OI substantial = ada open interest aktif)                     ║
-║                                                                              ║
-║  BUG #8 — Cooldown 30 menit terlalu pendek, coin pump dilewati             ║
-║    FIX: alert_cooldown_sec: 1800 → 3600 (1 jam)                            ║
-║         Pump 20-70% butuh 2-6 jam terbentuk, cooldown 30 menit             ║
-║         menyebabkan sinyal update terlewat di tengah pembentukan pump.     ║
-║                                                                              ║
-║  BUG #9 — Uptrend Age: coin baru mulai naik (streak 0-3) tidak diberi     ║
-║           bonus, padahal ini adalah titik terbaik untuk entry               ║
-║    FIX: Tambah bonus +3 jika streak 1-3 (fresh breakout start)             ║
-║                                                                              ║
-║  BUG #10 — VWAP penalty -3 terlalu agresif saat liquidity sweep active     ║
-║    FIX: Jika liq_sweep aktif, skip VWAP penalty                            ║
-║         (sweep biasanya push harga sementara di bawah VWAP)               ║
+║  BUG-E — WHALE "OI belum konfirmasi" tetap jadi pump_type bullish          ║
+║    Masalah: whale_order["is_whale"]=True dari vol 3x saja (OI tidak        ║
+║    dikonfirmasi), tapi pump_type tetap "Whale Entry + Buy Pressure".        ║
+║    FIX: Pump type "Whale Entry" hanya jika OI JUGA naik. Jika OI not       ║
+║         confirmed → pump_type downgrade ke "Volume Spike + Buy Pressure".  ║
 ║                                                                              ║
 ║  TARGET: 342 scanned → ~200 filtered → ~40 watchlist → ~10 alert → ~2 top ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -191,6 +178,11 @@ CONFIG = {
     "energy_oi_change_min":    5.0,
     "energy_vol_ratio_min":    1.5,
     "energy_range_max_pct":    2.5,
+    # FIX v29 BUG-D: Window akumulasi diperluas dari 3 candle (3 jam) ke 8 candle
+    # (8 jam). Akumulasi real berlangsung 8-18 jam — 3 candle tidak cukup.
+    # bullish_min = minimal 5 dari 8 candle harus hijau (dulu: 2 dari 3).
+    "energy_buildup_window":   8,
+    "energy_buildup_bullish_min": 5,
     "score_energy_buildup":    4,
 
     # ── Smart Money Accumulation ──────────────────────────────────────────────
@@ -214,6 +206,10 @@ CONFIG = {
     # ── Liquidity Sweep ───────────────────────────────────────────────────────
     "liq_sweep_lookback":      20,
     "liq_sweep_wick_min_pct":  0.3,
+    # FIX v29 BUG-A: Sweep dianggap valid HANYA dalam N candle setelah terjadi.
+    # Sweep jam 19:30 tidak boleh masih aktif 17 jam kemudian.
+    # Default 6 = 6 candle 1h = 6 jam window validitas.
+    "liq_sweep_expiry_candles": 6,
     "score_liquidity_sweep":   3,
 
     # ── OI Expansion ─────────────────────────────────────────────────────────
@@ -1799,10 +1795,21 @@ def calc_buy_pressure(candles_15m):
     """
     v18 — Buy Pressure dari 15m candles.
     Estimasi buy_volume dari posisi close dalam candle range.
+
+    FIX v29 BUG-B: Tambah upward close confirmation.
+    Masalah sebelumnya: (close-low)/(high-low) menghasilkan buy_ratio tinggi
+    saat retracement karena candle menutup di atas low dengan range sempit.
+    Ini menghasilkan false positive "76% buy pressure" saat harga sebenarnya
+    sedang turun setelah pump (case MELANIA).
+
+    Fix: Tier hanya naik ke >=2 jika harga candle terbaru JUGA lebih tinggi
+    dari candle sebelumnya. Saat retracement, harga turun → tier max 1.
+    Ini memaksa buy_pressure tier tinggi hanya muncul saat harga benar naik.
+
     Tier: >55%→+6 | >65%→+12 | >75%→+20
     """
     window = CONFIG["buy_pressure_window"]
-    if len(candles_15m) < window:
+    if len(candles_15m) < window + 1:
         return {"buy_ratio": 0.5, "buy_pct": 50.0, "score": 0,
                 "label": "Data 15m kurang", "is_bullish": False, "tier": 0}
     recent    = candles_15m[-window:]
@@ -1816,18 +1823,44 @@ def calc_buy_pressure(candles_15m):
         frac = (c["close"] - c["low"]) / rng if rng > 0 else 0.5
         buy_vol += c["volume"] * frac
     buy_ratio = buy_vol / total_vol
+
+    # FIX v29 BUG-B: Cek apakah harga sedang naik (upward close confirmation).
+    # Bandingkan close candle terbaru vs rata-rata close 3 candle sebelumnya.
+    # Jika harga turun, tier dikap di 1 (tidak bisa jadi "PUMP PHASE").
+    close_now  = candles_15m[-1]["close"]
+    close_prev = sum(c["close"] for c in candles_15m[-4:-1]) / 3 if len(candles_15m) >= 4 else close_now
+    price_rising = close_now > close_prev
+
     if buy_ratio >= CONFIG["buy_pressure_high"]:
-        return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
-                "score": CONFIG["score_buy_pressure_high"],
-                "label": f"🐳 Buy Pressure {buy_ratio*100:.0f}% — PUMP PHASE", "is_bullish": True, "tier": 3}
+        if price_rising:
+            # Normal: buy pressure tinggi + harga naik = valid pump signal
+            return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
+                    "score": CONFIG["score_buy_pressure_high"],
+                    "label": f"🐳 Buy Pressure {buy_ratio*100:.0f}% — PUMP PHASE",
+                    "is_bullish": True, "tier": 3}
+        else:
+            # BUG-B FIX: buy_ratio tinggi tapi harga turun = retracement artefak
+            # Turunkan ke tier 1 (akumulasi), bukan "PUMP PHASE"
+            return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
+                    "score": CONFIG["score_buy_pressure_low"],
+                    "label": f"📦 Buy Pressure {buy_ratio*100:.0f}% tapi harga turun — kemungkinan retracement (tier diturunkan)",
+                    "is_bullish": True, "tier": 1}
     elif buy_ratio >= CONFIG["buy_pressure_mid"]:
-        return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
-                "score": CONFIG["score_buy_pressure_mid"],
-                "label": f"💰 Buy Pressure {buy_ratio*100:.0f}% — Whale activity", "is_bullish": True, "tier": 2}
+        if price_rising:
+            return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
+                    "score": CONFIG["score_buy_pressure_mid"],
+                    "label": f"💰 Buy Pressure {buy_ratio*100:.0f}% — Whale activity",
+                    "is_bullish": True, "tier": 2}
+        else:
+            return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
+                    "score": CONFIG["score_buy_pressure_low"],
+                    "label": f"📦 Buy Pressure {buy_ratio*100:.0f}% tapi harga turun — akumulasi atau retracement",
+                    "is_bullish": True, "tier": 1}
     elif buy_ratio >= CONFIG["buy_pressure_low"]:
         return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
                 "score": CONFIG["score_buy_pressure_low"],
-                "label": f"📦 Buy Pressure {buy_ratio*100:.0f}% — Accumulation", "is_bullish": True, "tier": 1}
+                "label": f"📦 Buy Pressure {buy_ratio*100:.0f}% — Accumulation",
+                "is_bullish": True, "tier": 1}
     return {"buy_ratio": round(buy_ratio,3), "buy_pct": round(buy_ratio*100,1),
             "score": 0, "label": f"Buy Pressure rendah {buy_ratio*100:.0f}%",
             "is_bullish": False, "tier": 0}
@@ -4658,24 +4691,37 @@ def detect_liquidity_sweep(candles, lookback=None):
     Liquidity Sweep Detection — stop hunt sebelum reversal/pump.
     Pola: harga turun di bawah support, lalu candle close kembali di atas
     support dengan wick panjang → market maker sudah selesai ambil likuiditas.
+
+    FIX v29 BUG-A: Tambah expiry check.
+    Sweep hanya dianggap valid dalam CONFIG["liq_sweep_expiry_candles"] candle
+    terakhir (default: 6 jam). Sweep yang terjadi 17 jam lalu tidak boleh
+    masih mengaktifkan sinyal dan skip VWAP penalty.
     """
     if lookback is None:
         lookback = CONFIG["liq_sweep_lookback"]
     if len(candles) < lookback + 3:
-        return {"is_sweep": False, "sweep_low": 0.0, "support": 0.0, "label": "Data kurang"}
+        return {"is_sweep": False, "sweep_low": 0.0, "support": 0.0,
+                "label": "Data kurang", "candles_ago": 99}
 
     reference_candles = candles[-(lookback + 3):-3]
     if not reference_candles:
-        return {"is_sweep": False, "sweep_low": 0.0, "support": 0.0, "label": "—"}
+        return {"is_sweep": False, "sweep_low": 0.0, "support": 0.0,
+                "label": "—", "candles_ago": 99}
 
     lows_sorted   = sorted(c["low"] for c in reference_candles)
     support_level = sum(lows_sorted[:3]) / 3
 
-    sweep_detected = False
-    sweep_candle   = None
-    sweep_low_val  = 0.0
+    sweep_detected  = False
+    sweep_candle    = None
+    sweep_low_val   = 0.0
+    sweep_candles_ago = 99  # berapa candle lalu sweep terjadi
 
-    for candle in candles[-3:]:
+    # FIX v29 BUG-A: Perluas pencarian ke expiry window (bukan hanya 3 candle)
+    # agar kita tahu KAPAN sweep terjadi dan bisa menentukan apakah masih valid.
+    expiry = CONFIG.get("liq_sweep_expiry_candles", 6)
+    search_window = min(expiry, len(candles))
+
+    for idx, candle in enumerate(reversed(candles[-search_window:])):
         candle_range = candle["high"] - candle["low"]
         if candle_range <= 0:
             continue
@@ -4689,25 +4735,40 @@ def detect_liquidity_sweep(candles, lookback=None):
         has_wick     = wick_pct >= CONFIG["liq_sweep_wick_min_pct"]
 
         if went_below and closed_above and has_wick:
-            sweep_detected = True
-            sweep_candle   = candle
-            sweep_low_val  = candle["low"]
+            sweep_detected    = True
+            sweep_candle      = candle
+            sweep_low_val     = candle["low"]
+            sweep_candles_ago = idx + 1  # 1 = candle terakhir, 6 = 6 jam lalu
             break
 
-    if sweep_detected and sweep_candle is not None:
+    # FIX v29 BUG-A: Jika sweep ditemukan tapi sudah lebih dari expiry candle,
+    # tandai sebagai expired (is_sweep=False agar tidak skip VWAP, tidak naik skor).
+    is_valid = sweep_detected and sweep_candles_ago <= expiry
+
+    if is_valid and sweep_candle is not None:
         depth_pct = (support_level - sweep_low_val) / support_level * 100
         label = (
             f"🎯 Liquidity Sweep — low ${sweep_low_val:.6g} tembus support "
             f"${support_level:.6g} ({depth_pct:.2f}%), close kembali di atas"
+            f" [{sweep_candles_ago}h lalu]"
+        )
+    elif sweep_detected and not is_valid:
+        depth_pct = (support_level - sweep_low_val) / support_level * 100
+        label = (
+            f"⏰ Sweep EXPIRED ({sweep_candles_ago}h lalu > {expiry}h max) — "
+            f"low ${sweep_low_val:.6g} support ${support_level:.6g} "
+            f"({depth_pct:.2f}%) — tidak lagi valid sebagai sinyal"
         )
     else:
         label = "—"
 
     return {
-        "is_sweep":  sweep_detected,
-        "sweep_low": round(sweep_low_val, 8),
-        "support":   round(support_level, 8),
-        "label":     label,
+        "is_sweep":      is_valid,
+        "sweep_low":     round(sweep_low_val, 8),
+        "support":       round(support_level, 8),
+        "label":         label,
+        "candles_ago":   sweep_candles_ago,
+        "is_expired":    sweep_detected and not is_valid,
     }
 
 def detect_energy_buildup(candles_1h, oi_data):
@@ -4717,56 +4778,65 @@ def detect_energy_buildup(candles_1h, oi_data):
     Pola absorption: market maker menyerap order sambil membangun posisi.
     Harga DITAHAN (sideways) meski volume dan OI naik = klasik pre-pump.
 
-    Kondisi deteksi:
-      1. OI naik > 5% (posisi baru dibangun) — FIX v18: sekarang bisa aktif
-         karena OI snapshot di-load dari disk antar-run.
-      2. Vol rata-rata 3h terbaru > 1.5x baseline 24h
-      3. Price range 3h < 2.5% (harga tidak bergerak)
-      4. Minimal 2 dari 3 candle terbaru bullish (buying pressure)
+    FIX v29 BUG-D: Window diperluas dari 3 candle (3 jam) ke 8 candle (8 jam).
+    Akumulasi real berlangsung 8-18 jam. Dengan window 3h:
+      - Fase akumulasi MELANIA (15 jam) tidak pernah terdeteksi
+      - Energy buildup hanya aktif tepat sebelum pump (terlambat)
+    Dengan window 8h, pola absorption dapat terdeteksi 6-12 jam sebelum pump.
+
+    Kondisi deteksi (v29):
+      1. OI naik > 5% (posisi baru dibangun)
+      2. Vol rata-rata 8h terbaru > 1.5x baseline 24h
+      3. Price range 8h < 2.5% (harga tidak bergerak)
+      4. Minimal 5 dari 8 candle terbaru bullish (buying pressure konsisten)
     """
-    if len(candles_1h) < 24:
+    window = CONFIG.get("energy_buildup_window", 8)
+    bullish_min = CONFIG.get("energy_buildup_bullish_min", 5)
+
+    if len(candles_1h) < window + 4:
         return {
             "is_buildup": False, "is_strong": False,
             "oi_change": 0.0, "vol_ratio": 0.0, "range_pct": 0.0,
             "label": "Data tidak cukup",
         }
 
-    # Kondisi 1: OI naik (sekarang bisa berfungsi karena snapshot persisten)
+    # Kondisi 1: OI naik
     oi_change = oi_data.get("change_pct", 0.0)
     oi_rising = (not oi_data.get("is_new", True)) and oi_change >= CONFIG["energy_oi_change_min"]
 
-    # Kondisi 2: volume rata-rata 3 candle terbaru vs baseline
-    recent_3 = candles_1h[-3:]
-    vol_3h_avg = sum(c["volume_usd"] for c in recent_3) / 3
-    baseline   = candles_1h[-24:-3]
-    avg_vol    = sum(c["volume_usd"] for c in baseline) / len(baseline) if baseline else vol_3h_avg
-    vol_ratio  = (vol_3h_avg / avg_vol) if avg_vol > 0 else 1.0
+    # Kondisi 2: volume rata-rata 8 candle terbaru vs baseline 24h
+    recent_n   = candles_1h[-window:]
+    vol_n_avg  = sum(c["volume_usd"] for c in recent_n) / window
+    baseline   = candles_1h[-(window + 24):-window]
+    avg_vol    = sum(c["volume_usd"] for c in baseline) / len(baseline) if baseline else vol_n_avg
+    vol_ratio  = (vol_n_avg / avg_vol) if avg_vol > 0 else 1.0
     vol_rising = vol_ratio >= CONFIG["energy_vol_ratio_min"]
 
-    # Kondisi 3: harga tidak bergerak
-    hi3       = max(c["high"]  for c in recent_3)
-    lo3       = min(c["low"]   for c in recent_3)
-    mid3      = (hi3 + lo3) / 2
-    range_pct = ((hi3 - lo3) / mid3 * 100) if mid3 > 0 else 99.0
+    # Kondisi 3: harga tidak bergerak dalam 8h
+    hi_n       = max(c["high"]  for c in recent_n)
+    lo_n       = min(c["low"]   for c in recent_n)
+    mid_n      = (hi_n + lo_n) / 2
+    range_pct  = ((hi_n - lo_n) / mid_n * 100) if mid_n > 0 else 99.0
     price_stuck = range_pct <= CONFIG["energy_range_max_pct"]
 
-    # Kondisi 4: mayoritas candle terbaru bullish
-    bullish_count   = sum(1 for c in recent_3 if c["close"] >= c["open"])
-    candles_bullish = bullish_count >= 2
+    # Kondisi 4: mayoritas candle terbaru bullish (5 dari 8)
+    bullish_count   = sum(1 for c in recent_n if c["close"] >= c["open"])
+    candles_bullish = bullish_count >= bullish_min
 
     is_buildup = oi_rising and vol_rising and price_stuck and candles_bullish
     is_strong  = False   # akan di-set dari master_score jika funding <= 0
 
     if is_buildup:
         label = (
-            f"⚡ ENERGY BUILD-UP — OI +{oi_change:.1f}%, vol {vol_ratio:.1f}x "
-            f"(3h avg), range {range_pct:.1f}%, candle {bullish_count}/3 hijau"
+            f"⚡ ENERGY BUILD-UP ({window}h) — OI +{oi_change:.1f}%, "
+            f"vol {vol_ratio:.1f}x baseline, range {range_pct:.1f}%, "
+            f"candle {bullish_count}/{window} hijau"
         )
     else:
         conds = sum([oi_rising, vol_rising, price_stuck, candles_bullish])
         label = (
             f"— ({conds}/4 kondisi: OI={oi_rising}, vol={vol_rising}, "
-            f"stuck={price_stuck}, bullish={candles_bullish})"
+            f"stuck={price_stuck}, bullish={candles_bullish} [{bullish_count}/{window}])"
         )
 
     return {
@@ -6040,7 +6110,33 @@ def master_score(symbol, ticker):
     # Pump probability: blend sigmoid from MM score (70%) + legacy logistic (30%)
     pump_prob_v23  = calc_pump_probability_v23(mm_score_data["mm_score"])
     pump_prob_leg  = calc_pump_probability_v19(blended_score)
-    pump_prob      = round(pump_prob_v23 * 0.70 + pump_prob_leg * 0.30, 1)
+    pump_prob_raw  = round(pump_prob_v23 * 0.70 + pump_prob_leg * 0.30, 1)
+
+    # FIX v29 BUG-C: Cap pump_prob berdasarkan alert_level untuk eliminasi
+    # inkonsistensi fatal "IGNORE #2 | Pump Prob: 75.4%".
+    # Masalah: pump_prob_v23 menggunakan mm_score (bukan blended_score),
+    # sehingga bisa 75%+ meski score masuk IGNORE.
+    # Fix: pump_prob di-cap sesuai alert level yang dikembalikan ke user.
+    # IGNORE    → max 40%  (ada sinyal tapi tidak signifikan)
+    # WATCHLIST → max 60%  (menarik tapi belum cukup kuat)
+    # ALERT     → max 80%  (sinyal kuat)
+    # STRONG    → 100%     (tidak di-cap)
+    alert_level_v19 = get_alert_level_v19(blended_score)
+    _prob_caps = {
+        "IGNORE":       40.0,
+        "WATCHLIST":    60.0,
+        "ALERT":        80.0,
+        "STRONG ALERT": 100.0,
+    }
+    _prob_cap  = _prob_caps.get(alert_level_v19, 60.0)
+    pump_prob  = round(min(pump_prob_raw, _prob_cap), 1)
+
+    if pump_prob < pump_prob_raw:
+        log.debug(
+            f"  {symbol}: pump_prob capped {pump_prob_raw}% → {pump_prob}% "
+            f"(alert={alert_level_v19}, cap={_prob_cap}%)"
+        )
+
     # BUG FIX v25: pump_prob_v22 was referenced in result dict but never assigned
     # Alias to pump_prob_v23 for backward compatibility with build_alert
     pump_prob_v22  = pump_prob_v23
@@ -6050,8 +6146,7 @@ def master_score(symbol, ticker):
         vol_accel, buy_press["buy_ratio"], oi_data, micro_mom
     )
 
-    # Alert level dari threshold v19 (55/65/78)
-    alert_level_v19 = get_alert_level_v19(blended_score)
+    # alert_level_v19 sudah dihitung di atas (FIX v29 BUG-C)
 
     # Expose blended_score untuk ranking
 
@@ -6065,7 +6160,15 @@ def master_score(symbol, ticker):
     elif vol_spike["tier"] >= 3:
         pump_type = "Phase 1 STRONG — Volume Spike 3x+"
     elif whale_order["is_whale"] and buy_press["tier"] >= 2:
-        pump_type = "Whale Entry + Buy Pressure"
+        # FIX v29 BUG-E: "Whale Entry" hanya valid jika OI juga dikonfirmasi.
+        # Jika OI not confirmed (is_new atau change kecil), downgrade label
+        # agar user tidak salah mengira ini whale entry yang kuat.
+        _oi_confirmed = (not oi_data.get("is_new", True) and
+                         oi_data.get("change_pct", 0) >= CONFIG.get("oi_change_min_pct", 3.0))
+        if _oi_confirmed:
+            pump_type = "Whale Entry + Buy Pressure"
+        else:
+            pump_type = "Volume Spike + Buy Pressure (OI unconfirmed)"
     elif mom_accel["is_strong"] and vol_spike["tier"] >= 1:
         pump_type = "Momentum Acceleration + Vol Spike"
     elif energy["is_buildup"] and energy["is_strong"]:
