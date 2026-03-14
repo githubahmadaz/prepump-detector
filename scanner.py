@@ -56,13 +56,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v31_2.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v31_2a.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v31 — log aktif: /tmp/scanner_v31_2.log")
+log.info("Scanner v31 — log aktif: /tmp/scanner_v31_2a.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -700,7 +700,7 @@ CONFIG = {
     "late_entry_streak_min":      3,     # streak candle minimal untuk late entry
     "late_entry_squeeze_pct":    15.0,   # BBW percentile batas squeeze "kuat"
     "late_entry_penalty":        -25,    # penalti normal (bukan squeeze kuat)
-    "late_entry_penalty_abs":    -15,    # penalti absolut (vol ekstrem meski squeeze)
+    "late_entry_penalty_abs":    -25,    # penalti absolut (vol ekstrem meski squeeze) — v31.2a: dinaikkan -15→-25 agar vol 10x+ turun ke WATCHLIST
 
     # ══════════════════════════════════════════════════════════════════════════
     #  NEW v31.2 FIX-2: DISTRIBUSI FILTER
@@ -7198,7 +7198,7 @@ def build_alert(r, rank=None):
     z_rank   = r.get("rank_vol_z_v20", 0)
     mm_rank  = r.get("rank_mm_score", 0)
     ob_rank  = r.get("rank_ob_score", 1.0)
-    msg += (f"\n<i>Scanner v31.2 | Rank:{rank_val:.1f} | "
+    msg += (f"\n<i>Scanner v31.2a | Rank:{rank_val:.1f} | "
             f"MM:{mm_rank:.0f} | Z:{z_rank:.2f} | OB:{ob_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
@@ -7209,7 +7209,7 @@ def build_summary(results):
     """
     top5 = results[:5]
     msg  = (
-        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v31.2</b>\n"
+        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v31.2a</b>\n"
         f"{utc_now()}\n"
         f"{'━'*30}\n"
     )
@@ -7371,7 +7371,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v31.2:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v31.2a:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -7394,7 +7394,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v31.2 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v31.2a — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -7518,14 +7518,14 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v31.2 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v31.2a — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v31.2                 ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v31.2a                ║")
     log.info("║  SQUEEZE MODE | LATE ENTRY | DISTRIBUSI | CONFLICT VETO    ║")
     log.info("║  15 BUG FIX | LATE ENTRY | DISTRIBUSI | CONFLICT VETO      ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
