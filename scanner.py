@@ -1,48 +1,22 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  QUANTITATIVE PUMP DETECTION SCANNER v30 — AUDIT FINAL + 7 FIX KRITIS     ║
-║  Berdasarkan analisis 3 pump nyata: PIXEL+280%, TRUMP+60%, HUS+56%         ║
+║  QUANTITATIVE PUMP DETECTION SCANNER v31 — 11 BUG FIX DARI VERIFIKASI     ║
+║  Berdasarkan forensik 3 pump nyata: PIXEL+280%, TRUMP+60%, HUS+56%        ║
 ║                                                                              ║
-║  INHERITED FROM v29: 5 bug fix (sweep expiry, buy_press, pump_prob cap,    ║
-║  energy window 8h, whale OI confirm)                                        ║
+║  ROOT CAUSE v30: Scanner deteksi coin SEDANG pump, bukan AKAN pump.       ║
+║  SOLUSI v31: SQUEEZE MODE — aktif saat BBW percentile ≤ 30.               ║
 ║                                                                              ║
-║  ═══════════════════════════════════════════════════════════════════════    ║
-║  FIX v30 — 7 perbaikan fundamental dari audit forensik pump nyata:         ║
-║                                                                              ║
-║  FIX-1 — LOOP OTOMATIS [WAJIB]                                              ║
-║    Scanner sebelumnya run sekali lalu berhenti. Pump PIXEL dimulai jam      ║
-║    06:00, jika scanner hanya run jam 08:00 maka coin sudah diblokir gate.  ║
-║    FIX: while True loop dengan sleep 900s (15 menit) antar scan.           ║
-║                                                                              ║
-║  FIX-2 — gate_chg_24h_max KONTEKSTUAL (bukan flat 25%) [KRITIS]            ║
-║    PIXEL pump +280%, TRUMP +60%, HUS +56% — semua diblokir gate 25%.       ║
-║    FIX: Jika BBW percentile <= 25 (squeeze aktif) → gate = 200%.           ║
-║         Jika tidak ada squeeze → gate = 50% (naik dari 25%).               ║
-║                                                                              ║
-║  FIX-3 — noise_min_vol_24h: $500K → $100K [KRITIS]                         ║
-║    PIXEL dan HUS: volume sangat rendah selama akumulasi.                   ║
-║    Dibuang sebelum scan dimulai. $100K cukup untuk futures yang valid.     ║
-║                                                                              ║
-║  FIX-4 — score_bos_up: 1 → 18 [KRITIS]                                     ║
-║    BOS Up (Break of Structure) adalah trigger pump terkuat dalam semua      ║
-║    contoh nyata: PIXEL, TRUMP, HUS semuanya BOS Up sebelum pump.           ║
-║    Score +1 adalah kesalahan fatal — seharusnya sinyal teratas.            ║
-║                                                                              ║
-║  FIX-5 — score_prebreakout: 8 → 20, threshold lebih ketat [KRITIS]         ║
-║    BB Squeeze persentil rendah adalah sinyal paling prediktif big pump.    ║
-║    +4 (setengah dari 8) tidak cukup untuk mengangkat coin ke threshold.    ║
-║    FIX: p<=10 → +20, p<=20 → +12, p<=30 → +6 (bertingkat).               ║
-║                                                                              ║
-║  FIX-6 — Vol rendah saat akumulasi = BULLISH bukan netral [KRITIS]         ║
-║    Ketiga coin (PIXEL, HUS, TRUMP) punya vol_spike ~0.3-0.8x baseline.    ║
-║    Scanner tidak memberi skor apapun. Ini adalah pola khas akumulasi.      ║
-║    FIX: Jika vol_spike 0.3-0.8x DAN squeeze aktif → bonus +8.             ║
-║         "Volume compression dalam squeeze = akumulasi tersembunyi"         ║
-║                                                                              ║
-║  FIX-7 — BUG-B fix dikecualikan saat squeeze aktif [KRITIS]                ║
-║    Fix BUG-B (buy_press tier turun saat price_rising=False) harus          ║
-║    dikecualikan ketika coin dalam squeeze (akumulasi). Dalam akumulasi,    ║
-║    buy_ratio tinggi + vol rendah adalah kondisi valid, bukan false signal. ║
+║  FIX-v31-1  SQUEEZE MODE: skip GATE 0,3,9,10 + scoring mode akumulasi     ║
+║  FIX-v31-2  detect_bos_up: level horizontal + pre-close signal            ║
+║  FIX-v31-3  heuristic_ref_max: 150 → 80                                   ║
+║  FIX-v31-4  calc_uptrend_age: bedakan akumulasi vs late uptrend           ║
+║  FIX-v31-5  calc_accumulation_phase: tambah low-vol mode                  ║
+║  FIX-v31-6  detect_whale_accumulation: squeeze bypass vol requirement     ║
+║  FIX-v31-7  build_candidate_list BBW: pakai candle 1h bukan ticker        ║
+║  FIX-v31-8  detect_smart_money_v22: squeeze bypass vol threshold          ║
+║  FIX-v31-9  GATE 9 momentum_val_reject: squeeze bypass (via squeeze mode) ║
+║  FIX-v31-10 Logging consistency v31                                        ║
+║  FIX-v31-11 score_fresh_breakout_start: streak diperluas 3 → 5 candle    ║
 ║                                                                              ║
 ║  TARGET: 342 scanned → ~200 filtered → ~40 watchlist → ~10 alert → ~2 top ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -62,7 +36,7 @@ from collections import defaultdict
 # v26 PERF: Persistent HTTP session for connection reuse across ~342 symbols
 # Eliminates TCP handshake overhead on every API call
 _http_session = requests.Session()
-_http_session.headers.update({"User-Agent": "CryptoScanner/26.0", "Accept-Encoding": "gzip"})
+_http_session.headers.update({"User-Agent": "CryptoScanner/31.0", "Accept-Encoding": "gzip"})
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -82,13 +56,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v27.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v31.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v27 — log aktif: /tmp/scanner_v27.log")
+log.info("Scanner v31 — log aktif: /tmp/scanner_v31.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -100,7 +74,7 @@ CONFIG = {
 
     # ── Volume 24h total (USD) ────────────────────────────────────────────────
     "min_vol_24h":          10_000,
-    "max_vol_24h":      500_000_000,
+    "max_vol_24h":      50_000_000,
     "pre_filter_vol":       10_000,
 
     # ── Open Interest minimum filter ──────────────────────────────────────────
@@ -640,9 +614,11 @@ CONFIG = {
 
     # v23 institutional scoring blend ratio
     # FIX v28 BUG#1: normalisasi heuristic ke 0-100 sebelum blend
-    # heuristic_ref_max = nilai heuristic "sangat kuat" yang di-map ke 100
-    # Turunkan nilai ini jika rata-rata blended score di live terlalu rendah.
-    "heuristic_ref_max":          150.0,
+    # FIX v31 FIX-3: ref_max 150 → 80.
+    # BOS+squeeze+vol_compress = ~48 raw → 48/150 = 32% norm → blended ~18 (terlalu rendah).
+    # Dengan ref_max=80: 48/80 = 60% → blended ~35 → di atas threshold 30.
+    # Nilai 80 = score heuristic "kuat tapi belum extreme" yang seharusnya map ke 100%.
+    "heuristic_ref_max":          80.0,
 
     # Bobot blend — ketiga komponen sekarang di skala 0-100 (setelah normalisasi)
     "v23_heuristic_weight":      0.50,   # heuristic: 50%
@@ -691,6 +667,24 @@ CONFIG = {
     "score_cvd_bullish_div":    15,     # akumulasi tersembunyi = signal kuat
     "score_cvd_bearish_div":   -10,     # distribusi = penalti
     "score_cvd_momentum":        8,     # CVD dan harga sama naik = konfirmasi
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  NEW v31: SQUEEZE MODE CONFIG
+    # ══════════════════════════════════════════════════════════════════════════
+    # Squeeze mode aktif jika BBW percentile (dari candle 1h) <= threshold ini.
+    # Saat aktif: gate OI, uptrend, 5m momentum, ATR minimum di-bypass.
+    # Scoring: vol rendah dianggap bullish, BOS pre-close diakui, fresh streak diperluas.
+    "squeeze_mode_bbw_percentile": 30,   # BBW percentile <= 30 → squeeze mode aktif
+    "squeeze_mode_lookback":       50,   # lookback candle untuk hitung percentile BBW
+    # Pre-close BOS: high candle terbaru tembus bos_level meski close belum konfirmasi
+    "bos_preclose_bonus":          10,   # bonus score untuk pre-close BOS signal
+    # Low-vol accumulation: vol 0.1-0.6x baseline + squeeze = akumulasi tersembunyi
+    "accum_low_vol_min_ratio":     0.08, # minimal ada aktivitas (> 8% baseline)
+    "accum_low_vol_max_ratio":     0.65, # tapi di bawah 65% baseline
+    "score_low_vol_accum":          8,   # bonus untuk low-vol accumulation dalam squeeze
+    # Fresh breakout diperluas ke 5 candle (v30: hanya 3)
+    "score_fresh_breakout_start":   5,   # v31: streak 1-5 jam setelah akumulasi panjang
+    "fresh_breakout_max_streak":    5,   # v31: diperluas dari 3 → 5
 }
 
 MANUAL_EXCLUDE = set()
@@ -1529,6 +1523,37 @@ def calc_bbw(candles, period=20):
         bb_pct = (candles[-1]["close"] - bb_lower) / (bb_upper - bb_lower)
     return bbw, bb_pct
 
+
+def calc_bbw_percentile(candles, lookback=None, period=20):
+    """
+    v31 — Hitung persentil BBW saat ini vs historis.
+    Digunakan untuk mendeteksi squeeze mode secara akurat dari candle.
+    Return: percentile (0-100), current_bbw, is_squeeze_active
+    """
+    if lookback is None:
+        lookback = CONFIG.get("squeeze_mode_lookback", 50)
+    if len(candles) < lookback + period:
+        return 50.0, 0.0, False
+    bbw_history = []
+    for i in range(lookback, 0, -1):
+        seg = candles[-(i + period):-i] if i > 0 else candles[-period:]
+        if len(seg) < period:
+            continue
+        cls    = [c["close"] for c in seg]
+        mean_c = sum(cls) / period
+        if mean_c <= 0:
+            continue
+        var    = sum((x - mean_c) ** 2 for x in cls) / period
+        std_c  = math.sqrt(var)
+        bbw_history.append(4.0 * std_c / mean_c)
+    if not bbw_history:
+        return 50.0, 0.0, False
+    cur_bbw   = bbw_history[-1]
+    rank      = sum(1 for v in bbw_history if v <= cur_bbw)
+    percentile = rank / len(bbw_history) * 100
+    threshold  = CONFIG.get("squeeze_mode_bbw_percentile", 30)
+    return round(percentile, 1), round(cur_bbw, 6), percentile <= threshold
+
 def calc_atr_pct(candles, period=14):
     """ATR sebagai % dari harga close terakhir."""
     if len(candles) < period + 1:
@@ -1616,18 +1641,67 @@ def get_rsi(candles, period=14):
 
 def detect_bos_up(candles, lookback=None):
     """
-    Break of Structure ke atas.
-    FIX v18: lookback default dinaikkan 3 → 8 candle.
-    Lookback 3 candle = 3 jam saja → BOS trivial, hampir selalu True.
-    Lookback 8 candle = lebih bermakna secara struktur.
+    Break of Structure ke atas — v31 UPGRADE.
+
+    v30: hanya cek close[-1] > max(high[-9:-1])
+         Masalah: aktif 1 jam terlambat karena harus tunggu candle tutup.
+
+    v31 FIX-v31-2: Tiga lapis deteksi:
+    1. STANDARD BOS: close terbaru > max(high N candle sebelumnya) — konfirmasi penuh
+    2. PRE-CLOSE BOS: high candle terbaru > bos_level meski close belum melewati
+       → early signal, candle sedang break tapi belum tutup (+10 bonus di scoring)
+    3. HORIZONTAL RESISTANCE BREAK: harga melewati level resistance pivot historis
+       yang muncul 2+ kali dalam 48 candle (level nyata, bukan hanya swing high lokal)
+
+    Return: (bos_up, bos_level, pre_close_bos, horiz_break)
     """
     if lookback is None:
         lookback = CONFIG["bos_lookback"]
     if len(candles) < lookback + 1:
-        return False, 0.0
+        return False, 0.0, False, False
+
+    # --- Layer 1: Standard BOS ---
     prev_highs = [c["high"] for c in candles[-(lookback + 1):-1]]
     bos_level  = max(prev_highs)
-    return candles[-1]["close"] > bos_level, bos_level
+    close_now  = candles[-1]["close"]
+    high_now   = candles[-1]["high"]
+    standard_bos = close_now > bos_level
+
+    # --- Layer 2: Pre-close BOS (high sudah tembus tapi close belum) ---
+    pre_close_bos = (not standard_bos) and (high_now > bos_level)
+
+    # --- Layer 3: Horizontal resistance break (pivot count >= 2 dalam 48c) ---
+    horiz_break   = False
+    horiz_level   = 0.0
+    n_hist        = min(48, len(candles) - 1)
+    hist_candles  = candles[-(n_hist + 1):-1]
+    price_now     = close_now
+
+    if len(hist_candles) >= 5:
+        pivot_highs = []
+        for i in range(1, len(hist_candles) - 1):
+            h = hist_candles[i]["high"]
+            if h > hist_candles[i-1]["high"] and h > hist_candles[i+1]["high"]:
+                pivot_highs.append(h)
+        # Cluster pivot highs dalam 0.5% radius
+        if pivot_highs:
+            pivot_highs.sort()
+            for ph in pivot_highs:
+                count = sum(1 for p in pivot_highs if abs(p - ph) / max(ph, 1e-10) < 0.005)
+                if count >= 2 and ph < price_now * 1.02:
+                    # Level yang ditembus (price sekarang di atas level ini)
+                    if price_now > ph > price_now * 0.97:
+                        horiz_break = True
+                        horiz_level = ph
+                        break
+
+    # Pilih bos_level terbaik
+    if horiz_break and horiz_level > 0:
+        bos_level = max(bos_level, horiz_level)
+
+    bos_up = standard_bos or (pre_close_bos and horiz_break)
+
+    return bos_up, bos_level, pre_close_bos, horiz_break
 
 def higher_low_detected(candles):
     """
@@ -2552,13 +2626,22 @@ def calc_candle_imbalance(candles_15m):
     }
 
 
-def detect_whale_accumulation(candles):
+def detect_whale_accumulation(candles, squeeze_active=False):
     """
     STEP 16 v19 — Whale Accumulation Detection.
 
-    Pattern: vol naik + harga sideways + ATR menyempit
-    → smart money akumulasi diam-diam sebelum pump.
-    Berbeda dari whale_order (single candle) — ini deteksi pola multi-candle.
+    v31 FIX-v31-6: Squeeze bypass untuk vol requirement.
+    v30: vol_rising = vol > 1.3x WAJIB → akumulasi PIXEL/HUS tidak terdeteksi.
+    Akumulasi nyata justru punya volume rendah karena market maker menekan
+    harga dan volume sambil akumulasi secara diam-diam.
+
+    Saat squeeze_active=True:
+      - vol_rising diganti: vol 0.08-0.65x baseline JUGA dianggap "akumulasi"
+      - Hanya perlu price_sideways + atr_contracting (2/2 non-vol cond)
+      - Ini mendeteksi "stealth accumulation" yang tidak terlihat dari volume
+
+    Pattern normal: vol naik + harga sideways + ATR menyempit
+    Pattern squeeze: vol sangat rendah + harga sideways + ATR menyempit
     """
     window = 12
     if len(candles) < window + 12:
@@ -2567,10 +2650,17 @@ def detect_whale_accumulation(candles):
     recent   = candles[-window:]
     baseline = candles[-(window + 12):-window]
 
-    # Vol naik
     avg_recent   = sum(c["volume_usd"] for c in recent)   / len(recent)
     avg_baseline = sum(c["volume_usd"] for c in baseline) / len(baseline)
-    vol_rising   = avg_recent >= avg_baseline * CONFIG["whale_accum_vol_min"] if avg_baseline > 0 else False
+    vol_ratio    = (avg_recent / avg_baseline) if avg_baseline > 0 else 1.0
+
+    # Vol naik (mode normal)
+    vol_rising = vol_ratio >= CONFIG["whale_accum_vol_min"] if avg_baseline > 0 else False
+
+    # v31: Vol rendah dalam squeeze = stealth accumulation mode
+    lv_min = CONFIG.get("accum_low_vol_min_ratio", 0.08)
+    lv_max = CONFIG.get("accum_low_vol_max_ratio", 0.65)
+    vol_stealth = squeeze_active and (lv_min <= vol_ratio <= lv_max)
 
     # Price sideways
     hi  = max(c["high"]  for c in recent)
@@ -2584,23 +2674,36 @@ def detect_whale_accumulation(candles):
     atr_b  = _atr_n(candles[:-window], window) if len(candles) > window * 2 else atr_r
     atr_contracting = (atr_r / atr_b) <= CONFIG["whale_accum_atr_max"] if atr_b > 0 else False
 
-    n_cond = sum([vol_rising, price_sideways, atr_contracting])
-    is_accum = n_cond >= 2  # min 2 dari 3 kondisi
+    # Normal mode: butuh min 2 dari 3 kondisi (termasuk vol)
+    n_cond_normal = sum([vol_rising, price_sideways, atr_contracting])
+    # Stealth mode: butuh price_sideways + atr_contracting (vol diabaikan)
+    n_cond_stealth = sum([price_sideways, atr_contracting])
 
-    score = CONFIG["score_whale_accum"] if n_cond >= 3 else (4 if n_cond == 2 else 0)
+    is_accum_normal  = n_cond_normal  >= 2
+    is_accum_stealth = vol_stealth and n_cond_stealth >= 2
+    is_accum = is_accum_normal or is_accum_stealth
 
-    if n_cond >= 3:
-        label = (f"🐳 Whale Accumulation CONFIRMED — vol {avg_recent/avg_baseline:.1f}x, "
+    if is_accum_stealth and not is_accum_normal:
+        score = CONFIG["score_whale_accum"] - 2   # sedikit lebih rendah karena vol tidak konfirmasi
+        label = (f"🐳 Whale Stealth Accum — vol sangat rendah {vol_ratio:.2f}x "
+                 f"(squeeze), range {range_pct:.1f}%, ATR menyempit — pre-pump signal")
+    elif n_cond_normal >= 3:
+        score = CONFIG["score_whale_accum"]
+        label = (f"🐳 Whale Accumulation CONFIRMED — vol {vol_ratio:.1f}x, "
                  f"range {range_pct:.1f}%, ATR menyempit") if avg_baseline > 0 else "🐳 Whale Accum"
-    elif n_cond == 2:
-        label = f"🐳 Whale Accum PROBABLE ({n_cond}/3 kondisi)"
+    elif n_cond_normal == 2:
+        score = 4
+        label = f"🐳 Whale Accum PROBABLE ({n_cond_normal}/3 kondisi)"
     else:
-        label = f"No whale accum ({n_cond}/3)"
+        score = 0
+        label = f"No whale accum ({n_cond_normal}/3)"
 
     return {
         "is_accum":        is_accum,
-        "n_cond":          n_cond,
+        "n_cond":          n_cond_normal,
         "vol_rising":      vol_rising,
+        "vol_stealth":     vol_stealth,
+        "vol_ratio":       round(vol_ratio, 3),
         "price_sideways":  price_sideways,
         "atr_contracting": atr_contracting,
         "range_pct":       round(range_pct, 2),
@@ -3145,13 +3248,18 @@ def calc_ema20_cross_up(candles, period_fast=20, period_slow=50):
 #  🏦  NEW INSTITUTIONAL DETECTORS v22
 # ══════════════════════════════════════════════════════════════════════════════
 
-def detect_smart_money_accumulation_v22(candles):
+def detect_smart_money_accumulation_v22(candles, squeeze_active=False):
     """
     FIX 02 v22 — Smart Money Accumulation Detector.
 
+    v31 FIX-v31-8: Squeeze bypass untuk vol threshold.
+    v30: sma_vol_trend_min = 1.2 → akumulasi low-vol tidak terdeteksi.
+    Saat squeeze_active=True, threshold diturunkan ke 0.5 (vol boleh rendah).
+    Dengan demikian range_contraction + bid_pressure sudah cukup jadi sinyal.
+
     Hidden accumulation signal:
       • price range contraction over last 20 candles < 3%
-      • volume trend rising (recent 5c vs baseline 15c)
+      • volume trend (normal: >1.2x; squeeze mode: >0.5x)
       • bid pressure > ask pressure (candle close-position proxy)
 
     Returns is_accumulating, score, label.
@@ -3181,7 +3289,9 @@ def detect_smart_money_accumulation_v22(candles):
     bid_pressure = sum(buy_fracs) / len(buy_fracs)
 
     cond_range = range_ratio < CONFIG["sma_range_max"]
-    cond_vol   = vol_trend   >= CONFIG["sma_vol_trend_min"]
+    # v31: saat squeeze aktif, vol threshold diturunkan ke 0.5 (bukan 1.2)
+    vol_threshold = 0.5 if squeeze_active else CONFIG["sma_vol_trend_min"]
+    cond_vol   = vol_trend   >= vol_threshold
     cond_bid   = bid_pressure > 0.52   # slight buy bias
 
     n_cond         = sum([cond_range, cond_vol, cond_bid])
@@ -3189,12 +3299,13 @@ def detect_smart_money_accumulation_v22(candles):
 
     if n_cond == 3:
         score = CONFIG["score_smart_money_accum"]
-        label = (f"🏦 Smart Money Accum CONFIRMED — range {range_ratio*100:.1f}%, "
-                 f"vol {vol_trend:.1f}x, bid {bid_pressure*100:.0f}%")
+        sq_tag = " [squeeze mode]" if squeeze_active and vol_trend < 1.0 else ""
+        label = (f"🏦 Smart Money Accum CONFIRMED{sq_tag} — range {range_ratio*100:.1f}%, "
+                 f"vol {vol_trend:.2f}x, bid {bid_pressure*100:.0f}%")
     elif n_cond == 2:
         score = CONFIG["score_smart_money_accum"] // 2
         label = (f"🏦 Smart Money Accum PROBABLE ({n_cond}/3) — "
-                 f"range {range_ratio*100:.1f}%, vol {vol_trend:.1f}x")
+                 f"range {range_ratio*100:.1f}%, vol {vol_trend:.2f}x")
     else:
         score = 0
         label = f"No smart money signal ({n_cond}/3)"
@@ -4614,23 +4725,26 @@ def calc_entry_v19(candles, vwap, price_now, atr_abs_val, market_regime, sr,
     }
 
 
-def calc_accumulation_phase(candles):
+def calc_accumulation_phase(candles, squeeze_active=False):
     """
     Deteksi fase akumulasi smart money.
 
-    Kondisi akumulasi VALID (v15.7/15.8):
-      1. Volume 4 candle terbaru > 1.5x baseline 24 candle sebelumnya
-      2. Price range 12 candle < 2% (harga sideways)
-      3. ATR short < 75% ATR long (volatilitas menyempit)
-      4. BB Width menyempit dibanding 12 candle lalu
-      5. Posisi harga dalam swing range < 70% (bukan distribusi atas)
+    v31 FIX-v31-5: Tambah low-vol accumulation mode.
+    v30 mensyaratkan vol > 1.5x WAJIB, padahal akumulasi PIXEL/HUS justru
+    vol 0.2-0.5x baseline. Akumulasi sejati = harga ditekan, volume rendah,
+    market maker menyerap supply diam-diam.
+
+    Saat squeeze_active=True dan vol sangat rendah (0.08-0.65x):
+      - Jika harga sideways + ATR menyempit → is_low_vol_accum = True
+      - Mendapat skor sama dengan akumulasi normal
 
     FIX v18: is_vol_compress hanya aktif secara scoring jika is_accumulating=False
-    (isolasi scoring di master_score — lihat bagian scoring).
+    (isolasi scoring di master_score).
     """
     if len(candles) < 36:
         return {
             "is_accumulating": False, "is_vol_compress": False,
+            "is_low_vol_accum": False,
             "vol_ratio_4h": 0.0, "price_range_pct": 0.0,
             "atr_contract": 1.0, "bbw_contracting": False,
             "price_pos": 0.5, "phase_label": "Data kurang",
@@ -4668,6 +4782,17 @@ def calc_accumulation_phase(candles):
     price_in_zone   = price_pos < CONFIG["accum_max_pos_in_range"]
     is_accumulating = vol_rising and price_sideways and price_in_zone
 
+    # v31 FIX-v31-5: Low-vol accumulation mode
+    lv_min = CONFIG.get("accum_low_vol_min_ratio", 0.08)
+    lv_max = CONFIG.get("accum_low_vol_max_ratio", 0.65)
+    is_low_vol_accum = (
+        squeeze_active
+        and (lv_min <= vol_ratio_4h <= lv_max)
+        and price_sideways
+        and atr_shrinking
+        and price_in_zone
+    )
+
     if is_accumulating and is_vol_compress:
         label = (
             f"🏦 AKUMULASI + COMPRESSION — vol {vol_ratio_4h:.1f}x, "
@@ -4678,14 +4803,20 @@ def calc_accumulation_phase(candles):
             f"📦 AKUMULASI — vol {vol_ratio_4h:.1f}x, "
             f"sideways {price_range_pct:.1f}%, pos {price_pos:.0%}"
         )
+    elif is_low_vol_accum:
+        label = (
+            f"🕵️ AKUMULASI TERSEMBUNYI — vol {vol_ratio_4h:.2f}x (rendah), "
+            f"squeeze aktif, range {price_range_pct:.1f}% — pre-pump kuat"
+        )
     elif is_vol_compress:
         label = f"🗜️ VOLATILITY COMPRESSION — ATR {atr_contract:.2f}x dari baseline"
     else:
         label = "—"
 
     return {
-        "is_accumulating":  is_accumulating,
+        "is_accumulating":  is_accumulating or is_low_vol_accum,
         "is_vol_compress":  is_vol_compress,
+        "is_low_vol_accum": is_low_vol_accum,
         "vol_ratio_4h":     round(vol_ratio_4h, 2),
         "price_range_pct":  round(price_range_pct, 2),
         "atr_contract":     round(atr_contract, 3),
@@ -4920,8 +5051,18 @@ def detect_energy_buildup(candles_1h, oi_data):
         "label":            label,
     }
 
-def calc_uptrend_age(candles):
-    """Berapa jam harga naik berturut-turut. Pre-pump ideal = streak pendek atau 0."""
+def calc_uptrend_age(candles, squeeze_active=False):
+    """
+    Berapa jam harga naik berturut-turut. Pre-pump ideal = streak pendek atau 0.
+
+    v31 FIX-v31-4: Bedakan akumulasi dari late uptrend.
+    PIXEL/HUS punya higher low structure → candle hijau kecil terus → streak 20-30+.
+    Di v30, ini menyebabkan is_late=True → GATE 3 gagal meski itu bukan distribusi.
+
+    Fix: Jika squeeze_active=True → is_late selalu False.
+    Logika: akumulasi dalam squeeze dengan higher low bukan "late uptrend" —
+    itu adalah momen terbaik sebelum pump. Gate ini tidak relevan di kondisi squeeze.
+    """
     if len(candles) < 4:
         return {"age_hours": 0, "is_fresh": False, "is_late": False}
     streak = 0
@@ -4930,10 +5071,13 @@ def calc_uptrend_age(candles):
             streak += 1
         else:
             break
+    # FIX v31: is_late hanya True jika streak > 24 DAN tidak dalam squeeze mode.
+    # Akumulasi panjang dengan higher low (streak tinggi) ≠ late uptrend.
+    is_late = (streak > CONFIG["gate_uptrend_max_hours"]) and (not squeeze_active)
     return {
         "age_hours": streak,
         "is_fresh":  1 <= streak <= 8,
-        "is_late":   streak > CONFIG["gate_uptrend_max_hours"],
+        "is_late":   is_late,
     }
 
 def calc_support_resistance(candles, lookback=48, n_levels=3):
@@ -5287,14 +5431,32 @@ def master_score(symbol, ticker):
     if vol_24h <= 0 or price_now <= 0:
         return None
 
+    # ── v31 FIX-v31-1: SQUEEZE MODE DETECTION (harus sebelum semua gate) ────
+    # Deteksi squeeze aktif dari candle 1h nyata (BBW percentile ≤ 30).
+    # Squeeze mode = coin dalam akumulasi panjang sebelum pump besar.
+    # Saat aktif: gate OI, uptrend age, 5m momentum, ATR minimum di-bypass.
+    # Ini adalah perbaikan root cause utama v31.
+    _bbw_pct, _bbw_val, squeeze_active = calc_bbw_percentile(c1h)
+    log.debug(
+        f"  {symbol}: BBW percentile={_bbw_pct:.1f}% val={_bbw_val:.5f} "
+        f"squeeze_mode={'ON' if squeeze_active else 'off'}"
+    )
+
     # ── GATE 0: Open Interest minimum ────────────────────────────────────────
+    # FIX v31: skip gate ini jika squeeze aktif — akumulasi wajar punya OI kecil
     oi_data = get_oi_change(symbol)
     if oi_data["oi_now"] > 0 and oi_data["oi_now"] < CONFIG["min_oi_usd"]:
-        log.info(
-            f"  {symbol}: OI ${oi_data['oi_now']:,.0f} < ${CONFIG['min_oi_usd']:,} "
-            f"— GATE GAGAL (coin illiquid)"
-        )
-        return None
+        if squeeze_active:
+            log.info(
+                f"  {symbol}: OI ${oi_data['oi_now']:,.0f} < ${CONFIG['min_oi_usd']:,} "
+                f"— GATE 0 di-SKIP (squeeze mode aktif, akumulasi wajar OI kecil)"
+            )
+        else:
+            log.info(
+                f"  {symbol}: OI ${oi_data['oi_now']:,.0f} < ${CONFIG['min_oi_usd']:,} "
+                f"— GATE GAGAL (coin illiquid)"
+            )
+            return None
 
     # v27: OI Acceleration — update snapshot histori segera setelah OI didapat
     oi_accel_v27 = calc_oi_acceleration_v27(symbol, oi_data["oi_now"])
@@ -5328,16 +5490,16 @@ def master_score(symbol, ticker):
     atr_abs_val      = calc_atr_abs(c1h)
     atr_contr        = calc_atr_contracting(c1h)
     rsi              = get_rsi(c1h[-48:])
-    bos_up, bos_level = detect_bos_up(c1h)
+    bos_up, bos_level, pre_close_bos, horiz_break = detect_bos_up(c1h)
     higher_low       = higher_low_detected(c1h)
     vol_ratio        = calc_volume_ratio(c1h)
     vol_accel        = calc_volume_acceleration(c1h)
     vol_consistent   = check_volume_consistent(c1h)
-    uptrend          = calc_uptrend_age(c1h)
+    uptrend          = calc_uptrend_age(c1h, squeeze_active=squeeze_active)
     sr               = calc_support_resistance(c1h)
     btc_candles      = get_btc_candles_cached(48)
     btc_corr         = calc_btc_correlation(c1h, btc_candles, lookback=24)
-    accum            = calc_accumulation_phase(c1h)
+    accum            = calc_accumulation_phase(c1h, squeeze_active=squeeze_active)
     htf_accum        = calc_htf_accumulation(c4h)
     liq_sweep        = detect_liquidity_sweep(c1h)
     energy           = detect_energy_buildup(c1h, oi_data)
@@ -5370,7 +5532,7 @@ def master_score(symbol, ticker):
     }
     micro_breakout = calc_micro_breakout(c1h)        # STEP 11: highest_high breakout
     candle_imbal   = calc_candle_imbalance(c15m)     # STEP 12: orderbook proxy
-    whale_accum    = detect_whale_accumulation(c1h)  # STEP 16: whale accumulation
+    whale_accum    = detect_whale_accumulation(c1h, squeeze_active=squeeze_active)  # STEP 16: whale accumulation
     wick_filter    = calc_wick_ratio(c1h)            # STEP 9: wick trap detection
 
     # ── NEW v20 indicators ────────────────────────────────────────────────────
@@ -5412,7 +5574,7 @@ def master_score(symbol, ticker):
         return None
 
     # ── NEW v22 indicators ────────────────────────────────────────────────────
-    smart_money_v22  = detect_smart_money_accumulation_v22(c1h)
+    smart_money_v22  = detect_smart_money_accumulation_v22(c1h, squeeze_active=squeeze_active)
     liq_trap_v22     = detect_liquidity_trap_v22(c1h, vol_zscore_v20["z"])
     whale_fp_v22     = detect_whale_footprint_v22(c1h)
     prebreakout_v22  = detect_prebreakout_pressure_v22(c1h)
@@ -5473,6 +5635,8 @@ def master_score(symbol, ticker):
         price_chg = (c1h[-1]["close"] - c1h[-2]["close"]) / c1h[-2]["close"] * 100
 
     # ── GATE 3: Uptrend tidak terlalu tua ────────────────────────────────────
+    # FIX v31: calc_uptrend_age sudah menerima squeeze_active — is_late=False
+    # saat squeeze aktif. Gate ini hanya efektif untuk non-squeeze coin.
     if uptrend["is_late"]:
         log.info(
             f"  {symbol}: Uptrend sudah {uptrend['age_hours']}h — "
@@ -5538,22 +5702,29 @@ def master_score(symbol, ticker):
     # (karena GATE 2 sudah handle reject di bawah 97% VWAP)
 
     # ── GATE 9: STEP 8 v19 — Momentum Validation (5m price change)
-    # FIX v23: only reject if price dropping > 0.5%, flat is fine
+    # FIX v31: di-bypass saat squeeze aktif.
+    # Di area kotak hijau, harga 5m masih flat/sedikit negatif karena candle
+    # breakout sedang terbentuk. Gate ini tidak relevan untuk pre-pump squeeze.
     if c5m and len(c5m) >= 2:
         price_chg_5m = (c5m[-1]["close"] - c5m[-2]["close"]) / c5m[-2]["close"]
         if price_chg_5m <= CONFIG["momentum_val_reject"]:
-            log.info(
-                f"  {symbol}: 5m price change {price_chg_5m*100:+.3f}% < "
-                f"{CONFIG['momentum_val_reject']*100:.1f}% "
-                f"— momentum negatif kuat (GATE GAGAL)"
-            )
-            return None
+            if squeeze_active:
+                log.info(
+                    f"  {symbol}: 5m price change {price_chg_5m*100:+.3f}% — "
+                    f"GATE 9 di-SKIP (squeeze mode aktif, flat 5m wajar saat akumulasi)"
+                )
+            else:
+                log.info(
+                    f"  {symbol}: 5m price change {price_chg_5m*100:+.3f}% < "
+                    f"{CONFIG['momentum_val_reject']*100:.1f}% "
+                    f"— momentum negatif kuat (GATE GAGAL)"
+                )
+                return None
     else:
         price_chg_5m = 0.001  # fallback jika tidak ada data 5m
 
     # ── GATE 10: STEP 13 v19 — Noise Filter (volume & ATR minimum)
     if vol_24h < CONFIG["noise_min_vol_24h"]:
-        # BUG FIX v25: use adaptive K/M format so $500K doesn't log as "$0M"
         _thr     = CONFIG["noise_min_vol_24h"]
         _thr_str = f"${_thr/1e6:.1f}M" if _thr >= 1_000_000 else f"${_thr/1e3:.0f}K"
         _vol_str = f"${vol_24h/1e6:.1f}M" if vol_24h >= 1_000_000 else f"${vol_24h/1e3:.0f}K"
@@ -5562,12 +5733,21 @@ def master_score(symbol, ticker):
             f"— coin terlalu illiquid (GATE GAGAL)"
         )
         return None
+    # FIX v31: ATR minimum di-bypass saat squeeze aktif.
+    # Squeeze = ATR sangat kecil. Ini BUKAN noise, ini kompresi volatilitas sebelum pump.
+    # PIXEL saat akumulasi: harga $0.005, candle range $0.00001 → ATR < 0.3%.
     if atr_pct < CONFIG["noise_min_atr_pct"]:
-        log.info(
-            f"  {symbol}: ATR {atr_pct:.3f}% < {CONFIG['noise_min_atr_pct']}% "
-            f"— volatilitas terlalu rendah (GATE GAGAL)"
-        )
-        return None
+        if squeeze_active:
+            log.info(
+                f"  {symbol}: ATR {atr_pct:.3f}% < {CONFIG['noise_min_atr_pct']}% "
+                f"— GATE 10 ATR di-SKIP (squeeze mode aktif, ATR kecil = kompresi normal)"
+            )
+        else:
+            log.info(
+                f"  {symbol}: ATR {atr_pct:.3f}% < {CONFIG['noise_min_atr_pct']}% "
+                f"— volatilitas terlalu rendah (GATE GAGAL)"
+            )
+            return None
 
     # ── GATE 11: STEP 9 v19 — Wick Trap Filter
     # FIX v25: soft penalty at 0.55, hard reject only at 0.75 + ask/bid > 2.0
@@ -5636,12 +5816,12 @@ def master_score(symbol, ticker):
         score += vol_spike["score"]
         signals.append(vol_spike["label"])
 
-    # ── 0a+. FIX v30 FIX-6: Vol Compression dalam Squeeze = akumulasi ────────
-    # Ketiga coin pump (PIXEL, HUS, TRUMP) punya vol_spike 0.3-0.8x.
-    # Volume rendah saat BBW squeeze = market maker sedang akumulasi diam-diam.
-    # BERBEDA dari volume rendah post-pump (yang bearish).
-    # Syarat: vol_ratio 0.1-0.85x DAN prebreakout aktif (squeeze terkonfirmasi).
+    # ── 0a+. FIX v30 FIX-6 / v31: Vol Compression dalam Squeeze = akumulasi ──
+    # v31: _squeeze_active kini menggunakan BBW percentile nyata dari candle
+    # (calc_bbw_percentile dipanggil di awal master_score) — lebih akurat dari
+    # pendekatan v30 yang menggabungkan beberapa proxy tidak konsisten.
     _squeeze_active = (
+        squeeze_active or   # v31: dari BBW percentile candle nyata (utama)
         vol_comp_v23.get("is_compressed") or
         prebreakout_v22.get("is_compressed") or
         bbw < CONFIG.get("bb_squeeze_threshold", 0.05)
@@ -5657,6 +5837,18 @@ def master_score(symbol, ticker):
         signals.append(
             f"🗜️ Vol Compression dalam Squeeze {_vol_compression_ratio:.2f}x — "
             f"akumulasi tersembunyi (vol rendah + squeeze = pre-pump kuat) (+{_vc_bonus})"
+        )
+
+    # ── 0a+++. v31: Low-vol accumulation bonus ───────────────────────────────
+    # FIX-v31-5: calc_accumulation_phase kini mendeteksi akumulasi low-volume.
+    # Jika is_low_vol_accum aktif, beri bonus tambahan karena ini kondisi langka
+    # dan sangat prediktif (pola PIXEL/HUS sebelum pump besar).
+    if accum.get("is_low_vol_accum"):
+        _lva_bonus = CONFIG.get("score_low_vol_accum", 8)
+        score += _lva_bonus
+        signals.append(
+            f"🕵️ Low-Vol Accumulation aktif — vol {accum['vol_ratio_4h']:.2f}x "
+            f"dalam squeeze (akumulasi tersembunyi paling prediktif) (+{_lva_bonus})"
         )
 
     # ── 0a++. FIX v23: BB Breakout bonus (replaces hard reject from GATE 5) ──
@@ -5926,19 +6118,42 @@ def master_score(symbol, ticker):
         signals.append("🔼 Higher Low terdeteksi — struktur bullish awal mulai terbentuk")
 
     # ── 12. BOS Up ────────────────────────────────────────────────────────────
+    # v31 FIX-v31-2: Tiga lapis BOS scoring
     if bos_up:
         score += CONFIG["score_bos_up"]
+        if horiz_break:
+            signals.append(
+                f"🔺 BOS Up CONFIRMED — level horizontal {_fmt_price(bos_level)} "
+                f"tertembus (pivot resistance multi-candle) (+{CONFIG['score_bos_up']})"
+            )
+        else:
+            signals.append(
+                f"🔺 BOS Up — high {_fmt_price(bos_level)} tertembus (+{CONFIG['score_bos_up']})"
+            )
+    elif pre_close_bos:
+        # Pre-close BOS: candle sedang tembus tapi belum tutup — early signal
+        _pcs = CONFIG.get("bos_preclose_bonus", 10)
+        score += _pcs
         signals.append(
-            f"🔺 BOS Up (level {_fmt_price(bos_level)}) — breakout minor, "
-            f"konfirmasi struktur berbalik (skor rendah: idealnya deteksi sebelum BOS)"
+            f"⚡ PRE-CLOSE BOS: high candle tembus {_fmt_price(bos_level)} "
+            f"tapi belum close — sinyal awal breakout (+{_pcs})"
+        )
+    elif horiz_break:
+        # Horizontal break tanpa standard BOS — partial signal
+        _hbs = CONFIG.get("bos_preclose_bonus", 10) // 2
+        score += _hbs
+        signals.append(
+            f"📈 Horizontal Resistance Break: level pivot {_fmt_price(bos_level)} "
+            f"dilewati (+{_hbs})"
         )
 
-    # ── 12b. Fresh Breakout Start — FIX v28 BUG#9 ───────────────────────────
-    # Coin yang baru mulai naik setelah akumulasi panjang (streak 1-3 candle)
-    # adalah titik entry TERBAIK untuk pump 20-70%. Sebelumnya tidak ada bonus.
+    # ── 12b. Fresh Breakout Start — v31 FIX-v31-11 ──────────────────────────
+    # v30: hanya streak 1-3 candle. v31: diperluas ke 5 candle.
+    # Coin baru naik 1-5 jam setelah akumulasi panjang = titik entry terbaik.
     _streak = uptrend.get("age_hours", 0)
-    if 1 <= _streak <= 3:
-        _fresh_bonus = CONFIG.get("score_fresh_breakout_start", 3)
+    _fresh_max = CONFIG.get("fresh_breakout_max_streak", 5)
+    if 1 <= _streak <= _fresh_max:
+        _fresh_bonus = CONFIG.get("score_fresh_breakout_start", 5)
         score += _fresh_bonus
         signals.append(
             f"🟢 Fresh Breakout Start: uptrend baru {_streak} candle "
@@ -6438,6 +6653,12 @@ def master_score(symbol, ticker):
             "oi_accel_v27":     oi_accel_v27,
             "ob_vacuum_v27":    ob_vacuum_v27,
             "cvd_div_v27":      cvd_div_v27,
+            # v31 new fields
+            "squeeze_active":   squeeze_active,
+            "bbw_percentile":   round(_bbw_pct, 1),
+            "pre_close_bos":    pre_close_bos,
+            "horiz_break":      horiz_break,
+            "low_vol_accum":    accum.get("is_low_vol_accum", False),
         }
     else:
         log.info(f"  {symbol}: Skor {score} < {min_score} (WATCHLIST threshold) — dilewati")
@@ -6494,11 +6715,22 @@ def build_alert(r, rank=None):
     eta_e = pt.get("eta_emoji", "")
     urg   = pt.get("urgency", "")
 
-    msg  = f"{level_icon} <b>{r['symbol']} — {level_v18}</b>  #{rank}\n"
+    # v31: Squeeze mode indicator
+    sq_active    = r.get("squeeze_active", False)
+    bbw_pct      = r.get("bbw_percentile", 50.0)
+    pre_close    = r.get("pre_close_bos", False)
+    low_vol_acc  = r.get("low_vol_accum", False)
+    sq_tag       = f" 🗜️SQ{bbw_pct:.0f}%" if sq_active else ""
+    pcs_tag      = " ⚡PRE-BOS" if pre_close else ""
+    lva_tag      = " 🕵️LVA" if low_vol_acc else ""
+
+    msg  = f"{level_icon} <b>{r['symbol']} — {level_v18}</b>  #{rank}{sq_tag}{pcs_tag}{lva_tag}\n"
     msg += f"<b>Score :</b> {r['score']}  |  <b>Pump Prob:</b> {pump_prob}%\n"
     msg += f"<b>ETA   :</b> {eta_e} {eta} ({urg})\n"
     msg += f"<b>Type  :</b> {r['pump_type']}\n"
     msg += f"<b>Regime:</b> {market_regime}  |  <b>Scan:</b> {utc_now()}\n"
+    if sq_active:
+        msg += f"<b>🗜️ SQUEEZE MODE</b> — BBW percentile {bbw_pct:.0f}% (akumulasi pra-pump terdeteksi)\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
 
     # Harga & kondisi pasar
@@ -6806,7 +7038,7 @@ def build_alert(r, rank=None):
     z_rank   = r.get("rank_vol_z_v20", 0)
     mm_rank  = r.get("rank_mm_score", 0)
     ob_rank  = r.get("rank_ob_score", 1.0)
-    msg += (f"\n<i>Scanner v27 | Rank:{rank_val:.1f} | "
+    msg += (f"\n<i>Scanner v31 | Rank:{rank_val:.1f} | "
             f"MM:{mm_rank:.0f} | Z:{z_rank:.2f} | OB:{ob_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
@@ -6817,7 +7049,7 @@ def build_summary(results):
     """
     top5 = results[:5]
     msg  = (
-        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v27</b>\n"
+        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v31</b>\n"
         f"{utc_now()}\n"
         f"{'━'*30}\n"
     )
@@ -6912,24 +7144,48 @@ def build_candidate_list(tickers):
             filtered_stats["vol_too_high"] += 1
             continue
 
-        # FIX v30 FIX-2: gate_chg_24h_max KONTEKSTUAL.
-        # Sebelumnya flat 25% memblokir PIXEL+280%, TRUMP+60%, HUS+56%.
-        # Sekarang: cek apakah coin dalam squeeze panjang menggunakan BBW
-        # dari candle 1h. Jika squeeze → gunakan gate longgar (200%).
-        # Jika tidak squeeze → gunakan gate normal (50%).
-        # BBW dihitung cepat dari ticker saja jika candle tidak tersedia.
-        # Optimasi: gunakan cached BBW jika tersedia, fallback ke ticker.
+        # FIX v31 FIX-v31-7: BBW estimasi dari candle 1h BUKAN ticker high/low 24h.
+        # v30 memakai high24h/low24h sebagai proxy squeeze — ini salah.
+        # Setelah pump +280%, high24h sangat tinggi → range 24h besar →
+        # tidak dianggap squeeze → gate 50% → coin diblokir.
+        # v31: pakai candle dari cache (_cache), hitung std/mean (BBW nyata).
+        # Fallback ke ticker jika candle belum di-cache.
         _effective_gate = CONFIG["gate_chg_24h_max"]  # default 50%
         try:
-            # Quick BBW estimate dari ticker high/low 24h vs price
-            _h24 = float(ticker.get("high24h", price * 1.05) or price * 1.05)
-            _l24 = float(ticker.get("low24h",  price * 0.95) or price * 0.95)
-            _mid = (_h24 + _l24) / 2 if (_h24 + _l24) > 0 else price
-            _range_pct = ((_h24 - _l24) / _mid * 100) if _mid > 0 else 10.0
-            # Jika 24h range sangat sempit (< 6%) = potensi squeeze
-            # Gunakan gate longgar agar coin ini tetap masuk scan
-            if _range_pct < 6.0:
-                _effective_gate = CONFIG.get("gate_chg_24h_max_squeeze", 200.0)
+            _cache_key_cl = f"c_{sym}_1H_168"
+            _cached_cl    = _cache.get(_cache_key_cl)
+            if _cached_cl and (time.time() - _cached_cl[0] < 300) and len(_cached_cl[1]) >= 22:
+                _c1h_cand = _cached_cl[1]
+                _closes_c = [c["close"] for c in _c1h_cand[-20:]]
+                _mean_c   = sum(_closes_c) / 20
+                if _mean_c > 0:
+                    _var_c  = sum((x - _mean_c)**2 for x in _closes_c) / 20
+                    _bbw_c  = 4.0 * (_var_c**0.5) / _mean_c
+                    # Bandingkan vs historis 50 candle untuk percentile
+                    _hist_c = []
+                    for _ii in range(50, 0, -1):
+                        _sg = _c1h_cand[-(_ii+20):-_ii] if _ii > 0 else _c1h_cand[-20:]
+                        if len(_sg) < 20:
+                            continue
+                        _mc = sum(c["close"] for c in _sg) / 20
+                        if _mc <= 0:
+                            continue
+                        _vc = sum((c["close"]-_mc)**2 for c in _sg) / 20
+                        _hist_c.append(4.0 * (_vc**0.5) / _mc)
+                    if _hist_c:
+                        _rk = sum(1 for v in _hist_c if v <= _bbw_c)
+                        _pt = _rk / len(_hist_c) * 100
+                        if _pt <= CONFIG.get("squeeze_mode_bbw_percentile", 30):
+                            _effective_gate = CONFIG.get("gate_chg_24h_max_squeeze", 200.0)
+                    elif _bbw_c < 0.04:
+                        _effective_gate = CONFIG.get("gate_chg_24h_max_squeeze", 200.0)
+            else:
+                # Fallback: ticker range 24h
+                _h24 = float(ticker.get("high24h", price * 1.05) or price * 1.05)
+                _l24 = float(ticker.get("low24h",  price * 0.95) or price * 0.95)
+                _mid = (_h24 + _l24) / 2 if (_h24 + _l24) > 0 else price
+                if (_mid > 0) and ((_h24 - _l24) / _mid * 100) < 6.0:
+                    _effective_gate = CONFIG.get("gate_chg_24h_max_squeeze", 200.0)
         except Exception:
             pass  # fallback ke gate default
 
@@ -6955,7 +7211,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v30:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v31:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -6978,7 +7234,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v30 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v31 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -7102,29 +7358,25 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v30 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v31 — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v30                   ║")
-    log.info("║  LOOP OTOMATIS | LAS Detector | BOS +18 | Squeeze Scoring  ║")
-    log.info("║  gate_chg kontekstual | vol threshold 100K                 ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v31                   ║")
+    log.info("║  SQUEEZE MODE | PRE-CLOSE BOS | LOW-VOL ACCUM | ref_max=80 ║")
+    log.info("║  11 BUG FIX | gate bypass | BBW dari candle nyata          ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
         log.error("FATAL: BOT_TOKEN / CHAT_ID tidak ditemukan di .env!")
         exit(1)
 
-    # FIX v30 FIX-1: Loop otomatis — scanner berjalan terus menerus.
-    # Sebelumnya run_scan() dipanggil sekali lalu berhenti.
-    # Pump PIXEL dimulai jam 06:00 — jika scanner hanya run jam 08:00,
-    # coin sudah pump +40% dan diblokir gate. Scanner HARUS selalu running.
+    # Loop otomatis — scanner berjalan terus menerus.
     # Interval: 900 detik (15 menit) antar scan.
     # Satu scan penuh ~342 coin × 0.15s = ~51 detik.
-    # Jeda 15 menit = coin yang mulai pump akan terdeteksi maksimal 15 menit kemudian.
     SCAN_INTERVAL_SEC = 900  # 15 menit
 
     scan_count = 0
