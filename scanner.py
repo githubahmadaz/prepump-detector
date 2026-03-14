@@ -56,13 +56,13 @@ _ch.setFormatter(_log_fmt)
 _log_root.addHandler(_ch)
 
 _fh = _lh.RotatingFileHandler(
-    "/tmp/scanner_v31_1.log", maxBytes=10 * 1024 * 1024, backupCount=3
+    "/tmp/scanner_v31_2.log", maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _fh.setFormatter(_log_fmt)
 _log_root.addHandler(_fh)
 
 log = logging.getLogger(__name__)
-log.info("Scanner v31 — log aktif: /tmp/scanner_v31_1.log")
+log.info("Scanner v31 — log aktif: /tmp/scanner_v31_2.log")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIG
@@ -687,26 +687,38 @@ CONFIG = {
     "fresh_breakout_max_streak":    5,   # v31: diperluas dari 3 → 5
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  NEW v31.1: LATE ENTRY PENALTY
+    #  NEW v31.2 FIX-1: LATE ENTRY PENALTY
     # ══════════════════════════════════════════════════════════════════════════
-    # Masalah XVGUSDT: pump sudah +5%, vol spike 6.7x, BOS sudah > 3 candle.
-    # Scanner masih mengirim sinyal padahal entry sudah terlambat.
-    # Fix: jika vol_spike_ratio > threshold DAN uptrend streak > bos_max_age
-    #      → kurangi skor besar agar coin tidak muncul sebagai ALERT.
-    "late_entry_vol_spike_min":   4.0,   # vol spike > 4x = sudah momentum kuat
-    "late_entry_bos_age_min":     3,     # BOS sudah > 3 candle lalu = terlambat
-    "late_entry_penalty":        -25,    # penalti besar (turun dari ALERT ke WATCHLIST)
+    # Masalah: pump sudah berjalan (vol spike besar + streak panjang) tapi
+    # scanner tetap kirim ALERT karena squeeze bypass terlalu lebar.
+    # Dua aturan:
+    #   A) Late entry normal: vol>4x + streak>3 + bukan squeeze KUAT (p>15%) → -25
+    #   B) Late entry absolut: vol>10x + streak>3 + APAPUN squeeze-nya → -15
+    #      (karena vol 10x+ sangat jarang saat pre-pump, hampir pasti mid-pump)
+    "late_entry_vol_min":         4.0,   # threshold vol spike untuk late entry normal
+    "late_entry_vol_abs_min":    10.0,   # threshold absolut (bypass semua squeeze)
+    "late_entry_streak_min":      3,     # streak candle minimal untuk late entry
+    "late_entry_squeeze_pct":    15.0,   # BBW percentile batas squeeze "kuat"
+    "late_entry_penalty":        -25,    # penalti normal (bukan squeeze kuat)
+    "late_entry_penalty_abs":    -15,    # penalti absolut (vol ekstrem meski squeeze)
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  NEW v31.1: CONFLICT VETO
+    #  NEW v31.2 FIX-2: DISTRIBUSI FILTER
     # ══════════════════════════════════════════════════════════════════════════
-    # Masalah ARPAUSDT: scanner kirim alert berisi FAKE PUMP 3/4 + CVD distribusi.
-    # Dua sinyal negatif berat ini = kontradiksi fatal → alert tidak boleh dikirim.
-    # Veto aktif jika KEDUA kondisi terpenuhi:
-    #   fake_pump.n_cond >= conflict_fake_min (3 atau 4 kondisi fake)
-    #   cvd_div.is_bearish_div = True (distribusi terkonfirmasi)
-    # Jika hanya salah satu → penalti skor (bukan veto penuh).
-    "conflict_fake_min":          3,     # fake_pump kondisi minimal untuk veto
+    # Masalah SQDUSDT: posisi 65% range + 33% candle hijau = distribusi post-pump.
+    # Gate 6 (price_pos > 97%) terlalu longgar, tidak menangkap kasus ini.
+    # Filter: posisi range > 50% DAN mayoritas candle merah (< 40% hijau)
+    # → penalti besar. Bukan hard veto karena bisa jadi konsolidasi sebelum leg 2.
+    "dist_filter_pos_min":       0.50,   # posisi range minimal (> 50%)
+    "dist_filter_candle_max":    0.40,   # candle hijau maksimal (< 40%)
+    "dist_filter_penalty":       -20,    # penalti distribusi
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  NEW v31.2 FIX-3: CONFLICT VETO
+    # ══════════════════════════════════════════════════════════════════════════
+    # Masalah ARPAUSDT: alert berisi FAKE PUMP 3/4 + CVD distribusi bersamaan.
+    # Keduanya aktif = kontradiksi fatal → tidak dikirim.
+    "conflict_fake_min":          3,     # fake_pump kondisi minimal (dari 4)
     "conflict_veto_penalty":     -30,    # penalti jika hanya satu kondisi aktif
 }
 
@@ -906,8 +918,8 @@ WHITELIST_SYMBOLS = {
 "KERNELUSDT",
 "KGENUSDT",
 "KITEUSDT",
-"PEPEUSDT",
-"SHIBUSDT",
+"kPEPEUSDT",
+"kSHIBUSDT",
 "LAUSDT",
 "LABUSDT",
 "LAYERUSDT",
@@ -995,6 +1007,7 @@ WHITELIST_SYMBOLS = {
 "PYTHUSDT",
 "QUSDT",
 "QNTUSDT",
+"QQQUSDT",
 "RAVEUSDT",
 "RAYUSDT",
 "RDDTUSDT",
@@ -6170,7 +6183,6 @@ def master_score(symbol, ticker):
         )
 
     # ── 12b. Fresh Breakout Start — v31 FIX-v31-11 ──────────────────────────
-    # v30: hanya streak 1-3 candle. v31: diperluas ke 5 candle.
     # Coin baru naik 1-5 jam setelah akumulasi panjang = titik entry terbaik.
     _streak = uptrend.get("age_hours", 0)
     _fresh_max = CONFIG.get("fresh_breakout_max_streak", 5)
@@ -6182,40 +6194,114 @@ def master_score(symbol, ticker):
             f"— titik entry optimal setelah akumulasi (+{_fresh_bonus})"
         )
 
-    # ── 12c. Late Entry Penalty — FIX v31.1 ──────────────────────────────────
-    # Masalah XVGUSDT: pump sudah berjalan +5%, vol spike 6.7x, BOS lama.
-    # Scanner tetap mengirim STRONG ALERT padahal entry sudah terlambat.
+    # ── 12c. Late Entry Penalty — v31.2 FIX-v31.2-1 ─────────────────────────
+    # Masalah REZUSDT/XVGUSDT: pump sudah berjalan, vol spike besar, streak panjang.
+    # Dua aturan bertingkat:
     #
-    # Logika: pump yang SUDAH berjalan ditandai oleh:
-    #   1. vol_spike_ratio > 4x  → momentum kuat sudah berlangsung
-    #   2. uptrend_age > 3 candle → harga sudah naik > 3 jam berturutan
-    # Jika keduanya terpenuhi DAN bukan squeeze mode (akumulasi):
-    #   → kurangi skor -25 (turun dari ALERT ke WATCHLIST atau lebih rendah)
-    # Saat squeeze aktif dikecualikan karena vol spike dalam squeeze = awal pump
-    # yang masih layak dimasuki (bukan pump sudah jauh).
-    _late_vol_thr = CONFIG.get("late_entry_vol_spike_min", 4.0)
-    _late_age_thr = CONFIG.get("late_entry_bos_age_min", 3)
-    _late_penalty = CONFIG.get("late_entry_penalty", -25)
-    # Squeeze bypass hanya berlaku jika squeeze KUAT (BBW percentile ≤ 15%).
-    # Squeeze ringan (p=16-30%) tidak cukup untuk mengecualikan late entry penalty.
-    # Contoh: XVGUSDT p28% = squeeze ringan → late entry tetap berlaku.
-    # COINUSDT p6% = squeeze kuat → late entry dikecualikan (awal pump, bukan terlambat).
-    _squeeze_strong = squeeze_active and _bbw_pct <= 15.0
-    _is_late_entry = (
-        vol_spike.get("ratio", 0) > _late_vol_thr
-        and _streak > _late_age_thr
-        and not _squeeze_strong   # hanya squeeze KUAT yang dikecualikan
+    # ATURAN A (Normal): vol > 4x + streak > 3 + squeeze BUKAN kuat (p > 15%)
+    #   → penalti -25. Squeeze ringan (p=16-30%) tidak cukup melindungi dari late entry.
+    #   Squeeze kuat (p≤15%) dikecualikan karena breakout dari squeeze kuat masih valid.
+    #
+    # ATURAN B (Absolut): vol > 10x + streak > 3 — APAPUN kondisi squeeze
+    #   → penalti -15. Vol 10x+ hampir pasti mid-pump, bukan pre-pump.
+    #   Bahkan squeeze ekstrem (p=2%) tidak bisa justify entry saat vol 13x.
+    _late_vol_min     = CONFIG.get("late_entry_vol_min", 4.0)
+    _late_vol_abs     = CONFIG.get("late_entry_vol_abs_min", 10.0)
+    _late_streak_min  = CONFIG.get("late_entry_streak_min", 3)
+    _late_sq_pct      = CONFIG.get("late_entry_squeeze_pct", 15.0)
+    _late_pen         = CONFIG.get("late_entry_penalty", -25)
+    _late_pen_abs     = CONFIG.get("late_entry_penalty_abs", -15)
+    _vol_ratio_now    = vol_spike.get("ratio", 0)
+    _squeeze_strong   = squeeze_active and (_bbw_pct <= _late_sq_pct)
+
+    _is_late_abs    = (_vol_ratio_now > _late_vol_abs and _streak > _late_streak_min)
+    _is_late_normal = (
+        _vol_ratio_now > _late_vol_min
+        and _streak > _late_streak_min
+        and not _squeeze_strong
     )
-    if _is_late_entry:
-        score += _late_penalty
+
+    if _is_late_abs:
+        # Aturan B: vol ekstrem bypass semua squeeze — kurangi skor
+        score += _late_pen_abs
         signals.append(
-            f"⏰ LATE ENTRY: vol spike {vol_spike.get('ratio',0):.1f}x + "
-            f"uptrend {_streak} candle — pump sudah berjalan, entry terlambat "
-            f"({_late_penalty})"
+            f"⏰ LATE ENTRY (absolut): vol spike {_vol_ratio_now:.1f}x "
+            f"+ streak {_streak}h — pump sudah sangat jauh ({_late_pen_abs})"
         )
         log.info(
-            f"  {symbol}: Late entry penalty — vol {vol_spike.get('ratio',0):.1f}x "
-            f"+ streak {_streak}h, BBW p{_bbw_pct:.0f}% (bukan squeeze kuat) → skor {_late_penalty}"
+            f"  {symbol}: Late entry ABSOLUT — vol {_vol_ratio_now:.1f}x "
+            f"(>10x) + streak {_streak}h → penalti {_late_pen_abs}"
+        )
+    elif _is_late_normal:
+        # Aturan A: late entry normal — squeeze ringan tidak melindungi
+        score += _late_pen
+        signals.append(
+            f"⏰ LATE ENTRY: vol spike {_vol_ratio_now:.1f}x + "
+            f"streak {_streak}h, BBW p{_bbw_pct:.0f}% (squeeze ringan) "
+            f"— pump sudah berjalan ({_late_pen})"
+        )
+        log.info(
+            f"  {symbol}: Late entry normal — vol {_vol_ratio_now:.1f}x "
+            f"+ streak {_streak}h, squeeze p{_bbw_pct:.0f}% → penalti {_late_pen}"
+        )
+
+    # ── 12d. Distribusi Filter — v31.2 FIX-v31.2-2 ───────────────────────────
+    # Masalah SQDUSDT: posisi 65% range + 33% candle hijau.
+    # Ini adalah pola distribusi post-pump, bukan akumulasi pre-pump.
+    # Gate 6 (price_pos > 97%) terlalu longgar untuk menangkap kasus ini.
+    #
+    # Kondisi: posisi > 50% range DAN candle hijau < 40%
+    # → Penalti -20 (bukan veto karena bisa jadi konsolidasi sebelum leg 2)
+    # Pengecualian: jika ada liquidity sweep aktif (reversal setup) atau
+    # squeeze ekstrem (p≤10%) — kondisi ini bisa jadi akumulasi di tengah range.
+    _dist_pos_min     = CONFIG.get("dist_filter_pos_min", 0.50)
+    _dist_candle_max  = CONFIG.get("dist_filter_candle_max", 0.40)
+    _dist_penalty     = CONFIG.get("dist_filter_penalty", -20)
+    _candle_dir_frac  = candle_dir_ratio / 100.0  # candle_dir_ratio dalam %, konversi ke fraksi
+    _dist_exception   = _liq_sweep_active or (_bbw_pct <= 10.0)  # sweep atau squeeze ekstrem
+
+    if (price_pos_48 > _dist_pos_min
+            and _candle_dir_frac < _dist_candle_max
+            and not _dist_exception):
+        score += _dist_penalty
+        signals.append(
+            f"📉 Distribusi terdeteksi: posisi {price_pos_48:.0%} range + "
+            f"{candle_dir_ratio:.0f}% candle hijau — pola post-pump ({_dist_penalty})"
+        )
+        log.info(
+            f"  {symbol}: Distribusi filter — pos {price_pos_48:.0%} "
+            f"+ candle hijau {candle_dir_ratio:.0f}% → penalti {_dist_penalty}"
+        )
+
+    # ── 12e. Conflict Veto — v31.2 FIX-v31.2-3 ──────────────────────────────
+    # Masalah ARPAUSDT: alert berisi FAKE PUMP STRONG (3/4) + CVD distribusi.
+    # Dua sinyal negatif berat bersamaan = kontradiksi fatal.
+    #
+    # VETO PENUH (return None): fake_pump ≥ 3/4 DAN CVD bearish divergence
+    # PENALTI (skor -30): hanya satu yang aktif
+    _fake_n       = fake_pump.get("n_cond", 0)
+    _fake_min     = CONFIG.get("conflict_fake_min", 3)
+    _cvd_bearish  = cvd_div_v27.get("is_bearish_div", False)
+    _conf_pen     = CONFIG.get("conflict_veto_penalty", -30)
+    _fake_strong  = fake_pump.get("is_fake", False) and _fake_n >= _fake_min
+
+    if _fake_strong and _cvd_bearish:
+        log.info(
+            f"  {symbol}: CONFLICT VETO — fake_pump {_fake_n}/4 "
+            f"+ CVD bearish div aktif — distribusi terkonfirmasi ganda, SKIP"
+        )
+        return None
+
+    if _fake_strong and not _cvd_bearish:
+        score += _conf_pen
+        signals.append(
+            f"⚠️ Conflict: Fake Pump {_fake_n}/4 kondisi aktif ({_conf_pen})"
+        )
+
+    if _cvd_bearish and not _fake_strong:
+        score += _conf_pen
+        signals.append(
+            f"⚠️ Conflict: CVD distribusi aktif tanpa fake pump ({_conf_pen})"
         )
 
     # ── 13. Funding rate ──────────────────────────────────────────────────────
@@ -6608,60 +6694,6 @@ def master_score(symbol, ticker):
     # FIX v24: use lower threshold to produce 20-40 candidates
     min_score = CONFIG.get("score_watchlist_v24", CONFIG.get("score_watchlist_v23", CONFIG["score_watchlist"]))
 
-    # ── FIX v31.1: CONFLICT VETO ──────────────────────────────────────────────
-    # Masalah ARPAUSDT: scanner kirim ALERT yang di dalamnya sendiri berisi
-    # FAKE PUMP STRONG (3/4) + CVD Distribusi (-42%). Dua sinyal negatif berat
-    # ini adalah kontradiksi fatal — tidak boleh dikirim sebagai sinyal beli.
-    #
-    # Aturan:
-    #   VETO PENUH (return None):
-    #     fake_pump.n_cond >= 3  DAN  cvd_div.is_bearish_div = True
-    #     → Dua konfirmasi distribusi sekaligus = tidak ada sinyal bullish valid
-    #
-    #   PENALTI SKOR (bukan veto):
-    #     Hanya salah satu aktif → kurangi skor -30 (turun level tapi tidak dihapus)
-    #
-    # Pengecualian: saat squeeze aktif, fake_pump lebih sering false positive
-    # karena OI baseline belum tersedia (is_new=True). Veto tetap berlaku
-    # tapi hanya jika CVD distribusi juga terkonfirmasi.
-    _fake_n      = fake_pump.get("n_cond", 0)
-    _fake_min    = CONFIG.get("conflict_fake_min", 3)
-    _cvd_bearish = cvd_div_v27.get("is_bearish_div", False)
-    _conf_pen    = CONFIG.get("conflict_veto_penalty", -30)
-    _fake_strong = _fake_n >= _fake_min and fake_pump.get("is_fake", False)
-
-    if _fake_strong and _cvd_bearish:
-        # VETO PENUH — dua sinyal distribusi sekaligus
-        log.info(
-            f"  {symbol}: CONFLICT VETO — fake_pump {_fake_n}/4 cond "
-            f"+ CVD bearish divergence aktif — distribusi terkonfirmasi ganda, SKIP"
-        )
-        return None
-
-    if _fake_strong and not _cvd_bearish:
-        # Hanya fake pump kuat — penalti skor
-        score += _conf_pen
-        signals.append(
-            f"⚠️ Fake Pump Conflict: {_fake_n}/4 kondisi fake aktif "
-            f"— sinyal beli lemah ({_conf_pen})"
-        )
-        log.info(
-            f"  {symbol}: Fake pump {_fake_n}/4 tanpa CVD konfirmasi — "
-            f"penalti {_conf_pen} (tidak di-veto)"
-        )
-
-    if _cvd_bearish and not _fake_strong:
-        # Hanya CVD bearish — penalti skor
-        score += _conf_pen
-        signals.append(
-            f"⚠️ CVD Distribusi Conflict: harga naik tapi CVD turun "
-            f"— kemungkinan distribusi ({_conf_pen})"
-        )
-        log.info(
-            f"  {symbol}: CVD bearish div tanpa fake pump konfirmasi — "
-            f"penalti {_conf_pen} (tidak di-veto)"
-        )
-
     # FIX v25: hard-reject dump trap ONLY if score fell to or below zero
     # (net-negative signal = no bullish case remains after all bonuses)
     if dump_trap_reject and score <= 0:
@@ -6771,10 +6803,11 @@ def master_score(symbol, ticker):
             "pre_close_bos":    pre_close_bos,
             "horiz_break":      horiz_break,
             "low_vol_accum":    accum.get("is_low_vol_accum", False),
-            # v31.1 new fields
-            "late_entry":       _is_late_entry,
-            "conflict_fake_n":  _fake_n,
-            "conflict_cvd_bear": _cvd_bearish,
+            # v31.2 new fields
+            "late_entry_abs":   _is_late_abs,
+            "late_entry_norm":  _is_late_normal,
+            "dist_filtered":    (price_pos_48 > _dist_pos_min and _candle_dir_frac < _dist_candle_max and not _dist_exception),
+            "conflict_vetoed":  False,   # jika sampai sini berarti tidak di-veto
         }
     else:
         log.info(f"  {symbol}: Skor {score} < {min_score} (WATCHLIST threshold) — dilewati")
@@ -6831,24 +6864,33 @@ def build_alert(r, rank=None):
     eta_e = pt.get("eta_emoji", "")
     urg   = pt.get("urgency", "")
 
-    # v31: Squeeze mode indicator
+    # v31: Squeeze mode indicator + v31.2 warning tags
     sq_active    = r.get("squeeze_active", False)
     bbw_pct      = r.get("bbw_percentile", 50.0)
     pre_close    = r.get("pre_close_bos", False)
     low_vol_acc  = r.get("low_vol_accum", False)
-    late_entry   = r.get("late_entry", False)
+    late_abs     = r.get("late_entry_abs", False)
+    late_norm    = r.get("late_entry_norm", False)
+    dist_filt    = r.get("dist_filtered", False)
     sq_tag       = f" 🗜️SQ{bbw_pct:.0f}%" if sq_active else ""
     pcs_tag      = " ⚡PRE-BOS" if pre_close else ""
     lva_tag      = " 🕵️LVA" if low_vol_acc else ""
-    late_tag     = " ⏰LATE" if late_entry else ""
+    late_tag     = " ⏰LATE!" if (late_abs or late_norm) else ""
+    dist_tag     = " 📉DIST" if dist_filt else ""
 
-    msg  = f"{level_icon} <b>{r['symbol']} — {level_v18}</b>  #{rank}{sq_tag}{pcs_tag}{lva_tag}{late_tag}\n"
+    msg  = f"{level_icon} <b>{r['symbol']} — {level_v18}</b>  #{rank}{sq_tag}{pcs_tag}{lva_tag}{late_tag}{dist_tag}\n"
     msg += f"<b>Score :</b> {r['score']}  |  <b>Pump Prob:</b> {pump_prob}%\n"
     msg += f"<b>ETA   :</b> {eta_e} {eta} ({urg})\n"
     msg += f"<b>Type  :</b> {r['pump_type']}\n"
     msg += f"<b>Regime:</b> {market_regime}  |  <b>Scan:</b> {utc_now()}\n"
     if sq_active:
         msg += f"<b>🗜️ SQUEEZE MODE</b> — BBW percentile {bbw_pct:.0f}% (akumulasi pra-pump terdeteksi)\n"
+    if late_abs:
+        msg += f"<b>⏰ LATE ENTRY (absolut)</b> — vol spike sangat besar, pump kemungkinan sudah jauh\n"
+    elif late_norm:
+        msg += f"<b>⏰ LATE ENTRY</b> — momentum sudah berjalan, pertimbangkan entry lebih hati-hati\n"
+    if dist_filt:
+        msg += f"<b>📉 DISTRIBUSI TERDETEKSI</b> — posisi atas range + mayoritas candle merah\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
 
     # Harga & kondisi pasar
@@ -7156,7 +7198,7 @@ def build_alert(r, rank=None):
     z_rank   = r.get("rank_vol_z_v20", 0)
     mm_rank  = r.get("rank_mm_score", 0)
     ob_rank  = r.get("rank_ob_score", 1.0)
-    msg += (f"\n<i>Scanner v31.1 | Rank:{rank_val:.1f} | "
+    msg += (f"\n<i>Scanner v31.2 | Rank:{rank_val:.1f} | "
             f"MM:{mm_rank:.0f} | Z:{z_rank:.2f} | OB:{ob_rank:.2f} | ⚠️ Bukan financial advice</i>")
     return msg
 
@@ -7167,7 +7209,7 @@ def build_summary(results):
     """
     top5 = results[:5]
     msg  = (
-        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v31.1</b>\n"
+        f"📋 <b>TOP {len(top5)} PUMP CANDIDATES — Scanner v31.2</b>\n"
         f"{utc_now()}\n"
         f"{'━'*30}\n"
     )
@@ -7329,7 +7371,7 @@ def build_candidate_list(tickers):
                      if k not in ("excluded_keyword", "manual_exclude"))
     accounted  = will_scan + n_excluded + n_filtered + len(not_found)
 
-    log.info(f"\n📊 SCAN SUMMARY Scanner v31.1:")
+    log.info(f"\n📊 SCAN SUMMARY Scanner v31.2:")
     log.info(f"   Whitelist total  : {total} coins")
     log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
     log.info(f"   🚫 Excluded kw   : {n_excluded}")
@@ -7352,7 +7394,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v31.1 — {utc_now()} ===")
+    log.info(f"=== QUANTITATIVE PUMP DETECTION SCANNER v31.2 — {utc_now()} ===")
 
     load_funding_snapshots()
     log.info(f"Funding snapshots loaded: {len(_funding_snapshots)} coins di memori")
@@ -7476,16 +7518,16 @@ def run_scan():
             )
         time.sleep(2)
 
-    log.info(f"=== SELESAI Scanner v31.1 — {len(top)} alert terkirim ===")
+    log.info(f"=== SELESAI Scanner v31.2 — {len(top)} alert terkirim ===")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════════════╗")
-    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v31.1                 ║")
-    log.info("║  SQUEEZE MODE | PRE-CLOSE BOS | LOW-VOL ACCUM | ref_max=80 ║")
-    log.info("║  13 BUG FIX + LATE ENTRY PENALTY + CONFLICT VETO           ║")
+    log.info("║  QUANTITATIVE PUMP DETECTION SCANNER v31.2                 ║")
+    log.info("║  SQUEEZE MODE | LATE ENTRY | DISTRIBUSI | CONFLICT VETO    ║")
+    log.info("║  15 BUG FIX | LATE ENTRY | DISTRIBUSI | CONFLICT VETO      ║")
     log.info("╚══════════════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
