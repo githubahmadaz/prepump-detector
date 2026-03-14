@@ -100,7 +100,7 @@ CONFIG = {
 
     # ── Volume 24h total (USD) ────────────────────────────────────────────────
     "min_vol_24h":          10_000,
-    "max_vol_24h":      50_000_000,
+    "max_vol_24h":      500_000_000,
     "pre_filter_vol":       10_000,
 
     # ── Open Interest minimum filter ──────────────────────────────────────────
