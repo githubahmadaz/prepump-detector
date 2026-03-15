@@ -1,11 +1,11 @@
 name: Pre-Pump Scanner
 
-on:
+#on:
   schedule:
    - cron: '0 */1 * * *'   # setiap 2 jam sekali (menit 0)
   workflow_dispatch:
 
-jobs:
+#jobs:
   scan:
     runs-on: ubuntu-latest
 
