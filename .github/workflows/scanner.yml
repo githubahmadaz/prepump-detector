@@ -2,7 +2,7 @@ name: Pre-Pump Scanner
 
 #on:
   schedule:
-    cron: '0 */1 * * *'   # setiap 2 jam sekali (menit 0)
+  cron: '0 */1 * * *'   # setiap 2 jam sekali (menit 0)
   workflow_dispatch:
 
 #jobs:
@@ -10,10 +10,10 @@ name: Pre-Pump Scanner
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+       name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+       name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -31,10 +31,10 @@ name: Pre-Pump Scanner
           restore-keys: |
             scanner-cooldown-
 
-      - name: Install dependencies
+      name: Install dependencies
         run: pip install ccxt pandas numpy requests
 
-      - name: Run scanner
+       name: Run scanner
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
@@ -42,5 +42,3 @@ name: Pre-Pump Scanner
 
       # actions/cache otomatis menyimpan cooldown.json yang baru
       # ke cache setelah job selesai — tidak perlu step tambahan
-
-
