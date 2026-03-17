@@ -3,6 +3,7 @@
 ║  SUPPORT HUNTER SCANNER — Anti-SL Pump Entry at Strong Support             ║
 ║  Based on "Support and Resistance (High Volume Boxes) [ChartPrime]"        ║
 ║  Detects altcoins sitting on high‑volume support zones ready to bounce.    ║
+║  Dilengkapi semua fungsi pendukung dari scanner v28 agar dapat berdiri sendiri ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -97,24 +98,336 @@ CONFIG = {
     "tp2_atr_mult":            3.5,
 }
 
-# Exclusions and whitelist same as original
+# ── Whitelist (salin dari scanner_v28, di sini hanya contoh singkat) ─────────
+WHITELIST_SYMBOLS = {
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT",
+    "SHIBUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "AVAXUSDT", "UNIUSDT", "ATOMUSDT",
+    "ALGOUSDT", "VETUSDT", "FILUSDT", "ICPUSDT", "THETAUSDT", "XTZUSDT", "EOSUSDT",
+    "AAVEUSDT", "MKRUSDT", "COMPUSDT", "YFIUSDT", "SNXUSDT", "SUSHIUSDT", "CRVUSDT",
+    "1INCHUSDT", "ENJUSDT", "MANAUSDT", "SANDUSDT", "AXSUSDT", "SLPUSDT", "CHZUSDT",
+    "BATUSDT", "ZILUSDT", "KSMUSDT", "NEARUSDT", "MINAUSDT", "FLOWUSDT", "QNTUSDT",
+    "EGLDUSDT", "FTMUSDT", "CAKEUSDT", "BAKEUSDT", "ALPHAUSDT", "ALICEUSDT", "TLMUSDT",
+    "RAYUSDT", "SRMUSDT", "FTTUSDT", "HNTUSDT", "ANKRUSDT", "CELOUSDT", "ZRXUSDT",
+    "DASHUSDT", "XMRUSDT", "ZECUSDT", "ETCUSDT", "LRCUSDT", "IMXUSDT", "GALAUSDT",
+    "DARUSDT", "RUNEUSDT", "KAVAUSDT", "IOTXUSDT", "AUDIOUSDT", "GODSUSDT", "C98USDT",
+    "CLVUSDT", "LITUSDT", "DYDXUSDT", "ENSUSDT", "PEOPLEUSDT", "APEUSDT", "LOOKSUSDT",
+    "GSTUSDT", "GMTUSDT", "APTUSDT", "LDOUSDT", "OPUSDT", "ARBUSDT", "MAGICUSDT",
+    "RNDRUSDT", "FETUSDT", "AGIXUSDT", "OCEANUSDT", "COTIUSDT", "STXUSDT", "GLMRUSDT",
+    "MOVRUSDT", "CFXUSDT", "KASUSDT", "SUIUSDT", "TIAUSDT", "SEIUSDT", "MEMEUSDT",
+    "ORDIUSDT", "SATSUSDT", "RATSUSDT", "PEPEUSDT", "BONKUSDT", "WIFUSDT", "JUPUSDT",
+    "PYTHUSDT", "JTOUSDT", "TNSRUSDT", "ENAUSDT", "ETHFIUSDT", "REZUSDT", "BBUSDT",
+    "NOTUSDT", "DOGSUSDT", "HMSTRUSDT", "CATIUSDT", "NEIROUSDT", "GOATUSDT",
+}
+
 MANUAL_EXCLUDE = set()
 EXCLUDED_KEYWORDS = ["XAU", "PAXG", "BTC", "ETH", "USDC", "DAI", "BUSD", "UST"]
-WHITELIST_SYMBOLS = { ... }   # (same as original, omitted for brevity – use the full list from scanner_v28)
 
 GRAN_MAP    = {"5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
 BITGET_BASE = "https://api.bitget.com"
 _cache      = {}
 
-# ── Cooldown, Funding, OI snapshots (same as original) ───────────────────────
-# (copy load_cooldown, save_cooldown, load_funding_snapshots, etc. unchanged)
-# ... (omitted for brevity – include all those functions from scanner_v28)
+# ══════════════════════════════════════════════════════════════════════════════
+#  🔒  COOLDOWN (dari scanner_v28)
+# ══════════════════════════════════════════════════════════════════════════════
+def load_cooldown():
+    try:
+        p = CONFIG["cooldown_file"]
+        if os.path.exists(p):
+            with open(p) as f:
+                data = json.load(f)
+            now = time.time()
+            return {k: v for k, v in data.items()
+                    if now - v < CONFIG["alert_cooldown_sec"]}
+    except Exception:
+        pass
+    return {}
+
+def save_cooldown(state):
+    try:
+        with open(CONFIG["cooldown_file"], "w") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+_cooldown = load_cooldown()
+log.info(f"Cooldown aktif: {len(_cooldown)} coin")
+
+def is_cooldown(sym):
+    return (time.time() - _cooldown.get(sym, 0)) < CONFIG["alert_cooldown_sec"]
+
+def set_cooldown(sym):
+    _cooldown[sym] = time.time()
+    save_cooldown(_cooldown)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📡  DATA FETCHERS (same as original)
+#  💾  FUNDING SNAPSHOTS
 # ══════════════════════════════════════════════════════════════════════════════
-# (include get_all_tickers, get_candles, get_funding, get_btc_candles_cached,
-#  get_funding_stats, get_open_interest, get_oi_change – identical to original)
+_funding_snapshots = {}
+_btc_candles_cache = {"ts": 0, "data": []}
+
+def load_funding_snapshots():
+    global _funding_snapshots
+    try:
+        p = CONFIG["funding_snapshot_file"]
+        if os.path.exists(p):
+            with open(p) as f:
+                _funding_snapshots = json.load(f)
+    except Exception:
+        _funding_snapshots = {}
+
+def save_all_funding_snapshots():
+    try:
+        with open(CONFIG["funding_snapshot_file"], "w") as f:
+            json.dump(_funding_snapshots, f)
+    except Exception:
+        pass
+
+def add_funding_snapshot(symbol, funding_rate):
+    if symbol not in _funding_snapshots:
+        _funding_snapshots[symbol] = []
+    _funding_snapshots[symbol].append({
+        "ts":      time.time(),
+        "funding": funding_rate,
+    })
+    # Simpan hanya 48 snapshot terakhir per coin
+    if len(_funding_snapshots[symbol]) > 48:
+        _funding_snapshots[symbol] = _funding_snapshots[symbol][-48:]
+
+def get_funding_stats(symbol):
+    snaps = _funding_snapshots.get(symbol, [])
+    if len(snaps) < 2:
+        return None
+    all_rates = [s["funding"] for s in snaps]
+    last6     = all_rates[-6:]
+    avg6      = sum(last6) / len(last6)
+    cumul     = sum(last6)
+    neg_pct   = sum(1 for f in last6 if f < 0) / len(last6) * 100
+    streak    = 0
+    for f in reversed(all_rates):
+        if f < 0:
+            streak += 1
+        else:
+            break
+    return {
+        "avg":          avg6,
+        "cumulative":   cumul,
+        "neg_pct":      neg_pct,
+        "streak":       streak,
+        "basis":        all_rates[-1] * 100,
+        "current":      all_rates[-1],
+        "sample_count": len(all_rates),
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  💾  OI SNAPSHOTS
+# ══════════════════════════════════════════════════════════════════════════════
+_oi_snapshot = {}
+
+def load_oi_snapshots():
+    global _oi_snapshot
+    try:
+        p = CONFIG["oi_snapshot_file"]
+        if os.path.exists(p):
+            with open(p) as f:
+                data = json.load(f)
+            now = time.time()
+            _oi_snapshot = {
+                sym: v for sym, v in data.items()
+                if now - v.get("ts", 0) < 7200
+            }
+            log.info(f"OI snapshots loaded: {len(_oi_snapshot)} coins")
+        else:
+            _oi_snapshot = {}
+    except Exception:
+        _oi_snapshot = {}
+
+def save_oi_snapshots():
+    try:
+        with open(CONFIG["oi_snapshot_file"], "w") as f:
+            json.dump(_oi_snapshot, f)
+    except Exception:
+        pass
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🌐  HTTP HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+def safe_get(url, params=None, timeout=10):
+    for attempt in range(2):
+        try:
+            r = _http_session.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                log.warning("Rate limit — tunggu 15s, lalu retry")
+                time.sleep(15)
+                continue
+            break
+        except Exception:
+            if attempt == 0:
+                time.sleep(CONFIG["sleep_error"])
+    return None
+
+def _safe_telegram_text(msg):
+    # sanitasi sederhana
+    import re
+    msg = re.sub(r'&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', msg)
+    return msg
+
+def send_telegram(msg, parse_mode="HTML"):
+    if not BOT_TOKEN or not CHAT_ID:
+        log.warning("send_telegram: BOT_TOKEN atau CHAT_ID tidak ada!")
+        return False
+    if len(msg) > 4000:
+        msg = msg[:3900] + "\n\n<i>...[dipotong]</i>"
+    msg = _safe_telegram_text(msg)
+    for attempt in range(2):
+        try:
+            payload = {"chat_id": CHAT_ID, "text": msg}
+            if attempt == 0:
+                payload["parse_mode"] = "HTML"
+            r = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                data=payload,
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return True
+            err_text = r.text[:300]
+            if "can't parse" in err_text or "Bad Request" in err_text:
+                log.warning(f"Telegram parse error attempt {attempt} — retry plain text")
+                msg = _html_mod.unescape(msg)
+                msg = msg.replace("<b>","").replace("</b>","")
+                msg = msg.replace("<i>","").replace("</i>","")
+                continue
+            log.warning(f"Telegram gagal: HTTP {r.status_code}")
+            return False
+        except Exception as e:
+            log.warning(f"Telegram exception attempt {attempt}: {e}")
+            if attempt == 0:
+                time.sleep(2)
+    return False
+
+def utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  📡  DATA FETCHERS
+# ══════════════════════════════════════════════════════════════════════════════
+def get_all_tickers():
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/tickers",
+        params={"productType": "usdt-futures"},
+    )
+    if data and data.get("code") == "00000":
+        return {t["symbol"]: t for t in data.get("data", [])}
+    return {}
+
+def get_candles(symbol, gran="1h", limit=168):
+    g   = GRAN_MAP.get(gran, "1H")
+    key = f"c_{symbol}_{g}_{limit}"
+    if key in _cache:
+        ts, val = _cache[key]
+        if time.time() - ts < 90:
+            return val
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/candles",
+        params={
+            "symbol":       symbol,
+            "granularity":  g,
+            "limit":        str(limit),
+            "productType":  "usdt-futures",
+        },
+    )
+    if not data or data.get("code") != "00000":
+        return []
+    candles = []
+    for c in data.get("data", []):
+        try:
+            vol_usd = float(c[6]) if len(c) > 6 else float(c[5]) * float(c[4])
+            candles.append({
+                "ts":         int(c[0]),
+                "open":       float(c[1]),
+                "high":       float(c[2]),
+                "low":        float(c[3]),
+                "close":      float(c[4]),
+                "volume":     float(c[5]),
+                "volume_usd": vol_usd,
+            })
+        except Exception:
+            continue
+    candles.sort(key=lambda x: x["ts"])
+    _cache[key] = (time.time(), candles)
+    return candles
+
+def get_funding(symbol):
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/current-fund-rate",
+        params={"symbol": symbol, "productType": "usdt-futures"},
+    )
+    if data and data.get("code") == "00000":
+        try:
+            d_list = data.get("data") or []
+            if d_list:
+                return float(d_list[0].get("fundingRate", 0))
+        except Exception:
+            pass
+    return 0.0
+
+def get_btc_candles_cached(limit=48):
+    global _btc_candles_cache
+    if time.time() - _btc_candles_cache["ts"] < 300 and _btc_candles_cache["data"]:
+        return _btc_candles_cache["data"]
+    candles = get_candles("BTCUSDT", "1h", limit)
+    if candles:
+        _btc_candles_cache = {"ts": time.time(), "data": candles}
+    return candles
+
+def get_open_interest(symbol):
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/open-interest",
+        params={"symbol": symbol, "productType": "usdt-futures"},
+    )
+    if data and data.get("code") == "00000":
+        try:
+            d = data["data"]
+            if isinstance(d, list) and d:
+                d = d[0]
+            elif isinstance(d, list):
+                return 0.0
+            if "openInterestList" in d:
+                oi_list = d.get("openInterestList") or []
+                if oi_list:
+                    oi = float(oi_list[0].get("openInterest", 0))
+                else:
+                    oi = float(d.get("openInterest", d.get("holdingAmount", 0)))
+            else:
+                oi = float(d.get("openInterest", d.get("holdingAmount", 0)))
+            price = float(d.get("indexPrice", d.get("lastPr", 0)) or 0)
+            if 0 < oi < 1e9 and price > 0:
+                return oi * price
+            return oi
+        except Exception:
+            pass
+    return 0.0
+
+def get_oi_change(symbol):
+    global _oi_snapshot
+    oi_now = get_open_interest(symbol)
+    prev   = _oi_snapshot.get(symbol)
+    if prev is None or oi_now <= 0:
+        if oi_now > 0:
+            _oi_snapshot[symbol] = {"ts": time.time(), "oi": oi_now}
+        return {"oi_now": oi_now, "oi_prev": 0.0, "change_pct": 0.0, "is_new": True}
+    oi_prev    = prev["oi"]
+    change_pct = ((oi_now - oi_prev) / oi_prev * 100) if oi_prev > 0 else 0.0
+    _oi_snapshot[symbol] = {"ts": time.time(), "oi": oi_now}
+    return {
+        "oi_now":     round(oi_now, 2),
+        "oi_prev":    round(oi_prev, 2),
+        "change_pct": round(change_pct, 2),
+        "is_new":     False,
+    }
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  🆕  SUPPORT/RESISTANCE CORE FUNCTIONS
@@ -136,12 +449,6 @@ def calc_delta_volume(candles):
     return deltas
 
 def find_pivot_highs(candles, lookback):
-    """
-    Return list of (index, high, delta_vol) for pivot highs.
-    A pivot high is where high is greater than all highs in previous `lookback`
-    and next `lookback` candles. Since we only have past data, we only consider
-    candles that have at least `lookback` candles after them.
-    """
     pivots = []
     n = len(candles)
     for i in range(lookback, n - lookback):
@@ -162,7 +469,6 @@ def find_pivot_lows(candles, lookback):
     return pivots
 
 def calc_atr_at_index(candles, idx, period=14):
-    """Compute ATR at given index using preceding period candles."""
     if idx < period:
         return 0.0
     trs = []
@@ -176,20 +482,6 @@ def calc_atr_at_index(candles, idx, period=14):
     return sum(trs) / len(trs) if trs else 0.0
 
 def find_support_boxes(candles, deltas, lookback, vol_len, box_width):
-    """
-    Generate support boxes from pivot lows with volume confirmation.
-    Returns list of dicts: {
-        "type": "support",
-        "pivot_idx": int,
-        "level": float,
-        "zone_low": float,
-        "zone_high": float,
-        "delta_vol": float,
-        "atr": float,
-        "vol_ratio": float,   # delta / avg_abs_delta
-    }
-    """
-    # Compute rolling average of absolute delta over vol_len
     abs_deltas = [abs(d) for d in deltas]
     avg_abs_delta = []
     for i in range(len(deltas)):
@@ -218,9 +510,6 @@ def find_support_boxes(candles, deltas, lookback, vol_len, box_width):
     return boxes
 
 def find_resistance_boxes(candles, deltas, lookback, vol_len, box_width):
-    """
-    Similar for resistance (pivot highs with negative delta volume).
-    """
     abs_deltas = [abs(d) for d in deltas]
     avg_abs_delta = []
     for i in range(len(deltas)):
@@ -249,25 +538,16 @@ def find_resistance_boxes(candles, deltas, lookback, vol_len, box_width):
     return boxes
 
 def is_box_broken(candles, box, current_idx):
-    """
-    Check if price has closed below the box's zone_low (for support) since its formation.
-    If any candle close < zone_low, box is broken.
-    """
     for i in range(box["pivot_idx"], current_idx + 1):
         if candles[i]["close"] < box["zone_low"]:
             return True
     return False
 
 def find_active_support(candles, deltas, current_price, current_idx):
-    """
-    Find the strongest active support box below current price.
-    Returns box dict or None.
-    """
     boxes = find_support_boxes(candles, deltas,
                                lookback=CONFIG["support_lookback"],
                                vol_len=CONFIG["support_vol_len"],
                                box_width=CONFIG["support_box_width"])
-    # Filter boxes that are not too old and not broken
     active = []
     for b in boxes:
         age = current_idx - b["pivot_idx"]
@@ -275,27 +555,20 @@ def find_active_support(candles, deltas, current_price, current_idx):
             continue
         if is_box_broken(candles, b, current_idx):
             continue
-        # Box must be below current price (support is below)
         if b["zone_high"] > current_price:
             continue
         active.append(b)
-
     if not active:
         return None
-
-    # Choose the box with highest level (closest to price)
     active.sort(key=lambda x: x["level"], reverse=True)
     return active[0]
 
 def score_support_box(box, candles, current_price, current_idx, deltas, oi_data, funding):
-    """
-    Compute a score for the support box.
-    """
     score = 0
     signals = []
 
-    # Volume strength at pivot (normalized by average)
-    vol_score = min(box["vol_ratio"] * 5, 10)   # cap at 10
+    # Volume strength at pivot
+    vol_score = min(box["vol_ratio"] * 5, 10)
     score += vol_score
     signals.append(f"📊 Delta Volume: {box['vol_ratio']:.1f}x avg → +{vol_score:.0f}")
 
@@ -309,8 +582,7 @@ def score_support_box(box, candles, current_price, current_idx, deltas, oi_data,
         score += prox_score // 2
         signals.append(f"📍 Price {dist_to_level:.1f}% above support (moderate) → +{prox_score//2}")
 
-    # Recent bullish candles (after last touch of support zone)
-    # Look for candles that closed higher after touching the zone
+    # Recent bullish candles after support touch
     touch_idx = None
     for i in range(current_idx, box["pivot_idx"], -1):
         if candles[i]["low"] <= box["zone_high"] and candles[i]["close"] > candles[i]["open"]:
@@ -325,18 +597,18 @@ def score_support_box(box, candles, current_price, current_idx, deltas, oi_data,
             score += CONFIG["score_recent_bullish"]
             signals.append(f"🟢 Bullish candles after support touch → +{CONFIG['score_recent_bullish']}")
 
-    # Freshness (younger is better)
+    # Freshness
     age = current_idx - box["pivot_idx"]
     if age < 20:
         score += CONFIG["score_freshness"]
         signals.append(f"⏱️ Fresh support ({age} candles) → +{CONFIG['score_freshness']}")
 
-    # OI confirmation (if available)
+    # OI confirmation
     if not oi_data.get("is_new") and oi_data["change_pct"] > 3.0:
         score += CONFIG["score_oi_confirmation"]
         signals.append(f"📈 OI +{oi_data['change_pct']:.1f}% → +{CONFIG['score_oi_confirmation']}")
 
-    # Funding negative (short squeeze potential)
+    # Funding negative
     if funding < 0:
         score += CONFIG["score_funding_neg"]
         signals.append(f"💸 Funding {funding*100:.3f}% neg → +{CONFIG['score_funding_neg']}")
@@ -362,31 +634,25 @@ def master_score_support(symbol, ticker):
     if vol_24h < CONFIG["min_vol_24h"] or vol_24h > CONFIG["max_vol_24h"]:
         return None
 
-    # OI data (optional)
+    # OI & funding
     oi_data = get_oi_change(symbol)
     funding = get_funding(symbol)
     add_funding_snapshot(symbol, funding)
 
-    # Compute delta volume
     deltas = calc_delta_volume(c1h)
-
     current_idx = len(c1h) - 1
-
-    # Find active support
     box = find_active_support(c1h, deltas, price_now, current_idx)
     if not box:
         log.info(f"  {symbol}: Tidak ada support aktif")
         return None
 
-    # Score the setup
     score, signals = score_support_box(box, c1h, price_now, current_idx, deltas, oi_data, funding)
 
-    # Minimum score threshold
     if score < CONFIG["min_score_support"]:
         log.info(f"  {symbol}: Support score {score} < {CONFIG['min_score_support']}")
         return None
 
-    # Determine alert level
+    # Alert level
     if score >= 60:
         alert_level = "STRONG ALERT"
     elif score >= 45:
@@ -401,7 +667,6 @@ def master_score_support(symbol, ticker):
     tp1   = entry + atr * CONFIG["tp_atr_mult"]
     tp2   = entry + atr * CONFIG["tp2_atr_mult"]
 
-    # Build result dict
     return {
         "symbol": symbol,
         "score": score,
@@ -424,7 +689,7 @@ def master_score_support(symbol, ticker):
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📱  TELEGRAM FORMATTER (adapted)
+#  📱  TELEGRAM FORMATTER
 # ══════════════════════════════════════════════════════════════════════════════
 def _fmt_price(p):
     if p == 0: return "0"
@@ -484,11 +749,79 @@ def build_summary(results):
     return msg
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🔍  BUILD CANDIDATE LIST (same as original, uses WHITELIST_SYMBOLS)
+#  🔍  BUILD CANDIDATE LIST
 # ══════════════════════════════════════════════════════════════════════════════
 def build_candidate_list(tickers):
-    # (identical to original scanner's function, returns list of (sym, ticker))
-    ...
+    all_candidates = []
+    not_found      = []
+    filtered_stats = defaultdict(int)
+
+    log.info("=" * 70)
+    log.info("🔍 SCANNING WHITELIST")
+    log.info("=" * 70)
+
+    for sym in WHITELIST_SYMBOLS:
+        if any(kw in sym for kw in EXCLUDED_KEYWORDS):
+            filtered_stats["excluded_keyword"] += 1
+            continue
+        if sym in MANUAL_EXCLUDE:
+            filtered_stats["manual_exclude"] += 1
+            continue
+        if is_cooldown(sym):
+            filtered_stats["cooldown"] += 1
+            continue
+        if sym not in tickers:
+            not_found.append(sym)
+            continue
+        ticker = tickers[sym]
+        try:
+            vol   = float(ticker.get("quoteVolume", 0))
+            chg   = float(ticker.get("change24h",   0)) * 100
+            price = float(ticker.get("lastPr",       0))
+        except Exception:
+            filtered_stats["parse_error"] += 1
+            continue
+        if vol < CONFIG["pre_filter_vol"]:
+            filtered_stats["vol_too_low"] += 1
+            continue
+        if vol > CONFIG["max_vol_24h"]:
+            filtered_stats["vol_too_high"] += 1
+            continue
+        # Batasi perubahan 24h agar tidak terlalu ekstrem (opsional)
+        if chg > 30.0:
+            filtered_stats["change_too_high"] += 1
+            continue
+        if chg < -15.0:
+            filtered_stats["dump_too_deep"] += 1
+            continue
+        if price <= 0:
+            filtered_stats["invalid_price"] += 1
+            continue
+        all_candidates.append((sym, ticker))
+
+    total = len(WHITELIST_SYMBOLS)
+    will_scan = len(all_candidates)
+    n_excluded = filtered_stats.get("excluded_keyword", 0) + filtered_stats.get("manual_exclude", 0)
+    n_filtered = sum(v for k, v in filtered_stats.items() if k not in ("excluded_keyword", "manual_exclude"))
+    accounted = will_scan + n_excluded + n_filtered + len(not_found)
+
+    log.info(f"\n📊 SCAN SUMMARY:")
+    log.info(f"   Whitelist total  : {total} coins")
+    log.info(f"   ✅ Will scan     : {will_scan} ({will_scan/total*100:.1f}%)")
+    log.info(f"   🚫 Excluded kw   : {n_excluded}")
+    log.info(f"   ❌ Filtered      : {n_filtered}")
+    log.info(f"   ⚠️  Not in Bitget : {len(not_found)}")
+    log.info(f"   ✔️  Akuntabel     : {accounted}/{total}")
+    log.info(f"\n📋 Filter breakdown:")
+    for k, v in sorted(filtered_stats.items()):
+        log.info(f"   {k:25s}: {v}")
+    if not_found:
+        sample = ", ".join(not_found[:10])
+        log.info(f"\n   Missing sample   : {sample}{' ...' if len(not_found) > 10 else ''}")
+    est_secs = will_scan * CONFIG["sleep_coins"]
+    log.info(f"\n⏱️  Est. scan time: {est_secs:.0f}s (~{est_secs/60:.1f} min)")
+    log.info("=" * 70 + "\n")
+    return all_candidates
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  🚀  MAIN SCAN
@@ -503,12 +836,13 @@ def run_scan():
     if not tickers:
         send_telegram("⚠️ Scanner Error: Gagal ambil data Bitget")
         return
+    log.info(f"Total ticker dari Bitget: {len(tickers)}")
 
     candidates = build_candidate_list(tickers)
     results = []
 
     for i, (sym, t) in enumerate(candidates):
-        if (i+1) % 10 == 0:
+        if (i + 1) % 10 == 0:
             log.info(f"[{i+1}/{len(candidates)}] {sym}...")
         try:
             res = master_score_support(sym, t)
@@ -522,6 +856,7 @@ def run_scan():
 
     save_all_funding_snapshots()
     save_oi_snapshots()
+    log.info("Funding dan OI snapshots disimpan ke disk.")
 
     results.sort(key=lambda x: x["score"], reverse=True)
     log.info(f"\nLolos threshold: {len(results)} coin")
