@@ -57,7 +57,7 @@ CONFIG = {
 
     # ── Volume 24h filter ────────────────────────────────────────────────────
     "min_vol_24h":          10_000,
-    "max_vol_24h":      50_000_000,
+    "max_vol_24h":      999_000_000,
     "pre_filter_vol":       10_000,
 
     # ── Open Interest minimum (optional) ──────────────────────────────────────
