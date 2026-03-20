@@ -2091,6 +2091,126 @@ def compute_vacuum_score(ask_volume_near=None, rolling_mean_ask=None):
 #  synergy bonuses, late-entry scaling, phase reclassification,
 #  amplification and final clamp.
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  🔴  v3.6 — PRESSURE DETECTION LAYER
+#  Pure additive overlay — zero changes to existing scoring logic.
+#  Window N = CONFIG["vol_avg_long"] (20) — identical to volume normalization.
+# ══════════════════════════════════════════════════════════════════════════════
+def compute_pressure_layer(candles, absorption_score, flow_score):
+    """
+    Detects hidden accumulation, slow buildup, and volume/price divergence.
+
+    Window N uses vol_avg_long (existing system window) — no new windows.
+    All z-scores use the same rolling N, same formula:
+        z = (x - rolling_mean(x, N)) / rolling_std(x, N)
+    All outputs normalised 0–1. No binary logic.
+
+    Returns (pressure_score float [0,1], details_dict).
+    """
+    N = CONFIG.get("vol_avg_long", 20)   # SAME N as volume normalization
+    n = len(candles)
+
+    if n < N + 3:
+        return 0.0, {
+            "pressure_score": 0.0, "vol_price_divergence": 0.0,
+            "micro_accumulation": 0.0, "compression_tightness": 0.0,
+            "volume_z": 0.0, "price_change_z": 0.0,
+        }
+
+    # ── Shared rolling helpers (same N, same formula everywhere) ──────────────
+    def _rolling_zscore(value, series_n):
+        """z = (x - mean(series_N)) / std(series_N)"""
+        if len(series_n) < 2:
+            return 0.0
+        mu  = _mean(series_n)
+        sig = _std(series_n)
+        return (value - mu) / sig if sig > 0 else 0.0
+
+    # ── Section 1: Volume vs Price Divergence ─────────────────────────────────
+    # volume_z = zscore(volume) using same N
+    vols    = [c["volume_usd"] for c in candles[-N:]]
+    cur_vol = candles[-1]["volume_usd"]
+    volume_z = _rolling_zscore(cur_vol, vols)
+
+    # price_change_z = zscore(price_return) using same N
+    returns_n = [
+        (candles[-i]["close"] - candles[-i - 1]["close"]) / candles[-i - 1]["close"]
+        if candles[-i - 1]["close"] > 0 else 0.0
+        for i in range(1, N + 1)
+        if i + 1 <= n
+    ]
+    cur_return = returns_n[0] if returns_n else 0.0
+    price_change_z = _rolling_zscore(cur_return, returns_n)
+
+    # vol_price_divergence = clamp((volume_z - abs(price_change_z)) / 2.0, 0, 1)
+    vol_price_divergence = max(0.0, min(1.0,
+        (volume_z - abs(price_change_z)) / 2.0
+    ))
+
+    # ── Section 2: Micro Accumulation ─────────────────────────────────────────
+    # Higher low: current_low > previous_low (candle LOW values only)
+    recent_lows = [candles[-i]["low"] for i in range(1, min(N + 1, n + 1))]
+    recent_lows.reverse()   # chronological order: oldest first
+
+    hl_count = sum(
+        1 for i in range(1, len(recent_lows))
+        if recent_lows[i] > recent_lows[i - 1]
+    )
+    hl_ratio = hl_count / max(len(recent_lows) - 1, 1)
+    micro_accumulation = max(0.0, min(1.0, hl_ratio))
+
+    # ── Section 3: Compression Tightness ──────────────────────────────────────
+    # range = high - low (absolute); rolling mean of range over N candles
+    ranges_n = [c["high"] - c["low"] for c in candles[-N:]]
+    cur_range = candles[-1]["high"] - candles[-1]["low"]
+    range_avg = _mean(ranges_n) if ranges_n else cur_range
+
+    # compression_tightness = clamp(1 - (range / range_avg), 0, 1)
+    if range_avg > 0:
+        compression_tightness = max(0.0, min(1.0, 1.0 - (cur_range / range_avg)))
+    else:
+        compression_tightness = 0.0
+
+    # ── Section 4: Base Pressure Score ────────────────────────────────────────
+    pressure_score = (
+        0.4 * vol_price_divergence
+        + 0.3 * micro_accumulation
+        + 0.3 * compression_tightness
+    )
+
+    # ── Section 5: Absorption Confirmation ────────────────────────────────────
+    if pressure_score > 0.5 and absorption_score > 0.5:
+        pressure_score += 0.3
+
+    # ── Section 6: Flow Confirmation ──────────────────────────────────────────
+    if flow_score > 0.4 and pressure_score > 0.5:
+        pressure_score += 0.2
+
+    # ── Section 7: Noise Control ──────────────────────────────────────────────
+    if volume_z < -0.5:
+        pressure_score *= 0.6
+
+    if compression_tightness < 0.2:
+        pressure_score *= 0.7
+
+    # ── Section 8: Integration Priority Rule (anti false positive) ────────────
+    if pressure_score > 0.6 and absorption_score < 0.3:
+        pressure_score *= 0.7
+
+    # ── Section 9: Final Normalisation ────────────────────────────────────────
+    pressure_score = max(0.0, min(1.0, pressure_score))
+
+    return pressure_score, {
+        "pressure_score":        round(pressure_score, 4),
+        "vol_price_divergence":  round(vol_price_divergence, 4),
+        "micro_accumulation":    round(micro_accumulation, 4),
+        "compression_tightness": round(compression_tightness, 4),
+        "volume_z":              round(volume_z, 4),
+        "price_change_z":        round(price_change_z, 4),
+        "hl_count":              hl_count,
+    }
+
+
 def compose_v34_score(
     ct_norm,          # compression+tension 0-1
     v_norm,           # volume 0-1
@@ -2600,6 +2720,22 @@ def master_score(symbol, ticker):
     # Phase may be updated by v3.4 (Section 8 reclassification)
     phase = v34_composition.get("phase_v34", phase)
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── v3.6 PRESSURE DETECTION LAYER ────────────────────────────────────────
+    # Pure overlay — existing compose_v34_score output is NOT modified.
+    # pressure_score added BEFORE final clamp (Section 10 rule).
+    # ══════════════════════════════════════════════════════════════════════════
+    pressure_score, pressure_details = compute_pressure_layer(
+        candles        = c1h,
+        absorption_score = absorption_score,
+        flow_score     = flow_score_v34,
+    )
+
+    # Section 10: final_score += pressure_score * 0.35, THEN single clamp
+    # v34_score_01 is already clamped inside compose_v34_score.
+    # We add pressure AFTER and apply ONE final clamp here.
+    score_with_pressure = max(0.0, min(1.0, v34_score_01 + pressure_score * 0.35))
+
     # ── FINAL SCORE (Section 3 — no blending, v3.4 score is authoritative) ─────
     # REMOVED: prior version blended additive and non-linear scores 50/50.
     # Per Section 3: raw_score_additive is kept ONLY for logging transparency.
@@ -2627,8 +2763,9 @@ def master_score(symbol, ticker):
         raw_score_additive -= 5
     score_additive_01 = max(0.0, min(1.0, raw_score_additive / 100.0))  # for log only
 
-    # v3.4 non-linear score is the sole final score (Section 3 requirement)
-    score_01 = v34_score_01
+    # v3.5 non-linear score + v3.6 pressure overlay = final score_01
+    # The clamp has already been applied in score_with_pressure above.
+    score_01 = score_with_pressure
     score = max(0, min(100, round(score_01 * 100)))
 
     # ── Confidence band ───────────────────────────────────────────────────────
@@ -2671,6 +2808,12 @@ def master_score(symbol, ticker):
         f"liq_norm: {liquidity_norm_v34:.3f}",
         f"[v3.5] final v34={v34_score_01:.3f} "
         f"(additive_ref={score_additive_01:.3f} — logging only, not blended)",
+        f"[v3.6] pressure={pressure_score:.3f} "
+        f"(vpd={pressure_details.get('vol_price_divergence',0):.3f} "
+        f"ma={pressure_details.get('micro_accumulation',0):.3f} "
+        f"ct={pressure_details.get('compression_tightness',0):.3f} "
+        f"vz={pressure_details.get('volume_z',0):.3f} "
+        f"pcz={pressure_details.get('price_change_z',0):.3f})",
         f"RSI: +{rsi_bonus} (RSI={rsi:.0f})",
         f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
         f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
@@ -2706,6 +2849,17 @@ def master_score(symbol, ticker):
         f"liquidity_norm={liquidity_norm_v34:.3f} "
         f"v34_score={v34_score_01:.3f} "
         f"additive_ref={score_additive_01:.3f}"
+    )
+    # ── Section 11: Mandatory v3.6 pressure layer logging ────────────────────
+    log.info(
+        f"  {symbol} [v3.6] "
+        f"pressure_score={pressure_details.get('pressure_score', 0.0):.3f} "
+        f"vol_price_divergence={pressure_details.get('vol_price_divergence', 0.0):.3f} "
+        f"micro_accumulation={pressure_details.get('micro_accumulation', 0.0):.3f} "
+        f"compression_tightness={pressure_details.get('compression_tightness', 0.0):.3f} "
+        f"volume_z={pressure_details.get('volume_z', 0.0):.3f} "
+        f"price_change_z={pressure_details.get('price_change_z', 0.0):.3f} "
+        f"final_with_pressure={score_01:.3f}"
     )
 
     # ── Output filter (Task 6: convert to penalty, not hard skip) ────────────
@@ -2855,6 +3009,9 @@ def master_score(symbol, ticker):
         "compression_norm":    round(compression_norm_v34, 4),
         "volume_norm":         round(v_norm, 4),
         "structure_norm":      round(s_norm, 4),
+        # v3.6 pressure layer
+        "pressure_score":      round(pressure_score, 4),
+        "pressure_details":    pressure_details,
         # Task 6 — required output structure
         "flags": {
             "compression":  compression_active,
@@ -2966,6 +3123,20 @@ def build_alert(r, rank=None):
         f"Dist:{('⚠️' if flg.get('distribution') else '✅')}\n"
     )
 
+    # Pressure layer display (v3.6)
+    pd_ = r.get("pressure_details", {})
+    ps  = r.get("pressure_score", 0.0)
+    pressure_str = ""
+    if ps > 0.2:
+        pressure_str = (
+            f"\n🔴 <b>PRESSURE LAYER</b> ({ps:.2f})\n"
+            f"  VPD:{pd_.get('vol_price_divergence',0):.2f}  "
+            f"MA:{pd_.get('micro_accumulation',0):.2f}  "
+            f"CT:{pd_.get('compression_tightness',0):.2f}  "
+            f"Vz:{pd_.get('volume_z',0):.2f}  "
+            f"PCz:{pd_.get('price_change_z',0):.2f}\n"
+        )
+
     vd = r.get("vol_details", {})
     msg += (
         f"\n⚡ <b>VOLUME</b>\n"
@@ -2977,6 +3148,7 @@ def build_alert(r, rank=None):
         f"  Funding: {r['funding']:.5f}\n"
         f"\n🏷 <b>FLAGS</b>\n"
         f"{flags_str}"
+        f"{pressure_str}"
         f"\n🔬 <b>SINYAL AKUMULASI</b>\n"
         f"{forensic_str}\n"
         f"{stealth_str}"
@@ -3162,12 +3334,11 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔════════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v3.5 — AUDIT FIXES              ║")
-    log.info("║  +Real OI/CVD fetched & wired (no more None)      ║")
-    log.info("║  +Continuous flow scoring (no binary)             ║")
-    log.info("║  +Absorption: 4-component fbd_strength formula    ║")
-    log.info("║  +Anomaly detection (ZETA/PHA-type)               ║")
-    log.info("║  +No blending — v3.4 score is sole final score    ║")
+    log.info("║  PRE-PUMP SCANNER v3.6 — PRESSURE DETECTION LAYER ║")
+    log.info("║  +VPD: volume vs price divergence                 ║")
+    log.info("║  +Micro accumulation (higher lows ratio)          ║")
+    log.info("║  +Compression tightness overlay                   ║")
+    log.info("║  pressure_score * 0.35 → final score             ║")
     log.info("╚════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
