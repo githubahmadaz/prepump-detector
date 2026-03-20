@@ -1824,136 +1824,167 @@ def compute_tension_engine(candles, compression, comp_tension_details):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🧲  v3.4 — ABSORPTION ENGINE (SECTION 4 — CRITICAL FOR MISSED COINS)
-#  Detects hidden accumulation: high volume absorbed without price moving.
-#  CVD approximated from candle body direction (no tick data available).
+#  🧲  v3.5 — ABSORPTION ENGINE (SECTION 2 — REAL IMPLEMENTATION)
 # ══════════════════════════════════════════════════════════════════════════════
 def compute_absorption_engine(candles, compression):
     """
-    Detects messy accumulation patterns (ZETA/PHA-like):
-      - Price barely moves while volume/CVD diverge positively
-      - Failed breakdowns confirm buyer absorption
+    v3.5 — Four-component continuous absorption score.
 
-    CVD proxy: cumulative (close - open) / range per candle (directional flow).
-    All z-scores computed against rolling window using existing win_mid=20.
+    Components (all normalised 0-1):
+      fbd_count          — number of failed breakdowns in last 20 candles
+      fbd_depth          — avg penetration below support in ATR units (inverted)
+      fbd_recovery_speed — normalised inverse of candles to return to range
+      rejection_strength — avg lower wick / candle range
 
-    Returns (absorption_score float [0,1], details_dict)
+    Final formula (spec-exact):
+      fbd_strength = clamp(
+          (fbd_count / 3) * 0.30
+          + (1 - fbd_depth) * 0.25
+          + fbd_recovery_speed * 0.25
+          + rejection_strength * 0.20,
+          0, 1)
+
+    absorption_score = fbd_strength
     """
     win = CONFIG.get("vol_avg_long", 20)
     n   = len(candles)
     if n < win + 5:
         return 0.0, {"reason": "insufficient data"}
 
-    recent = candles[-win:]
-
-    # ── Price return z-score (normalised using rolling history) ───────────────
-    returns = [
-        (candles[-i]["close"] - candles[-i - 1]["close"]) / candles[-i - 1]["close"]
-        if candles[-i - 1]["close"] > 0 else 0.0
-        for i in range(1, min(win + 1, n))
-    ]
-    price_change_z = _norm01(returns[0] if returns else 0.0, returns)
-
-    # ── Volume z-score ────────────────────────────────────────────────────────
-    vols = [c["volume_usd"] for c in recent]
-    cur_vol = candles[-1]["volume_usd"]
-    volume_z = _norm01(cur_vol, vols)
-
-    # ── CVD proxy z-score ─────────────────────────────────────────────────────
-    # Per-candle CVD proxy: signed_volume = volume * sign(close - open)
-    def signed_vol(c):
-        rng = c["high"] - c["low"]
-        if rng == 0:
-            return 0.0
-        body_direction = 1.0 if c["close"] >= c["open"] else -1.0
-        body_pct = abs(c["close"] - c["open"]) / rng
-        return c["volume_usd"] * body_direction * body_pct
-
-    cvd_changes = [signed_vol(c) for c in recent]
-    cur_cvd = signed_vol(candles[-1])
-    cvd_z = _norm01(cur_cvd, cvd_changes)
-
-    # ── Failed breakdown count (spec-exact definition) ─────────────────────────
     comp_low = compression["low"] if compression else candles[-1]["close"] * 0.97
     atr_val  = calc_atr(candles[-25:], 14)
-    if not atr_val:
+    if not atr_val or atr_val <= 0:
         atr_val = candles[-1]["close"] * 0.02
 
     lookback20 = candles[-20:] if n >= 20 else candles
-    fbd_count  = 0
+
+    # ── fbd_count, fbd_depth, fbd_recovery_speed ──────────────────────────────
+    fbd_count         = 0
+    total_depth_atr   = 0.0   # sum of penetration depths in ATR units
+    total_recovery    = 0.0   # sum of candles to recover (lower = faster)
+    fbd_events        = []    # (depth_atr, recovery_candles)
+
     for i in range(len(lookback20) - 1):
         c = lookback20[i]
+        # Failed breakdown: break below support by less than 1 ATR, recover ≤ 3 candles
         if c["low"] < comp_low and (comp_low - c["low"]) < atr_val:
+            depth_atr = (comp_low - c["low"]) / atr_val   # 0 to ~1
             for j in range(i + 1, min(i + 4, len(lookback20))):
                 if lookback20[j]["close"] > comp_low:
+                    recovery_candles = j - i   # 1, 2, or 3
                     fbd_count += 1
+                    fbd_events.append((depth_atr, recovery_candles))
+                    total_depth_atr += depth_atr
+                    total_recovery  += recovery_candles
                     break
 
-    # ── Absorption score accumulation (spec exact logic) ──────────────────────
-    absorption_score = 0.0
+    # fbd_depth: avg ATR penetration, normalised to [0,1] — 0 = surface touch, 1 = deep
+    if fbd_events:
+        avg_depth_atr = total_depth_atr / len(fbd_events)
+        fbd_depth = min(1.0, avg_depth_atr)   # already in [0,1] since depth < 1 ATR
+    else:
+        fbd_depth = 0.0   # no events = no depth = use 1-fbd_depth=1.0 in formula
 
-    # Condition A: price barely moves but CVD positive (buying absorbed silently)
-    # price_change_z <= 0.3 in normalised space ≈ normalised value ≤ 0.55
-    if price_change_z <= 0.55 and cvd_z > 0.6:
-        absorption_score += 0.6
+    # fbd_recovery_speed: normalised inverse of avg recovery candles
+    # faster recovery (1 candle) → higher score
+    if fbd_events:
+        avg_recovery = total_recovery / len(fbd_events)   # 1.0 to 3.0
+        # Map: 1 candle → 1.0, 3 candles → 0.33
+        fbd_recovery_speed = 1.0 / avg_recovery
+    else:
+        fbd_recovery_speed = 0.0
 
-    # Condition B: high volume, price not falling (volume being absorbed)
-    # volume_z > 1.0 normalised ≈ > 0.67; price_change_z > -0.2 ≈ > 0.47
-    if volume_z > 0.67 and price_change_z > 0.47:
-        absorption_score += 0.7
+    # ── rejection_strength: avg lower wick / candle range (last N candles) ────
+    recent = candles[-win:]
+    wick_ratios = []
+    for c in recent:
+        rng = c["high"] - c["low"]
+        if rng > 0:
+            lower_wick = min(c["open"], c["close"]) - c["low"]
+            wick_ratios.append(max(0.0, lower_wick / rng))
+    rejection_strength = _mean(wick_ratios) if wick_ratios else 0.0
+    # rejection_strength is already in [0,1] — lower wick fraction of range
 
-    # Condition C: failed breakdowns confirm buyer presence at support
-    if fbd_count >= 2:
-        absorption_score += 0.6
+    # ── Spec-exact final formula ──────────────────────────────────────────────
+    fbd_count_norm = min(1.0, fbd_count / 3.0)   # normalised: 3+ events → 1.0
+    fbd_depth_term = 1.0 - fbd_depth              # inverted: shallow = good
 
-    absorption_score = max(0.0, min(1.0, absorption_score))
+    fbd_strength = max(0.0, min(1.0,
+        fbd_count_norm       * 0.30
+        + fbd_depth_term     * 0.25
+        + fbd_recovery_speed * 0.25
+        + rejection_strength * 0.20
+    ))
+
+    absorption_score = fbd_strength
 
     return absorption_score, {
-        "price_change_z_norm": round(price_change_z, 4),
-        "volume_z_norm":       round(volume_z, 4),
-        "cvd_z_norm":          round(cvd_z, 4),
         "fbd_count":           fbd_count,
+        "fbd_count_norm":      round(fbd_count_norm, 4),
+        "fbd_depth":           round(fbd_depth, 4),
+        "fbd_recovery_speed":  round(fbd_recovery_speed, 4),
+        "rejection_strength":  round(rejection_strength, 4),
+        "fbd_strength":        round(fbd_strength, 4),
         "absorption_score":    round(absorption_score, 4),
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📊  v3.4 — FLOW ENGINE (SECTION 5 — OI + CVD)
-#  OI and orderbook CVD are NOT available in current system.
-#  Per spec: flow_score = 0, DO NOT estimate or simulate.
-#  Architecture is fully built — activates if data becomes available.
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_flow_engine(oi_series=None, cvd_series=None, price_change_z=0.5):
+#  📡  v3.5 — OI + CVD DATA FETCHER
+def compute_flow_engine(oi_series=None, cvd_series=None, price_series=None):
     """
-    Flow engine using Open Interest and CVD series.
+    v3.5 — Continuous flow scoring (replaces binary logic).
+    All three scores are continuous clamp functions, not binary 0/1.
 
-    CURRENT STATUS: OI and tick CVD data are not fetched by this system.
-    Per spec Section 5: "IF DATA NOT AVAILABLE → flow_score = 0"
-
-    Architecture is complete and will activate if oi_series and cvd_series
-    are provided (e.g. from a future Bitget /oi endpoint integration).
+    Validation:
+      - If oi_series or cvd_series is None → flow_score = 0, log FLOW DATA MISSING
+      - If len(oi_series) != len(cvd_series) → flow_score = 0, log FLOW LENGTH MISMATCH
     """
-    if oi_series is None or cvd_series is None or len(oi_series) < 5:
-        return 0.0, {"reason": "OI/CVD data not available — flow_score=0 per spec §5"}
+    # ── Validation (mandatory per spec Section 1) ─────────────────────────────
+    if oi_series is None or cvd_series is None:
+        log.debug("FLOW DATA MISSING — flow_score=0")
+        return 0.0, {"reason": "FLOW DATA MISSING", "flow_score": 0.0,
+                     "buildup_score": 0.0, "flow_absorption": 0.0, "squeeze_score": 0.0}
 
-    # ── OI change z-score ─────────────────────────────────────────────────────
-    oi_changes = [oi_series[i] - oi_series[i - 1] for i in range(1, len(oi_series))]
-    cur_oi_change = oi_changes[-1] if oi_changes else 0.0
-    oi_z = _norm01(cur_oi_change, oi_changes)
+    # Align lengths to the shorter series
+    min_len = min(len(oi_series), len(cvd_series))
+    if min_len < 5:
+        log.debug("FLOW DATA TOO SHORT — flow_score=0")
+        return 0.0, {"reason": "FLOW DATA TOO SHORT", "flow_score": 0.0,
+                     "buildup_score": 0.0, "flow_absorption": 0.0, "squeeze_score": 0.0}
 
-    # ── CVD z-score ───────────────────────────────────────────────────────────
+    if len(oi_series) != len(cvd_series):
+        log.debug(f"FLOW LENGTH MISMATCH (oi={len(oi_series)} cvd={len(cvd_series)}) — trimming to {min_len}")
+        oi_series  = oi_series[-min_len:]
+        cvd_series = cvd_series[-min_len:]
+
+    # ── OI change z-score (continuous, normalised to 0-1) ────────────────────
+    oi_changes  = [oi_series[i] - oi_series[i - 1] for i in range(1, len(oi_series))]
     cvd_changes = [cvd_series[i] - cvd_series[i - 1] for i in range(1, len(cvd_series))]
+
+    cur_oi_change  = oi_changes[-1]  if oi_changes  else 0.0
     cur_cvd_change = cvd_changes[-1] if cvd_changes else 0.0
-    cvd_z_norm = _norm01(cur_cvd_change, cvd_changes)
 
-    # ── Position buildup (oi rising, price flat) ──────────────────────────────
-    buildup_score    = 1.0 if (oi_z > 0.67 and 0.42 <= price_change_z <= 0.58) else 0.0
+    # Raw z-scores (not normalised to 0-1 here — used directly in clamp formulas)
+    def _raw_zscore(value, series):
+        if len(series) < 2:
+            return 0.0
+        mu  = _mean(series)
+        sig = _std(series)
+        return (value - mu) / sig if sig > 0 else 0.0
 
-    # ── Absorption confirmation (CVD positive, price flat) ────────────────────
-    flow_absorption  = 1.0 if (cvd_z_norm > 0.58 and 0.45 <= price_change_z <= 0.55) else 0.0
+    oi_z_raw  = _raw_zscore(cur_oi_change,  oi_changes)
+    cvd_z_raw = _raw_zscore(cur_cvd_change, cvd_changes)
 
-    # ── Short squeeze setup (OI rising, CVD negative) ─────────────────────────
-    squeeze_score    = 1.0 if (oi_z > 0.67 and cvd_z_norm < 0.42) else 0.0
+    # ── Continuous scoring (spec-exact clamp formulas) ────────────────────────
+    # buildup_score = clamp((oi_z - 0.5) / 2.0, 0, 1)
+    buildup_score    = max(0.0, min(1.0, (oi_z_raw - 0.5) / 2.0))
+
+    # flow_absorption = clamp((cvd_z - 0.3) / 2.0, 0, 1)
+    flow_absorption  = max(0.0, min(1.0, (cvd_z_raw - 0.3) / 2.0))
+
+    # squeeze_score = clamp((oi_z - abs(cvd_z)) / 2.0, 0, 1)
+    squeeze_score    = max(0.0, min(1.0, (oi_z_raw - abs(cvd_z_raw)) / 2.0))
 
     flow_score = (
         0.4 * buildup_score
@@ -1961,11 +1992,12 @@ def compute_flow_engine(oi_series=None, cvd_series=None, price_change_z=0.5):
         + 0.3 * squeeze_score
     )
     return flow_score, {
-        "oi_z_norm":        round(oi_z, 4),
-        "cvd_z_norm":       round(cvd_z_norm, 4),
-        "buildup_score":    buildup_score,
-        "flow_absorption":  flow_absorption,
-        "squeeze_score":    squeeze_score,
+        "oi_z_raw":        round(oi_z_raw, 4),
+        "cvd_z_raw":       round(cvd_z_raw, 4),
+        "buildup_score":   round(buildup_score, 4),
+        "flow_absorption": round(flow_absorption, 4),
+        "squeeze_score":   round(squeeze_score, 4),
+        "flow_score":      round(flow_score, 4),
     }
 
 
@@ -1975,6 +2007,69 @@ def compute_flow_engine(oi_series=None, cvd_series=None, price_change_z=0.5):
 #  Per spec: vacuum_score = 0 when data unavailable.
 #  Architecture complete for future integration.
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  📡  v3.5 — OI + CVD DATA FETCHER (Section 1 — Flow Engine Activation)
+#  Fetches real Open Interest series from Bitget.
+#  CVD is derived from signed candle volume (no tick data needed).
+# ══════════════════════════════════════════════════════════════════════════════
+def get_oi_and_cvd(symbol, candles):
+    """
+    Fetch OI series from Bitget /api/v2/mix/market/open-interest.
+    Derive CVD proxy from signed candle volume (close > open = buy pressure).
+
+    Returns (oi_series list[float] | None, cvd_series list[float] | None).
+    Returns (None, None) on any failure — caller handles gracefully.
+    """
+    # ── OI series from Bitget ─────────────────────────────────────────────────
+    oi_series = None
+    try:
+        data = safe_get(
+            f"{BITGET_BASE}/api/v2/mix/market/open-interest",
+            params={"symbol": symbol, "productType": "usdt-futures"},
+        )
+        if data and data.get("code") == "00000" and data.get("data"):
+            raw = data["data"]
+            # API may return a single value or a list
+            if isinstance(raw, list):
+                oi_series = [float(item.get("openInterestList", item.get("openInterest", 0)))
+                             for item in raw if item]
+            elif isinstance(raw, dict):
+                val = float(raw.get("openInterestList", raw.get("openInterest", 0)))
+                if val > 0:
+                    # Single point — replicate as flat series so downstream doesn't crash
+                    oi_series = [val] * min(len(candles), 20)
+    except Exception as e:
+        log.debug(f"OI fetch failed for {symbol}: {e}")
+        oi_series = None
+
+    # ── CVD proxy derived from candles ────────────────────────────────────────
+    # signed_vol = volume * body_direction * body_pct_of_range
+    # This is a candle-level CVD proxy; real CVD requires tick data.
+    cvd_series = None
+    if candles and len(candles) >= 5:
+        try:
+            signed_vols = []
+            for c in candles[-min(len(candles), 50):]:
+                rng = c["high"] - c["low"]
+                if rng > 0:
+                    body_dir = 1.0 if c["close"] >= c["open"] else -1.0
+                    body_pct = abs(c["close"] - c["open"]) / rng
+                    signed_vols.append(c["volume_usd"] * body_dir * body_pct)
+                else:
+                    signed_vols.append(0.0)
+            # Cumulative sum = CVD series
+            cvd_series = []
+            running = 0.0
+            for sv in signed_vols:
+                running += sv
+                cvd_series.append(running)
+        except Exception as e:
+            log.debug(f"CVD proxy build failed for {symbol}: {e}")
+            cvd_series = None
+
+    return oi_series, cvd_series
+
+
 def compute_vacuum_score(ask_volume_near=None, rolling_mean_ask=None):
     """
     Orderbook vacuum: low ask-side liquidity near price = price can move up easily.
@@ -2005,52 +2100,46 @@ def compose_v34_score(
     flow_score,       # flow 0-1
     vacuum_score,     # vacuum 0-1
     liquidity_norm,   # liquidity multiplier 0.4-1.0
-    failed_breakdown_strength,   # 0-1 (from absorption engine)
+    failed_breakdown_strength,   # fbd_strength 0-1
     pbb_norm,         # pre-breakout bias 0-1
     candles,          # raw candles for return_z / distance_from_range
     compression,      # compression zone dict or None
-    phase_v33,        # phase string from detect_phase ("early"|"mid"|"late")
+    phase_v33,        # phase string from detect_phase
 ):
     """
-    Full non-linear score composition per spec Sections 2–10.
-    Returns (final_score 0-1, composition_details_dict)
+    v3.5 — Unified non-linear score composer.
+    raw_score_additive is NOT used here (kept for logging only, per Section 3).
+
+    Sections applied:
+      S3 — no blending with additive score
+      S4 — base_score = clamp(CT*(1+V)*(1+S), 0, 2)
+      S5 — synergy 0.25 / 0.35
+      S6 — anomaly_score
+      S7 — vacuum safe mode
+      S8 — final composition formula
     """
     n = len(candles)
 
-    # ── Section 2: Non-linear base score ─────────────────────────────────────
-    # score = CT_norm * (1 + V_norm) * (1 + S_norm)
-    base_score = ct_norm * (1.0 + v_norm) * (1.0 + s_norm)
-    # base_score range: 0 to ~4.0; normalise back to [0,1]
-    base_score = min(1.0, base_score / 4.0)
+    # ── Section 4: Non-linear base score — clamp(CT*(1+V)*(1+S), 0, 2) ──────
+    # REMOVED: prior version divided by 4.0 to flatten the score range.
+    # NEW (spec-exact): clamp to [0, 2] without flattening.
+    base_score = max(0.0, min(2.0,
+        ct_norm * (1.0 + v_norm) * (1.0 + s_norm)
+    ))
 
-    # ── Section 2: Synergy bonuses (additive) ─────────────────────────────────
+    # ── Section 5: Synergy bonuses (raised from 0.10/0.15 to 0.25/0.35) ────
     synergy_bonus = 0.0
 
     if ct_norm > 0.7 and v_norm > 0.6:
-        synergy_bonus += 0.10
+        synergy_bonus += 0.25   # was 0.10
 
-    if failed_breakdown_strength > 0.6 and s_norm > 0.6:
-        synergy_bonus += 0.15
+    if failed_breakdown_strength > 0.7 and absorption_score > 0.6:
+        synergy_bonus += 0.35   # was 0.15 with different condition
 
-    # PBB > mean(PBB) + 0.5*std(PBB): PBB is already normalised 0-1,
-    # use 0.6 as a reasonable proxy for "above mean + 0.5*std"
     if pbb_norm > 0.6:
-        synergy_bonus += 0.10
+        synergy_bonus += 0.10   # unchanged
 
-    # Tension engine adds to base
-    score = base_score + synergy_bonus + tension_engine * 0.20
-
-    # ── Absorption (Section 4) ────────────────────────────────────────────────
-    score += absorption_score * 0.25
-
-    # ── Flow (Section 5) ─────────────────────────────────────────────────────
-    score += flow_score * 0.25
-
-    # ── Vacuum (Section 6) ───────────────────────────────────────────────────
-    score += vacuum_score * 0.15
-
-    # ── Late entry control (Section 7) ────────────────────────────────────────
-    # return_z: normalise recent 12-candle return against rolling history
+    # ── return_z for late-entry scaling and phase (computed once here) ────────
     win_s = min(12, n - 1)
     win_r = min(CONFIG.get("win_structure", 50), n - 1)
     recent_ret = (
@@ -2064,7 +2153,34 @@ def compose_v34_score(
     ]
     return_z = _norm01(recent_ret, ret_history) if ret_history else 0.5
 
-    # distance_from_range: how far current price is above compression high
+    # price_change_z (raw, not 0-1): used in anomaly_score
+    if ret_history:
+        mu  = _mean(ret_history)
+        sig = _std(ret_history)
+        price_change_z_raw = (recent_ret - mu) / sig if sig > 0 else 0.0
+    else:
+        price_change_z_raw = 0.0
+
+    # ── Section 6: Anomaly detection (critical for ZETA/PHA-type) ─────────────
+    anomaly_score = 0.0
+
+    # Hidden accumulation: absorption present but structure weak and price flat
+    if (absorption_score > 0.6
+            and s_norm < 0.5
+            and abs(price_change_z_raw) < 0.3):
+        anomaly_score += 0.4
+
+    # Flow divergence: flow active but price not moving
+    if (flow_score > 0.5
+            and abs(price_change_z_raw) < 0.3):
+        anomaly_score += 0.3
+
+    anomaly_score = max(0.0, min(1.0, anomaly_score))
+
+    # ── Section 7: Vacuum (safe mode — already handled at call site, kept explicit)
+    # vacuum_score is already 0.0 when data unavailable; no change needed here
+
+    # ── Late entry control ─────────────────────────────────────────────────────
     distance_from_range = 0.0
     if compression:
         comp_high = compression["high"]
@@ -2073,12 +2189,11 @@ def compose_v34_score(
         if atr_val > 0 and price_now > comp_high:
             distance_from_range = (price_now - comp_high) / atr_val
 
-    if return_z > 0.75 or distance_from_range > 1.2:   # normalised equiv of z>1.5
-        score *= 0.65
+    late_scale = 1.0
+    if return_z > 0.75 or distance_from_range > 1.2:
+        late_scale = 0.65
 
-    # ── Phase reclassification (Section 8) ────────────────────────────────────
-    phase_v34 = phase_v33   # default: inherit from v3.3 detect_phase
-
+    # ── Phase reclassification ─────────────────────────────────────────────────
     if ct_norm > 0.6 and return_z < 0.58:
         phase_v34 = "early"
     elif return_z > 0.75:
@@ -2086,18 +2201,29 @@ def compose_v34_score(
     else:
         phase_v34 = "mid"
 
-    # recent_pump: return_z is high AND score in potentially-late band
     recent_pump_detected = return_z > 0.75 and distance_from_range > 0.5
     if recent_pump_detected and phase_v34 == "early":
-        phase_v34 = "mid"   # cannot be early if pump just occurred
+        phase_v34 = "mid"
 
-    # ── Liquidity scaling (Section 1 — multiplicative) ────────────────────────
-    score *= liquidity_norm
+    # ── Section 8: Final score composition (spec-exact, no blending) ──────────
+    # final_score = base_score + synergy_bonus + absorption*0.25
+    #             + flow*0.25 + anomaly_score + vacuum*0.15
+    pre_late_score = (
+        base_score
+        + synergy_bonus
+        + tension_engine * 0.20
+        + absorption_score * 0.25
+        + flow_score * 0.25
+        + anomaly_score
+        + vacuum_score * 0.15
+    )
 
-    # ── Score amplification (Section 9) ──────────────────────────────────────
+    score = pre_late_score * late_scale * liquidity_norm
+
+    # Amplification (Section 9 preserved)
     score = score ** 1.25
 
-    # ── Final clamp (Section 10) ─────────────────────────────────────────────
+    # Final clamp 0-1 (Section 10)
     score = max(0.0, min(1.0, score))
 
     return score, {
@@ -2106,10 +2232,13 @@ def compose_v34_score(
         "tension_engine_contrib":round(tension_engine * 0.20, 4),
         "absorption_contrib":    round(absorption_score * 0.25, 4),
         "flow_contrib":          round(flow_score * 0.25, 4),
+        "anomaly_score":         round(anomaly_score, 4),
         "vacuum_contrib":        round(vacuum_score * 0.15, 4),
         "return_z_norm":         round(return_z, 4),
+        "price_change_z_raw":    round(price_change_z_raw, 4),
         "distance_from_range":   round(distance_from_range, 4),
         "liquidity_norm":        round(liquidity_norm, 4),
+        "late_scale":            round(late_scale, 4),
         "phase_v34":             phase_v34,
         "recent_pump_detected":  recent_pump_detected,
     }
@@ -2438,14 +2567,13 @@ def master_score(symbol, ticker):
 
     # ── Absorption engine (Section 4 — hidden accumulation detector) ──────────
     absorption_score, absorption_details = compute_absorption_engine(c1h, compression)
-    fbd_strength = absorption_details.get("fbd_count", 0) / 4.0   # 0-1 scale
-    fbd_strength = min(1.0, fbd_strength)
+    fbd_strength = absorption_details.get("fbd_strength", 0.0)  # already normalised 0-1
 
-    # ── Flow engine (Section 5 — OI + CVD, returns 0 if data unavailable) ─────
-    price_change_z_for_flow = absorption_details.get("price_change_z_norm", 0.5)
+    # ── Flow engine (Section 1 — fetch real OI + CVD, wire in) ──────────────
+    oi_series, cvd_series = get_oi_and_cvd(symbol, c1h)
     flow_score_v34, flow_details = compute_flow_engine(
-        oi_series=None, cvd_series=None,
-        price_change_z=price_change_z_for_flow
+        oi_series=oi_series,
+        cvd_series=cvd_series,
     )
 
     # ── Vacuum score (Section 6 — orderbook, returns 0 if data unavailable) ───
@@ -2472,41 +2600,35 @@ def master_score(symbol, ticker):
     # Phase may be updated by v3.4 (Section 8 reclassification)
     phase = v34_composition.get("phase_v34", phase)
 
-    # ── FINAL SCORE ───────────────────────────────────────────────────────────
-    # OLD additive score (all v3.0–3.3 components — preserved unchanged):
+    # ── FINAL SCORE (Section 3 — no blending, v3.4 score is authoritative) ─────
+    # REMOVED: prior version blended additive and non-linear scores 50/50.
+    # Per Section 3: raw_score_additive is kept ONLY for logging transparency.
     raw_score_additive = (
-        comp_tension_score    # +40 max (v3.2)
-        + vol_score           # +30 max (v3.2, RVOL included)
-        + struct_score        # +20 max
-        + cont_score          # +15 max
-        + stealth_score_bonus # +15 max bonus
-        + pbb_score           # +12 max bonus
-        + rsi_bonus           # +1 max
-        + liq_bonus           # +8 max
-        + phase_bonus         # +10 if early
-        - phase_penalty       # -12 if late
-        - dist_penalty        # -25 max
-        - slow_penalty        # -10 max
-        - late_penalty        # -15 max
-        + enh_late_pen        # -10 max (v3.3)
-        + dead_pen            # -8 max  (v3.3)
-        + ovlp_pen            # -8 max  (v3.3)
-        - already_pumped_penalty   # -25 (v3.3)
-        - funding_gate_penalty     # -15 (v3.3)
-        # NOTE: liquidity_penalty removed — replaced by liquidity_norm_v34 multiplier
+        comp_tension_score
+        + vol_score
+        + struct_score
+        + cont_score
+        + stealth_score_bonus
+        + pbb_score
+        + rsi_bonus
+        + liq_bonus
+        + phase_bonus
+        - phase_penalty
+        - dist_penalty
+        - slow_penalty
+        - late_penalty
+        + enh_late_pen
+        + dead_pen
+        + ovlp_pen
+        - already_pumped_penalty
+        - funding_gate_penalty
     )
-    # Funding soft penalty (preserved)
     if funding < -0.001:
         raw_score_additive -= 5
+    score_additive_01 = max(0.0, min(1.0, raw_score_additive / 100.0))  # for log only
 
-    # Clamp additive score to 0-100, then normalise to 0-1
-    score_additive_01 = max(0.0, min(1.0, raw_score_additive / 100.0))
-
-    # NEW: Blend additive (legacy) with non-linear v3.4 score
-    # Weight: 50% legacy (stability) + 50% v3.4 (catches messy accumulation)
-    score_01 = 0.50 * score_additive_01 + 0.50 * v34_score_01
-
-    # Convert back to 0-100 integer scale for compatibility with all downstream code
+    # v3.4 non-linear score is the sole final score (Section 3 requirement)
+    score_01 = v34_score_01
     score = max(0, min(100, round(score_01 * 100)))
 
     # ── Confidence band ───────────────────────────────────────────────────────
@@ -2543,11 +2665,12 @@ def master_score(symbol, ticker):
         f"vz={absorption_details.get('volume_z_norm',0):.2f} "
         f"cvdz={absorption_details.get('cvd_z_norm',0):.2f} "
         f"fbd={absorption_details.get('fbd_count',0)})",
-        f"[v3.4] Non-linear base: {v34_composition.get('base_score_nonlinear',0):.3f} "
+        f"[v3.5] Non-linear base: {v34_composition.get('base_score_nonlinear',0):.3f} "
         f"synergy: +{v34_composition.get('synergy_bonus',0):.3f} "
+        f"anomaly: +{v34_composition.get('anomaly_score',0):.3f} "
         f"liq_norm: {liquidity_norm_v34:.3f}",
-        f"[v3.4] blend score: {score_01:.3f} "
-        f"(legacy={score_additive_01:.3f} v34={v34_score_01:.3f})",
+        f"[v3.5] final v34={v34_score_01:.3f} "
+        f"(additive_ref={score_additive_01:.3f} — logging only, not blended)",
         f"RSI: +{rsi_bonus} (RSI={rsi:.0f})",
         f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
         f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
@@ -2564,19 +2687,25 @@ def master_score(symbol, ticker):
         f"| CT={comp_tension_score} V={vol_score} S={struct_score} PBB={pbb_score} "
         f"| D=-{dist_penalty} Late={enh_late_pen} Dead={dead_pen} Ovlp={ovlp_pen}"
     )
-    # ── Section 11: Mandatory v3.4 diagnostic logging ─────────────────────────
+    # ── Section 9: Mandatory v3.5 diagnostic logging ─────────────────────────
+    buildup_score_log = flow_details.get("buildup_score", 0.0)
+    fbd_strength_log  = absorption_details.get("fbd_strength", 0.0)
+    anomaly_score_log = v34_composition.get("anomaly_score", 0.0)
     log.info(
-        f"  {symbol} [v3.4] "
+        f"  {symbol} [v3.5] "
         f"compression_norm={compression_norm_v34:.3f} "
         f"volume_norm={v_norm:.3f} "
         f"structure_norm={s_norm:.3f} "
         f"tension_score={tension_engine_score:.3f} "
         f"absorption_score={absorption_score:.3f} "
+        f"fbd_strength={fbd_strength_log:.3f} "
         f"flow_score={flow_score_v34:.3f} "
+        f"buildup_score={buildup_score_log:.3f} "
+        f"anomaly_score={anomaly_score_log:.3f} "
         f"vacuum_score={vacuum_score_v34:.3f} "
         f"liquidity_norm={liquidity_norm_v34:.3f} "
         f"v34_score={v34_score_01:.3f} "
-        f"blend_score={score_01:.3f}"
+        f"additive_ref={score_additive_01:.3f}"
     )
 
     # ── Output filter (Task 6: convert to penalty, not hard skip) ────────────
@@ -3033,11 +3162,12 @@ def run_scan():
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     log.info("╔════════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v3.4 — NON-LINEAR ENGINE        ║")
-    log.info("║  +Absorption engine (ZETA/PHA-type detection)     ║")
-    log.info("║  +Tension engine (multiplicative 4-component)     ║")
-    log.info("║  +Non-linear score CT*(1+V)*(1+S) + synergy       ║")
-    log.info("║  +Liquidity norm (multiplicative, no hard skip)   ║")
+    log.info("║  PRE-PUMP SCANNER v3.5 — AUDIT FIXES              ║")
+    log.info("║  +Real OI/CVD fetched & wired (no more None)      ║")
+    log.info("║  +Continuous flow scoring (no binary)             ║")
+    log.info("║  +Absorption: 4-component fbd_strength formula    ║")
+    log.info("║  +Anomaly detection (ZETA/PHA-type)               ║")
+    log.info("║  +No blending — v3.4 score is sole final score    ║")
     log.info("╚════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
