@@ -1,64 +1,43 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v3.7 — AUDIT-CORRECTED                                    ║
+║  PRE-PUMP SCANNER v4.0 — FUTURES FLOWS + EARLY DETECTION                    ║
 ║                                                                              ║
 ║  FILOSOFI CORE:                                                              ║
 ║  Deteksi SEBELUM breakout. Bukan setelah. Bukan saat.                        ║
-║  Noise lebih tinggi diterima — miss lebih mahal dari false positive.         ║
+║  Futures Flows (OI + LS Ratio + Funding Trend) adalah leading indicator      ║
+║  paling kuat — harga bisa sideways sementara smart money bangun posisi.      ║
 ║                                                                              ║
-║  PERBAIKAN v3.7 (dari hasil audit v3.5):                                     ║
+║  PERUBAHAN v4.0 vs v3.2:                                                     ║
+║  1. [NEW] Open Interest module — OI delta 24h, OI divergence scoring        ║
+║  2. [NEW] Long/Short Ratio — short squeeze setup detector                    ║
+║  3. [NEW] Funding Rate Trend — ambil 21 periode (7 hari), deteksi tren      ║
+║  4. [NEW] min_pump_target_pct: 20% — filter coin berpotensi pump >20%       ║
+║  5. [FIX] Version string konsisten: v4.0 di semua output                    ║
+║  6. OI + Compression divergence = sinyal akumulasi terkuat (+15 max)        ║
+║  7. Short squeeze multiplier: short >60% + OI naik = skor dikalikan         ║
+║  8. Funding trend negatif→positif = early squeeze signal (+12 max)          ║
+║  9. Distribution filter diperketat: HVNP + OI turun = konfirmasi dump       ║
 ║                                                                              ║
-║  BUG #1 FIXED — Flow Engine (OI):                                            ║
-║    Sebelum: OI API single-point → flat series → all-zero changes →           ║
-║    buildup_score & squeeze_score SELALU 0.                                   ║
-║    Sesudah: Jika OI API tidak memberi series, gunakan OI proxy dari          ║
-║    signed candle volume (realistic delta, bukan flat replika).               ║
-║                                                                              ║
-║  BUG #2 FIXED — Absorption Floor Phantom:                                   ║
-║    Sebelum: fbd_depth=0 (no events) → fbd_depth_term=1.0 →                  ║
-║    absorption_score min 0.27 bahkan tanpa satu pun failed breakdown.         ║
-║    Sesudah: fbd_depth=0.5 (neutral) ketika tidak ada events.                ║
-║                                                                              ║
-║  BUG #3 FIXED — CRITICAL: Dead Penalty/Bonus Block:                         ║
-║    Sebelum: dist_penalty, phase_bonus/penalty, late_penalty,                 ║
-║    slow_penalty, stealth_bonus, cont_score, liq_bonus, overlap,              ║
-║    funding_penalty, liquidity_penalty — SEMUA masuk raw_score_additive       ║
-║    yang "logging only" → tidak ada efek ke final score.                      ║
-║    Sesudah: Semua dikompilasi ke working_score sebelum final clamp.          ║
-║    Distribution filter sekarang BENAR-BENAR mengurangi skor.                ║
-║                                                                              ║
-║  BUG #4 FIXED — Double Clamp Score Suppression:                             ║
-║    Sebelum: compose_v34_score clamp(0,1) + score_with_pressure clamp(0,1)   ║
-║    → pressure_score tidak bisa berkontribusi untuk coin kuat.                ║
-║    Sesudah: Satu final clamp di akhir, di ruang 0-100.                      ║
-║                                                                              ║
-║  BUG #5 FIXED — v_norm ceiling mismatch:                                    ║
-║    Sebelum: v_norm normalisasi dengan max=20 padahal vol_score max=30.      ║
-║    Sesudah: max=30 sesuai score_volume_intelligence ceiling.                 ║
-║                                                                              ║
-║  KOMPONEN SCORING (v3.7):                                                    ║
-║  Non-linear base (compose_v34_score) → 0–1 scale (×100 ke working space)   ║
-║  [+] Pressure layer                   — up to +35 pts                       ║
-║  [+] Stealth Accumulation             — up to +15 pts                       ║
-║  [+] Liquidity Sweep bonus            — +8 pts                              ║
-║  [+] Phase early bonus                — +10 pts                             ║
-║  [+] Continuation (partial)           — up to +7.5 pts                      ║
-║  [-] Phase late penalty               — −12 pts                             ║
-║  [-] Distribution penalty (ACTIVE)   — up to −25 pts                       ║
-║  [-] Slow trend penalty               — up to −10 pts                       ║
-║  [-] Late entry original              — up to −15 pts                       ║
-║  [-] Enhanced late penalty            — up to −10 pts                       ║
-║  [-] Dead market penalty              — up to −8 pts                        ║
-║  [-] Overlap penalty                  — up to −8 pts                        ║
-║  [-] Funding penalty                  — −15 / −5 pts                        ║
-║  [-] Liquidity penalty                — −20 / −30 pts                      ║
-║  [-] Already pumped penalty           — −25 pts                             ║
+║  KOMPONEN SCORING:                                                           ║
+║  [A] Compression + Tension      — HIGH  (max 40)                            ║
+║  [B] Volume + RVOL              — HIGH  (max 30)                            ║
+║  [C] Open Interest Flow  (NEW)  — HIGH  (max 15)                            ║
+║  [D] Structure                  — MED   (max 20)                            ║
+║  [E] Continuation               — MED   (max 15)                            ║
+║  [F] Stealth Accumulation       — BONUS (max 15)                            ║
+║  [G] Pre-Breakout Bias          — BONUS (max 12)                            ║
+║  [H] Funding Rate Trend  (NEW)  — BONUS (max 12)                            ║
+║  [I] Long/Short Squeeze  (NEW)  — BONUS (max 10) + multiplier               ║
+║  [J] Liq Sweep                  — BONUS (max  8)                            ║
+║  [K] Distribution Penalty       — capped at −25                             ║
+║  [L] Slow-trend Penalty         — capped at −10                             ║
+║  [M] Late-entry Penalty         — capped at −15                             ║
 ║                                                                              ║
 ║  Confidence:                                                                 ║
-║    < 42  → ignore                                                            ║
-║    42–60 → early (sinyal awal, noise lebih tinggi)                          ║
-║    60–78 → strong pre-pump candidate (PRIORITAS)                            ║
-║    > 78  → possibly late stage                                               ║
+║    < 45  → ignore                                                            ║
+║    45–62 → early (sinyal awal, noise lebih tinggi)                          ║
+║    62–80 → strong pre-pump candidate (PRIORITAS)                            ║
+║    > 80  → possibly late stage                                               ║
 ║                                                                              ║
 ║  INTERVAL : Setiap 1 jam | EXCHANGE : Bitget USDT-Futures                  ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -192,23 +171,48 @@ CONFIG = {
 
     # ── ENTRY / TARGET ────────────────────────────────────────────────────────
     "atr_sl_mult":                 1.2,
-    "min_target_pct":              7.0,  # dari 8.0 — target minimum lebih rendah
-    "min_sl_pct":                  2.0,  # dari 2.5 — SL minimum lebih longgar
-    "min_rr":                      1.1,  # dari 1.3 — R/R minimum lebih rendah
+    "min_target_pct":              7.0,   # minimum target untuk R/R check
+    "min_sl_pct":                  2.0,
+    "min_rr":                      1.1,
+    "min_pump_target_pct":        20.0,   # [v4.0] hanya loloskan jika T2 >= 20% atau comp panjang
 
     # ── FUNDING ───────────────────────────────────────────────────────────────
-    "funding_gate":             -0.005,  # dari -0.003 — lebih toleran terhadap funding negatif
+    "funding_gate":             -0.005,   # hard gate: funding < -0.5% = skip
+    # [v4.0] Funding Rate History
+    "funding_history_periods":     21,    # 21 settlement = 7 hari (settlement tiap 8 jam)
+    "funding_trend_thresh":     0.0003,   # delta avg recent vs older untuk deteksi tren
+    "funding_squeeze_bonus":        12,   # short capitulating = squeeze setup
+    "funding_neg_to_pos_bonus":      8,   # transisi negatif → positif
+    "funding_heavy_short_bonus":     6,   # short dominan (bahan bakar squeeze)
+    "funding_overheated_penalty":   10,   # terlalu banyak long = dump risk
+
+    # ── OPEN INTEREST (NEW v4.0) ──────────────────────────────────────────────
+    # OI diambil setiap 1 jam, ambil 24 candle = 24 jam terakhir
+    "oi_lookback_hours":           24,    # ambil 24 data point OI (1 per jam)
+    "oi_granularity":             "1H",   # granularitas OI history
+    "oi_rise_threshold":         0.03,    # OI naik >3% dalam 24 jam = akumulasi
+    "oi_strong_rise":            0.08,    # OI naik >8% = sinyal kuat
+    "oi_drop_penalty_thresh":   -0.05,    # OI turun >5% + harga datar = distribusi
+    "oi_price_flat_thresh":      0.03,    # harga bergerak <3% = "sideways"
+    "oi_divergence_bonus":          15,   # OI naik + harga sideways = bonus max
+    "oi_dump_penalty":              12,   # OI turun + harga turun = konfirmasi dump
+
+    # ── LONG/SHORT RATIO (NEW v4.0) ───────────────────────────────────────────
+    "ls_short_squeeze_thresh":    0.60,   # short ratio > 60% = squeeze candidate
+    "ls_extreme_short_thresh":    0.70,   # short ratio > 70% = extreme squeeze fuel
+    "ls_squeeze_bonus":             10,   # bonus jika short squeeze setup terpenuhi
+    "ls_squeeze_multiplier":      1.15,   # skor dikalikan 1.15 jika squeeze + OI naik
 
     # ── LIQUIDITY SWEEP BONUS ──────────────────────────────────────────────────
-    "liq_sweep_lookback":          16,   # dari 12 — window lebih panjang
-    "liq_sweep_recover_bars":       6,   # dari 4 — recovery lebih longgar
+    "liq_sweep_lookback":          16,
+    "liq_sweep_recover_bars":       6,
 
     # ── OUTPUT ────────────────────────────────────────────────────────────────
-    "max_alerts_per_run":          10,   # dari 8 — lebih banyak coin dikirim
+    "max_alerts_per_run":          10,
     "alert_cooldown_sec":        3600,
     "sleep_coins":                 0.7,
     "sleep_error":                 3.0,
-    "cooldown_file":   "/tmp/v3_cooldown.json",
+    "cooldown_file":   "/tmp/v4_cooldown.json",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -420,6 +424,205 @@ def get_funding(symbol):
         except:
             pass
     return 0.0
+
+
+def get_funding_history(symbol):
+    """
+    Ambil funding rate history 7 hari terakhir (21 settlement × 8 jam).
+    Deteksi tren: apakah funding bergerak dari negatif ke positif (squeeze setup).
+    Return dict lengkap dengan tren, sinyal, dan data mentah.
+    """
+    periods = CONFIG["funding_history_periods"]  # 21
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/history-fund-rate",
+        params={"symbol": symbol, "productType": "usdt-futures", "pageSize": str(periods)},
+    )
+    _null = {"trend": "unknown", "avg": 0.0, "current": 0.0, "delta": 0.0,
+             "signal": "none", "rates": [], "periods": 0}
+
+    if not data or data.get("code") != "00000":
+        return _null
+    try:
+        records = data.get("data", [])
+        # Bitget mengembalikan newest first — balik ke urutan kronologis
+        rates = list(reversed([float(r["fundingRate"]) for r in records
+                                if "fundingRate" in r]))
+    except Exception:
+        return _null
+
+    if len(rates) < 3:
+        return _null
+
+    current   = rates[-1]
+    avg_all   = _mean(rates)
+    half      = max(1, len(rates) // 2)
+    avg_old   = _mean(rates[:half])
+    avg_new   = _mean(rates[half:])
+    delta     = avg_new - avg_old
+    thresh    = CONFIG["funding_trend_thresh"]
+
+    if delta > thresh:
+        trend = "rising"
+    elif delta < -thresh:
+        trend = "falling"
+    else:
+        trend = "flat"
+
+    # Klasifikasi sinyal berdasarkan pola 7 hari
+    if avg_old < -0.0002 and avg_new > avg_old and delta > 0:
+        # Short capitulating — ini adalah sinyal short squeeze paling kuat
+        signal = "squeeze_setup"
+    elif avg_all < 0 and trend == "rising":
+        # Masih negatif tapi bergerak naik = transisi
+        signal = "negative_to_positive"
+    elif avg_all < -0.0010:
+        # Funding sangat negatif stabil = short dominan = bahan bakar squeeze
+        signal = "heavy_shorts"
+    elif avg_all > 0.0010 and trend == "rising":
+        # Terlalu banyak long, overheated
+        signal = "overheated"
+    else:
+        signal = "neutral"
+
+    return {
+        "trend":   trend,
+        "avg":     round(avg_all, 6),
+        "current": round(current, 6),
+        "delta":   round(delta, 6),
+        "signal":  signal,
+        "rates":   rates,
+        "periods": len(rates),
+        "avg_old": round(avg_old, 6),
+        "avg_new": round(avg_new, 6),
+    }
+
+
+def get_open_interest_history(symbol):
+    """
+    Ambil OI history 24 jam terakhir (granularitas 1H, 24 data point).
+    Hitung delta OI, deteksi divergence OI naik + harga sideways.
+    Return dict dengan delta_pct, tren, dan sinyal divergence.
+    """
+    lookback = CONFIG["oi_lookback_hours"]  # 24
+    gran     = CONFIG["oi_granularity"]      # "1H"
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/open-interest-history",
+        params={"symbol": symbol, "productType": "usdt-futures",
+                "granularity": gran, "limit": str(lookback)},
+    )
+    _null = {"delta_pct": 0.0, "trend": "unknown", "signal": "none",
+             "oi_now": 0.0, "oi_12h_ago": 0.0, "oi_24h_ago": 0.0, "valid": False}
+
+    if not data or data.get("code") != "00000":
+        return _null
+
+    try:
+        records = data.get("data", [])
+        # Bitget: [ts, openInterestList[{openInterestValue, symbol}]]
+        # atau format flat tergantung endpoint versi
+        oi_vals = []
+        for r in records:
+            if isinstance(r, list) and len(r) >= 2:
+                oi_vals.append(float(r[1]))
+            elif isinstance(r, dict):
+                v = r.get("openInterestValue") or r.get("openInterest") or r.get("size", 0)
+                oi_vals.append(float(v))
+        oi_vals = [v for v in oi_vals if v > 0]
+    except Exception:
+        return _null
+
+    if len(oi_vals) < 4:
+        return _null
+
+    # Urutan kronologis: oldest → newest
+    # Bitget biasanya newest first
+    if len(oi_vals) >= 2 and oi_vals[0] != oi_vals[-1]:
+        # Cek apakah data sudah terurut atau perlu dibalik
+        # Heuristik: asumsikan newest first (seperti endpoint lain Bitget)
+        oi_vals = list(reversed(oi_vals))
+
+    oi_now     = oi_vals[-1]
+    oi_12h     = oi_vals[max(0, len(oi_vals) - 13)]   # ~12 jam lalu
+    oi_24h     = oi_vals[0]                             # ~24 jam lalu
+
+    delta_24h_pct = (oi_now - oi_24h) / oi_24h if oi_24h > 0 else 0.0
+    delta_12h_pct = (oi_now - oi_12h) / oi_12h if oi_12h > 0 else 0.0
+
+    rise_thresh        = CONFIG["oi_rise_threshold"]      # 0.03
+    strong_rise_thresh = CONFIG["oi_strong_rise"]         # 0.08
+    drop_thresh        = CONFIG["oi_drop_penalty_thresh"] # -0.05
+
+    if delta_24h_pct >= strong_rise_thresh:
+        oi_trend = "strong_rise"
+    elif delta_24h_pct >= rise_thresh:
+        oi_trend = "rising"
+    elif delta_24h_pct <= drop_thresh:
+        oi_trend = "falling"
+    else:
+        oi_trend = "flat"
+
+    return {
+        "delta_pct":    round(delta_24h_pct, 4),
+        "delta_12h_pct": round(delta_12h_pct, 4),
+        "trend":        oi_trend,
+        "signal":       oi_trend,
+        "oi_now":       round(oi_now, 2),
+        "oi_12h_ago":   round(oi_12h, 2),
+        "oi_24h_ago":   round(oi_24h, 2),
+        "valid":        True,
+    }
+
+
+def get_long_short_ratio(symbol):
+    """
+    Ambil Long/Short Account Ratio terkini dari Bitget.
+    Jika short ratio > 60% = setup short squeeze.
+    Return dict dengan long_pct, short_pct, dan sinyal squeeze.
+    """
+    data = safe_get(
+        f"{BITGET_BASE}/api/v2/mix/market/account-long-short-ratio",
+        params={"symbol": symbol, "productType": "usdt-futures", "period": "1h"},
+    )
+    _null = {"long_pct": 0.5, "short_pct": 0.5, "signal": "neutral", "valid": False}
+
+    if not data or data.get("code") != "00000":
+        return _null
+
+    try:
+        records = data.get("data", [])
+        if not records:
+            return _null
+        # Ambil record terbaru
+        latest  = records[0] if isinstance(records[0], dict) else None
+        if not latest:
+            return _null
+        long_ratio  = float(latest.get("longRatio",  latest.get("longAccountRatio",  0.5)))
+        short_ratio = float(latest.get("shortRatio", latest.get("shortAccountRatio", 0.5)))
+        # Normalisasi jika dalam bentuk persen (>1 = perlu dibagi 100)
+        if long_ratio > 1:
+            long_ratio  /= 100
+            short_ratio /= 100
+    except Exception:
+        return _null
+
+    squeeze_thresh  = CONFIG["ls_short_squeeze_thresh"]   # 0.60
+    extreme_thresh  = CONFIG["ls_extreme_short_thresh"]   # 0.70
+
+    if short_ratio >= extreme_thresh:
+        signal = "extreme_short"    # squeeze fuel sangat tinggi
+    elif short_ratio >= squeeze_thresh:
+        signal = "squeeze_candidate"
+    elif long_ratio >= 0.70:
+        signal = "long_dominant"    # terlalu banyak long = reversal risk
+    else:
+        signal = "neutral"
+
+    return {
+        "long_pct":  round(long_ratio, 4),
+        "short_pct": round(short_ratio, 4),
+        "signal":    signal,
+        "valid":     True,
+    }
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  📐  MATH HELPERS
@@ -645,20 +848,7 @@ def calc_entry_targets(candles, compression_zone):
     atr  = calc_atr(candles[-48:], 14) or cur * 0.025
 
     comp_mid = (compression_zone["high"] + compression_zone["low"]) / 2
-    comp_low  = compression_zone["low"]
-    comp_high = compression_zone["high"]
-
-    # v3.9 MODULE 7: PRE-BREAKOUT ENTRY LOGIC
-    # Old logic: entry = min(cur, comp_high * 1.005) — waits near top of range
-    # New logic: if price is INSIDE compression, enter at current price (or slight discount)
-    #            This enables positioning BEFORE the breakout, not after confirmation.
-    price_in_compression = comp_low <= cur <= comp_high
-    if price_in_compression:
-        # Inside zone: enter at current price with small discount for limit order
-        entry = cur * 0.998
-    else:
-        # Above zone (already breaking out): revert to confirmation entry
-        entry = min(cur * 0.999, comp_high * 1.005)
+    entry    = min(cur * 0.999, compression_zone["high"] * 1.005)
 
     sl = compression_zone["low"] - atr * CONFIG["atr_sl_mult"]
     sl = max(sl, entry * 0.85)
@@ -723,46 +913,13 @@ def calc_entry_targets(candles, compression_zone):
 #  🔬  FORENSIC PATTERN DETECTORS
 # ══════════════════════════════════════════════════════════════════════════════
 def detect_higher_lows(candles, lookback=4):
-    """
-    v3.9 FIX: Original used 4 candles with 1.5% tolerance.
-    With ATR=1%, random walk creates 'higher lows' 75% of the time on ANY coin.
-    
-    Fixed requirements:
-    1. Use 8-candle lookback (not 4) — reduces noise sensitivity
-    2. Require net upward slope: last low > first low by >0.3% (trend, not noise)
-    3. Price POSITION check: higher lows are only bullish when price is at/below
-       the compression zone midpoint — NOT when price is already elevated (distribution)
-    """
-    # Use wider lookback for noise resistance
-    effective_lookback = max(lookback, 8)
-    if len(candles) < effective_lookback:
+    if len(candles) < lookback:
         return False
-
-    recent = candles[-effective_lookback:]
+    recent = candles[-lookback:]
     lows   = [c["low"] for c in recent]
-
-    # Requirement 1: No lower low (original check, now over 8 candles)
     for i in range(1, len(lows)):
         if lows[i] < lows[i-1] * 0.985:
             return False
-
-    # Requirement 2: Net upward trend in lows (not just flat/noise)
-    if lows[0] > 0:
-        net_slope = (lows[-1] - lows[0]) / lows[0]
-        if net_slope < 0.003:   # must rise at least 0.3% over the window
-            return False
-
-    # Requirement 3: Price position — higher lows are bullish ONLY near lows.
-    # If current price is >15% above the 8-candle low range, it's distribution.
-    low_range_floor = min(lows)
-    cur_price = candles[-1]["close"]
-    if low_range_floor > 0:
-        price_above_range = (cur_price - low_range_floor) / low_range_floor
-        if price_above_range > 0.15:
-            # Price too far above the lows — higher lows are from OLD compression,
-            # current price is at distribution level
-            return False
-
     return True
 
 def detect_price_acceleration(candles, lookback=6):
@@ -1048,30 +1205,6 @@ def detect_stealth_accumulation(candles):
     detected  = stealth_score >= threshold
     status    = "STEALTH_ACCUMULATION_DETECTED" if detected else "NONE"
 
-    # BUG FIX v3.9: Stealth fires on distribution coins (flat price + stable high vol
-    # = high score_vol_suppress + score_price_compress). Add distribution context check:
-    # Stealth is NOT valid when volume is ELEVATED (>2x historical baseline).
-    # Real stealth accumulation has LOW/DECLINING volume, not steady high volume.
-    if detected:
-        # Check: is the current vol level elevated vs 60-candle baseline?
-        baseline_window = confirmed[-60:] if len(confirmed) >= 60 else confirmed
-        baseline_vols = [c.get("volume_usd", c.get("volume", 0)) for c in baseline_window[:-len(window)]] if len(baseline_window) > len(window) else []
-        if baseline_vols:
-            baseline_avg = _mean(baseline_vols)
-            current_avg  = avg_vol_window
-            vol_elevation = current_avg / baseline_avg if baseline_avg > 0 else 1.0
-            if vol_elevation > 2.0:
-                # Volume is elevated 2x+ — this is NOT stealth, it's active trading
-                detected = False
-                status   = f"STEALTH_INVALIDATED(vol_elevation={vol_elevation:.1f}x)"
-                stealth_score = max(0.0, stealth_score - 25.0)
-            elif vol_elevation > 1.5:
-                # Elevated but not extreme — reduce score, don't fully invalidate
-                stealth_score = max(0.0, stealth_score - 10.0)
-                detected = stealth_score >= threshold
-                if not detected:
-                    status = "NONE"
-
     # Entry trigger
     breakout_vol_mult = cfg.get("stealth_breakout_vol_mult", 1.5) if hasattr(cfg, "get") else 1.5
     breakout_vol_mult = 1.5
@@ -1199,40 +1332,6 @@ def score_volume_intelligence(candles):
     # RVOL < 1.0 = no bonus, no penalty (could be accumulation before RVOL rises)
 
     vol_score = min(vol_score + rvol_score, 30)   # v3.2: ceiling raised 25→30
-
-    # ── v3.9 FIX: PRICE POSITION CONTEXT ─────────────────────────────────────
-    # Low volume means different things at different price levels:
-    #   Low vol at LOWS  = accumulation (smart money quietly buying) → BULLISH
-    #   Low vol at HIGHS = distribution exhaustion (supply absorbed, less selling)
-    #                      OR dead top (no buyers left) → BEARISH/NEUTRAL
-    #
-    # Check: is current price near the 100-candle HIGH or LOW?
-    # If near high → discount low-vol score heavily
-    if len(candles) >= 50:
-        highs100 = [c["high"] for c in candles[-100:]] if len(candles) >= 100 else [c["high"] for c in candles]
-        lows100  = [c["low"]  for c in candles[-100:]] if len(candles) >= 100 else [c["low"]  for c in candles]
-        h100 = max(highs100)
-        l100 = min(lows100)
-        price_range = h100 - l100
-        cur_close = candles[-1]["close"]
-
-        if price_range > 0:
-            # Position within 100-candle range: 0.0 = at low, 1.0 = at high
-            price_position = (cur_close - l100) / price_range
-
-            if price_position > 0.80 and vol_ratio < 0.8:
-                # Price at top 20% of range + declining vol = distribution exhaustion
-                # NOT accumulation. Reduce score significantly.
-                vol_score = max(0, vol_score - 12)
-                vol_label += f" [TOP_DIST_zone:{price_position:.2f}]"
-            elif price_position > 0.65 and vol_ratio < 0.5:
-                # Price in upper third + low vol = likely post-pump
-                vol_score = max(0, vol_score - 6)
-                vol_label += f" [upper_zone:{price_position:.2f}]"
-            elif price_position < 0.30 and vol_ratio < 0.7:
-                # Price near lows + low vol = genuine accumulation zone → boost
-                vol_score = min(30, vol_score + 3)
-                vol_label += f" [accum_zone:{price_position:.2f}]"
 
     return vol_score, {
         "vol_ratio":        round(vol_ratio, 3),
@@ -1500,28 +1599,8 @@ def calc_distribution_penalty(candles):
     uw_thresh   = CONFIG["dist_upper_wick_ratio"]    # 0.65
     prog_thresh = CONFIG["dist_high_vol_no_prog_pct"] # 0.010
 
-    # ── MINIMUM LIQUIDITY GATE ────────────────────────────────────────────────
-    # v3.7 FIX: Distribution signal is meaningless on ultra-illiquid coins.
-    # If median vol < $10K/candle, signals are statistical noise not real distribution.
-    MIN_DIST_VOL_USD = 10_000   # $10K minimum median candle volume for dist to fire
-    if vol_median < MIN_DIST_VOL_USD:
-        return 0, {"reason": f"illiquid_vol_median=${vol_median:.0f} < ${MIN_DIST_VOL_USD}"}
-
-    # ── CONTEXT CHECK: tight price range = accumulation zone, not distribution ──
-    # If overall price hasn't moved much in the window, "high vol no progress" 
-    # candles are likely accumulation noise, not smart money distribution.
-    price_range_pct = abs(max(c["high"] for c in recent) - min(c["low"] for c in recent)) / min(c["low"] for c in recent) if min(c["low"] for c in recent) > 0 else 1.0
-    is_tight_range = price_range_pct < 0.08   # less than 8% range = compression zone
-
     penalty = 0
     flags   = []
-
-    # ── OVERALL WINDOW PRICE DIRECTION ────────────────────────────────────────
-    # v3.7 FIX: If price is clearly UP over the 10-candle window, this is NOT
-    # distribution — it's a breakout/pump. Distribution = high vol + price flat or DOWN.
-    # Skip Track A entirely if overall move is positive and significant.
-    overall_move = (price_now - price_10a) / price_10a if price_10a > 0 else 0
-    is_breakout_up = overall_move > 0.04   # price up >4% in 10 candles = pump, not dist
 
     # ── TRACK A: High volume + no price progress (heaviest signal) ─────────────
     # This is what distribution looks like: smart money dumps into volume
@@ -1538,28 +1617,20 @@ def calc_distribution_penalty(candles):
             if c["close"] < c["open"]:   # red + high volume
                 high_vol_red += 1
 
-    # v3.7 FIX: Skip Track A if price clearly broke out upward (pump, not distribution)
-    # Also: reduce Track A significantly in tight range zones (could be accumulation)
-    if not is_breakout_up:
-        if high_vol_no_prog >= 3:
-            base_pen = 25 if not is_tight_range else 10
-            penalty += base_pen
-            flags.append(f"hvnp:{high_vol_no_prog}x (severe)")
-        elif high_vol_no_prog >= 2:
-            base_pen = 18 if not is_tight_range else 6
-            penalty += base_pen
-            flags.append(f"hvnp:{high_vol_no_prog}x")
-        elif high_vol_no_prog >= 1:
-            base_pen = 8 if not is_tight_range else 2
-            penalty += base_pen
-            flags.append(f"hvnp:1x")
+    if high_vol_no_prog >= 3:
+        penalty += 25
+        flags.append(f"hvnp:{high_vol_no_prog}x (severe)")
+    elif high_vol_no_prog >= 2:
+        penalty += 18
+        flags.append(f"hvnp:{high_vol_no_prog}x")
+    elif high_vol_no_prog >= 1:
+        penalty += 8
+        flags.append(f"hvnp:1x")
 
-        # High volume + red candles compound the penalty (only outside tight range)
-        if high_vol_red >= 2 and high_vol_no_prog >= 1 and not is_tight_range:
-            penalty += 7
-            flags.append(f"hvred:{high_vol_red}x")
-    else:
-        flags.append(f"track_a_skipped(breakout_up={overall_move*100:.1f}%)")
+    # High volume + red candles compound the penalty
+    if high_vol_red >= 2 and high_vol_no_prog >= 1:
+        penalty += 7
+        flags.append(f"hvred:{high_vol_red}x")
 
     # ── TRACK B: Structural distribution signals (softer) ─────────────────────
     track_b = 0
@@ -1599,35 +1670,10 @@ def calc_distribution_penalty(candles):
 
     penalty += min(track_b, 15)   # cap track B contribution
 
-    # ── TRACK C: Stable elevated volume distribution (BUG FIX v3.9) ───────────
-    # Track A only fires on vol SPIKES (>3x median). But real distribution often
-    # has STEADILY HIGH volume without individual spikes — smart money distributing
-    # over many candles. This was the core gap causing false pre-pump signals.
-    track_c = 0
-    if not is_breakout_up:
-        # Compare current 10-candle avg vol vs baseline 30-candle avg
-        baseline_vol = _mean([c["volume_usd"] for c in candles[-30:-10]]) if len(candles) >= 30 else avg_vol
-        elevated_vol_ratio = avg_vol / baseline_vol if baseline_vol > 0 else 1.0
-
-        if elevated_vol_ratio >= 2.0 and overall_move <= 0.01:
-            # Vol is 2x+ elevated but price going nowhere or down = distribution
-            # Scale: 2x=8pts, 3x=14pts, 4x+=20pts (capped at 20)
-            track_c = min(20, int((elevated_vol_ratio - 1.0) * 8))
-            flags.append(f"stable_elevated_vol({elevated_vol_ratio:.1f}x_no_progress)")
-        elif elevated_vol_ratio >= 1.5 and overall_move < -0.02:
-            # Elevated vol + price declining = clear distribution
-            track_c = 10
-            flags.append(f"elevated_vol_price_down({elevated_vol_ratio:.1f}x)")
-
-    penalty += min(track_c, 20)   # cap track C at 20
-
     cap = CONFIG.get("dist_penalty_cap", 25)   # v3.2: raised cap 20→25
-    # v3.9: raise total cap to 35 — stable distribution must be properly penalized
-    cap = 35
     penalty = min(penalty, cap)
     return penalty, {"penalty": penalty, "flags": flags,
-                     "high_vol_no_prog": high_vol_no_prog, "upper_wick_count": upper_wick_count,
-                     "track_c": track_c}
+                     "high_vol_no_prog": high_vol_no_prog, "upper_wick_count": upper_wick_count}
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  🐢  SLOW TREND PENALTY
@@ -1636,7 +1682,6 @@ def calc_distribution_penalty(candles):
 def calc_slow_trend_penalty(candles, compression):
     """
     Penalize coins that are just drifting up/down without tension.
-    v3.7: also penalizes trending compression (compression window itself is sloping).
     Return (penalty 0-20, details)
     """
     if len(candles) < 30:
@@ -1656,32 +1701,13 @@ def calc_slow_trend_penalty(candles, compression):
     no_compression = (atr_s is not None and atr_l is not None and atr_l > 0
                       and atr_s / atr_l > 0.90)
 
-    # Compression zone exists — if yes, no slow-trend penalty UNLESS the
-    # compression itself is trending (price moved significantly within the zone window)
+    # Compression zone exists — if yes, no slow-trend penalty
     has_compression = compression is not None
 
-    # v3.7 FIX: Check if price moved significantly WITHIN the compression window.
-    # A real compression zone has price go NOWHERE (tight base).
-    # A slow trend has price drifting consistently upward even inside the "zone".
-    trending_compression = False
-    if has_compression and compression["length"] >= 20:
-        comp_len = min(compression["length"], len(candles) - 1)
-        price_at_comp_start = candles[-comp_len]["close"]
-        price_now_comp      = candles[-1]["close"]
-        if price_at_comp_start > 0:
-            comp_price_move = abs(price_now_comp - price_at_comp_start) / price_at_comp_start
-            # If price moved >8% during the compression window, it's a trend, not a base
-            if comp_price_move > 0.08 and trending:
-                trending_compression = True
-
     if trending and no_compression and not has_compression:
-        return 10, {"reason": "smooth trend without compression"}
+        return min(10, 10), {"reason": "smooth trend without compression"}   # v3.1: capped at 10
     elif trending and no_compression and has_compression and compression["length"] < 30:
-        return 5, {"reason": "short compression + trending"}
-    elif trending_compression:
-        # v3.7: trending within compression = not a real base = penalize
-        comp_move_pct = abs(price_now_comp - price_at_comp_start) / price_at_comp_start
-        return 8, {"reason": f"trending_compression (moved {comp_move_pct*100:.1f}% in zone)"}
+        return min(5, 10), {"reason": "short compression + trending"}
     return 0, {}
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1829,1954 +1855,399 @@ def score_pre_breakout_bias(candles):
     return score, {"pbb_score": score, "flags": flags, "window": win}
 
 
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  🔢  v3.4 — SHARED NORMALIZATION UTILITY
-#  Global normalisation rule (mandatory per spec):
-#    z  = clamp((value - rolling_mean) / rolling_std, -3, 3)
-#    n  = (z + 3) / 6   →  final range 0–1
-#  rolling_mean / rolling_std use EXISTING system windows (win_mid=20 default).
+#  📈  OPEN INTEREST FLOW SCORE (NEW v4.0)
+#  OI naik + harga sideways = akumulasi tersembunyi = sinyal terkuat pre-pump
 # ══════════════════════════════════════════════════════════════════════════════
-def _norm01(value, series, clamp_lo=-3.0, clamp_hi=3.0):
+def score_open_interest(oi_data, candles):
     """
-    Normalise a single value against a list of reference values.
-    Uses existing data series — no new windows created.
-    Returns float in [0, 1].
+    Scoring Open Interest vs pergerakan harga 24 jam terakhir.
+    Divergence (OI naik, harga datar) adalah sinyal accumulation terkuat.
+
+    Logic:
+    - OI naik + harga datar = smart money bangun posisi diam-diam = +15
+    - OI naik kuat + harga turun sedikit = absorption = +12
+    - OI naik moderat = bullish bias = +8
+    - OI flat = +0 (netral)
+    - OI turun + harga turun = distribusi = penalty
+    - OI turun + harga naik = short covering rally = tidak reliable = penalty kecil
     """
-    if not series or len(series) < 2:
-        return 0.5   # neutral when insufficient history
-    mu  = _mean(series)
-    sig = _std(series)
-    if sig == 0:
-        return 0.5
-    z = (value - mu) / sig
-    z = max(clamp_lo, min(clamp_hi, z))
-    return (z + 3.0) / 6.0
+    if not oi_data.get("valid") or len(candles) < 24:
+        return 0, {"reason": "no OI data"}
 
+    delta_24h   = oi_data["delta_pct"]        # OI change 24 jam
+    delta_12h   = oi_data["delta_12h_pct"]    # OI change 12 jam terakhir
+    price_now   = candles[-1]["close"]
+    price_24h   = candles[-25]["close"] if len(candles) >= 25 else candles[0]["close"]
+    price_delta = (price_now - price_24h) / price_24h if price_24h > 0 else 0.0
+    price_flat  = abs(price_delta) < CONFIG["oi_price_flat_thresh"]  # harga bergerak <3%
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  💧  v3.4 — LIQUIDITY NORMALISER (SECTION 1)
-#  Replaces hard liquidity_penalty subtraction with a multiplicative scale.
-#  Uses existing vol_avg_long (20-candle) window as rolling reference.
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_liquidity_norm(vol_24h, candles):
-    """
-    Returns liquidity_norm in [0.4, 1.0].
-    Normalises vol_24h against rolling volume history (win_mid=20 candles).
-    Clamped to [0.4, 1.0] so even illiquid coins keep 40% of their score.
-    """
-    win = CONFIG.get("vol_avg_long", 20)
-    ref_vols = [c["volume_usd"] for c in candles[-win:]]
-    # Scale daily volume down to per-candle equivalent for comparison
-    per_candle_equiv = vol_24h / 24.0
-    z = _norm01(per_candle_equiv, ref_vols)
-    return max(0.4, min(1.0, z))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🧮  v3.4 — COMPONENT NORMALISER
-#  Converts existing 0-100 sub-scores to 0-1 using rolling z-score.
-#  Uses win_compression=100 candle history window as rolling reference.
-# ══════════════════════════════════════════════════════════════════════════════
-def _norm_score_to_01(score, max_possible):
-    """
-    Simple min-max normalisation for a score already bounded at max_possible.
-    Returns float in [0, 1].
-    """
-    if max_possible <= 0:
-        return 0.0
-    return max(0.0, min(1.0, score / max_possible))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ⚡  v3.4 — TENSION ENGINE (SECTION 3 — MULTIPLICATIVE)
-#  Four sub-components multiplied together.
-#  All sub-components normalised to [0,1] using rolling history.
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_tension_engine(candles, compression, comp_tension_details):
-    """
-    tension_score =
-        compression_norm
-        * volume_stability_norm
-        * breakout_suppression_norm
-        * time_in_range_norm
-
-    All components use rolling stats from existing windows.
-    Returns float in [0, 1].
-    """
-    if compression is None:
-        return 0.0, {}
-
-    win_mid  = CONFIG.get("vol_avg_long", 20)
-    win_long = CONFIG.get("win_structure", 50)
-
-    # ── compression_norm: ATR ratio already computed in comp_tension_details ──
-    atr_ratio = comp_tension_details.get("vol_ratio", 1.0)   # atr_short/atr_long
-    # Lower ATR ratio = tighter compression = higher norm
-    # Build reference series of ATR ratios over the past win_long candles
-    win_s = CONFIG.get("win_short", 10)
-    atr_ratio_samples = []
-    step = max(1, win_s // 2)
-    for i in range(win_long, min(len(candles) - win_s - 3, win_long * 4), step):
-        as_ = calc_atr(candles[-(i + win_s + 3): -(i)], win_s)
-        al_ = calc_atr(candles[-(i + win_long + 3): -(i)], win_long)
-        if as_ and al_ and al_ > 0:
-            atr_ratio_samples.append(as_ / al_)
-
-    if atr_ratio_samples:
-        # Invert: lower atr_ratio → higher normalised value
-        inv_ratio = 1.0 / atr_ratio if atr_ratio > 0 else 2.0
-        inv_samples = [1.0 / s if s > 0 else 2.0 for s in atr_ratio_samples]
-        compression_norm = _norm01(inv_ratio, inv_samples)
-    else:
-        compression_norm = _norm_score_to_01(comp_tension_details.get("comp_score", 0), 22)
-
-    # ── volume_stability_norm: inverse of rolling std(volume) ─────────────────
-    vols = [c["volume_usd"] for c in candles[-win_mid:]]
-    avg_v = _mean(vols)
-    std_v = _std(vols)
-    cv = (std_v / avg_v) if avg_v > 0 else 1.0
-    # Low CV = stable volume = high stability_norm
-    # Build CV samples over rolling windows
-    cv_samples = []
-    for i in range(win_long, min(len(candles), win_long * 3), win_mid):
-        sl = [c["volume_usd"] for c in candles[-i - win_mid: -i]]
-        if len(sl) >= 4:
-            a = _mean(sl); s = _std(sl)
-            if a > 0:
-                cv_samples.append(s / a)
-    if cv_samples:
-        inv_cv = 1.0 / (cv + 1e-9)
-        inv_cv_samples = [1.0 / (x + 1e-9) for x in cv_samples]
-        volume_stability_norm = _norm01(inv_cv, inv_cv_samples)
-    else:
-        volume_stability_norm = max(0.0, min(1.0, 1.0 - cv))
-
-    # ── breakout_suppression_norm: normalised count of failed breakouts ────────
-    comp_low  = compression["low"]
-    comp_high = compression["high"]
-    atr_val   = calc_atr(candles[-25:], 14) or (price_now_ref := candles[-1]["close"]) * 0.02
-    if atr_val is None:
-        atr_val = candles[-1]["close"] * 0.02
-
-    # Count failed breakdowns (spec: break < 1 ATR below support, recover ≤ 3 candles)
-    # BUG FIX v3.9: ONLY count failed breaks BELOW support (buyers defending lows).
-    # Previously also counted failed breaks ABOVE resistance — that is SELLING pressure
-    # (distribution), not absorption. Removing it stops false inflation of fbd_count.
-    lookback20 = candles[-20:] if len(candles) >= 20 else candles
-    fbd_count  = 0
-    for i in range(len(lookback20) - 1):
-        c = lookback20[i]
-        # Break below support → buyer absorbs sell pressure → recovery = bullish
-        if c["low"] < comp_low and (comp_low - c["low"]) < atr_val:
-            for j in range(i + 1, min(i + 4, len(lookback20))):
-                if lookback20[j]["close"] > comp_low:
-                    fbd_count += 1
-                    break
-        # REMOVED: "Break above resistance" was counting DISTRIBUTION as absorption
-        # A high that pierces resistance and gets sold back = supply overhead, not demand
-
-    # Normalise against possible maximum (up to 5 events in 20 candles)
-    breakout_suppression_norm = min(1.0, fbd_count / 4.0)
-
-    # ── time_in_range_norm: fraction of last 50 candles inside compression ─────
-    win_struct = min(win_long, len(candles))
-    in_range_count = sum(
-        1 for c in candles[-win_struct:]
-        if comp_low <= c["close"] <= comp_high
-    )
-    time_in_range_raw = in_range_count / win_struct if win_struct > 0 else 0.0
-    # Normalise against rolling reference (50 candles history)
-    tir_samples = []
-    block = win_struct // 3
-    if block >= 5:
-        for k in range(2):
-            sl  = candles[-(win_struct + block * k): -(block * k) or None]
-            if len(sl) >= win_struct:
-                cnt = sum(1 for c in sl[-win_struct:] if comp_low <= c["close"] <= comp_high)
-                tir_samples.append(cnt / win_struct)
-    if tir_samples:
-        time_in_range_norm = _norm01(time_in_range_raw, tir_samples)
-    else:
-        time_in_range_norm = time_in_range_raw
-
-    # ── Multiplicative combination ────────────────────────────────────────────
-    tension_engine_score = (
-        compression_norm
-        * volume_stability_norm
-        * breakout_suppression_norm
-        * time_in_range_norm
-    )
-    # Rescale: product of 4 terms [0,1] is small; raise to maintain signal strength
-    tension_engine_score = min(1.0, tension_engine_score ** 0.5)
-
-    return tension_engine_score, {
-        "compression_norm":         round(compression_norm, 4),
-        "volume_stability_norm":    round(volume_stability_norm, 4),
-        "breakout_suppression_norm":round(breakout_suppression_norm, 4),
-        "time_in_range_norm":       round(time_in_range_norm, 4),
-        "fbd_count":                fbd_count,
+    score  = 0
+    detail = {
+        "oi_delta_24h": round(delta_24h, 4),
+        "oi_delta_12h": round(delta_12h, 4),
+        "price_delta_24h": round(price_delta, 4),
+        "price_flat": price_flat,
     }
 
+    strong_thresh = CONFIG["oi_strong_rise"]   # 0.08
+    rise_thresh   = CONFIG["oi_rise_threshold"] # 0.03
+    drop_thresh   = CONFIG["oi_drop_penalty_thresh"]  # -0.05
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  🧲  v3.5 — ABSORPTION ENGINE (SECTION 2 — REAL IMPLEMENTATION)
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_absorption_engine(candles, compression):
-    """
-    v3.5 — Four-component continuous absorption score.
+    if delta_24h >= strong_thresh and price_flat:
+        # Kasus terbaik: OI naik kuat, harga diam = akumulasi nyata
+        score = CONFIG["oi_divergence_bonus"]  # +15
+        detail["signal"] = "strong_divergence"
 
-    Components (all normalised 0-1):
-      fbd_count          — number of failed breakdowns in last 20 candles
-      fbd_depth          — avg penetration below support in ATR units (inverted)
-      fbd_recovery_speed — normalised inverse of candles to return to range
-      rejection_strength — avg lower wick / candle range
+    elif delta_24h >= strong_thresh and price_delta < -0.02:
+        # OI naik tapi harga turun sedikit = absorption (beli tekanan jual)
+        score = 12
+        detail["signal"] = "absorption"
 
-    Final formula (spec-exact):
-      fbd_strength = clamp(
-          (fbd_count / 3) * 0.30
-          + (1 - fbd_depth) * 0.25
-          + fbd_recovery_speed * 0.25
-          + rejection_strength * 0.20,
-          0, 1)
+    elif delta_24h >= strong_thresh:
+        # OI naik kuat, harga juga naik = bullish tapi waspadai late entry
+        score = 8
+        detail["signal"] = "oi_rise_with_price"
 
-    absorption_score = fbd_strength
-    """
-    win = CONFIG.get("vol_avg_long", 20)
-    n   = len(candles)
-    if n < win + 5:
-        return 0.0, {"reason": "insufficient data"}
+    elif delta_24h >= rise_thresh and price_flat:
+        # OI naik moderat + harga datar = akumulasi sedang
+        score = 10
+        detail["signal"] = "moderate_divergence"
 
-    comp_low = compression["low"] if compression else candles[-1]["close"] * 0.97
-    atr_val  = calc_atr(candles[-25:], 14)
-    if not atr_val or atr_val <= 0:
-        atr_val = candles[-1]["close"] * 0.02
+    elif delta_24h >= rise_thresh:
+        score = 5
+        detail["signal"] = "oi_rising"
 
-    lookback20 = candles[-20:] if n >= 20 else candles
+    elif delta_24h <= drop_thresh and price_delta < -0.02:
+        # OI turun + harga turun = distribusi dikonfirmasi = hard penalty
+        penalty = CONFIG["oi_dump_penalty"]  # -12
+        score   = -penalty
+        detail["signal"] = "distribution_confirmed"
 
-    # ── fbd_count, fbd_depth, fbd_recovery_speed ──────────────────────────────
-    fbd_count         = 0
-    total_depth_atr   = 0.0   # sum of penetration depths in ATR units
-    total_recovery    = 0.0   # sum of candles to recover (lower = faster)
-    fbd_events        = []    # (depth_atr, recovery_candles)
+    elif delta_24h <= drop_thresh:
+        # OI turun tapi harga naik = short covering, tidak reliable
+        score = -5
+        detail["signal"] = "short_covering_only"
 
-    for i in range(len(lookback20) - 1):
-        c = lookback20[i]
-        # Failed breakdown: break below support by less than 1 ATR, recover ≤ 3 candles
-        if c["low"] < comp_low and (comp_low - c["low"]) < atr_val:
-            depth_atr = (comp_low - c["low"]) / atr_val   # 0 to ~1
-            for j in range(i + 1, min(i + 4, len(lookback20))):
-                if lookback20[j]["close"] > comp_low:
-                    recovery_candles = j - i   # 1, 2, or 3
-                    fbd_count += 1
-                    fbd_events.append((depth_atr, recovery_candles))
-                    total_depth_atr += depth_atr
-                    total_recovery  += recovery_candles
-                    break
-
-    # fbd_depth: avg ATR penetration, normalised to [0,1] — 0 = surface touch, 1 = deep
-    # AUDIT FIX: when no events exist, set fbd_depth=0.5 so fbd_depth_term=0.5 (not 1.0).
-    # This prevents a phantom absorption_score of 0.25+ on coins with ZERO real absorption.
-    if fbd_events:
-        avg_depth_atr = total_depth_atr / len(fbd_events)
-        fbd_depth = min(1.0, avg_depth_atr)   # already in [0,1] since depth < 1 ATR
     else:
-        fbd_depth = 0.5   # FIXED: neutral value when no events — was 0.0 which gave 1.0 term
+        detail["signal"] = "neutral"
 
-    # fbd_recovery_speed: normalised inverse of avg recovery candles
-    # faster recovery (1 candle) → higher score
-    # AUDIT FIX: neutral 0.5 when no events (was 0.0 but fbd_depth_term=0.5 now)
-    if fbd_events:
-        avg_recovery = total_recovery / len(fbd_events)   # 1.0 to 3.0
-        # Map: 1 candle → 1.0, 3 candles → 0.33
-        fbd_recovery_speed = 1.0 / avg_recovery
+    # Momentum bonus: jika 12 jam terakhir OI naik lebih cepat dari 24 jam (akselerasi)
+    if delta_12h > 0 and delta_24h > 0 and delta_12h > delta_24h * 0.6:
+        # 12h OI delta lebih dari 60% dari total 24h = akselerasi di akhir
+        score = min(score + 3, CONFIG["oi_divergence_bonus"])
+        detail["momentum"] = "accelerating"
     else:
-        fbd_recovery_speed = 0.0   # genuinely 0 — no recovery events occurred
+        detail["momentum"] = "normal"
 
-    # ── rejection_strength: avg lower wick / candle range (last N candles) ────
-    recent = candles[-win:]
-    wick_ratios = []
-    for c in recent:
-        rng = c["high"] - c["low"]
-        if rng > 0:
-            lower_wick = min(c["open"], c["close"]) - c["low"]
-            wick_ratios.append(max(0.0, lower_wick / rng))
-    rejection_strength = _mean(wick_ratios) if wick_ratios else 0.0
-    # rejection_strength is already in [0,1] — lower wick fraction of range
-
-    # ── Spec-exact final formula ──────────────────────────────────────────────
-    fbd_count_norm = min(1.0, fbd_count / 3.0)   # normalised: 3+ events → 1.0
-    fbd_depth_term = 1.0 - fbd_depth              # inverted: shallow = good
-
-    fbd_strength = max(0.0, min(1.0,
-        fbd_count_norm       * 0.30
-        + fbd_depth_term     * 0.25
-        + fbd_recovery_speed * 0.25
-        + rejection_strength * 0.20
-    ))
-
-    absorption_score = fbd_strength
-
-    return absorption_score, {
-        "fbd_count":           fbd_count,
-        "fbd_count_norm":      round(fbd_count_norm, 4),
-        "fbd_depth":           round(fbd_depth, 4),
-        "fbd_recovery_speed":  round(fbd_recovery_speed, 4),
-        "rejection_strength":  round(rejection_strength, 4),
-        "fbd_strength":        round(fbd_strength, 4),
-        "absorption_score":    round(absorption_score, 4),
-    }
+    detail["score"] = score
+    return score, detail
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📡  v3.5 — OI + CVD DATA FETCHER
-def compute_flow_engine(oi_series=None, cvd_series=None, price_series=None):
+#  🔴  LONG/SHORT SQUEEZE SCORE (NEW v4.0)
+#  Short dominan + OI naik = bahan bakar short squeeze siap meledak
+# ══════════════════════════════════════════════════════════════════════════════
+def score_long_short(ls_data, oi_data):
     """
-    v3.5 — Continuous flow scoring (replaces binary logic).
-    All three scores are continuous clamp functions, not binary 0/1.
+    Scoring L/S ratio untuk deteksi short squeeze setup.
+    Jika short ratio > 60% DAN OI naik = multiplier effect pada skor total.
 
-    Validation:
-      - If oi_series or cvd_series is None → flow_score = 0, log FLOW DATA MISSING
-      - If len(oi_series) != len(cvd_series) → flow_score = 0, log FLOW LENGTH MISMATCH
+    Return (base_score, multiplier, details)
+    - base_score: bonus/penalty additive
+    - multiplier: dikalikan ke raw_score sebelum capping (1.0 jika tidak ada squeeze)
     """
-    # ── Validation (mandatory per spec Section 1) ─────────────────────────────
-    if oi_series is None or cvd_series is None:
-        log.debug("FLOW DATA MISSING — flow_score=0")
-        return 0.0, {"reason": "FLOW DATA MISSING", "flow_score": 0.0,
-                     "buildup_score": 0.0, "flow_absorption": 0.0, "squeeze_score": 0.0}
+    if not ls_data.get("valid"):
+        return 0, 1.0, {"reason": "no L/S data"}
 
-    # Align lengths to the shorter series
-    min_len = min(len(oi_series), len(cvd_series))
-    if min_len < 5:
-        log.debug("FLOW DATA TOO SHORT — flow_score=0")
-        return 0.0, {"reason": "FLOW DATA TOO SHORT", "flow_score": 0.0,
-                     "buildup_score": 0.0, "flow_absorption": 0.0, "squeeze_score": 0.0}
+    short_pct   = ls_data["short_pct"]
+    long_pct    = ls_data["long_pct"]
+    ls_signal   = ls_data["signal"]
+    oi_rising   = oi_data.get("valid") and oi_data.get("delta_pct", 0) >= CONFIG["oi_rise_threshold"]
+    oi_strong   = oi_data.get("valid") and oi_data.get("delta_pct", 0) >= CONFIG["oi_strong_rise"]
 
-    if len(oi_series) != len(cvd_series):
-        log.debug(f"FLOW LENGTH MISMATCH (oi={len(oi_series)} cvd={len(cvd_series)}) — trimming to {min_len}")
-        oi_series  = oi_series[-min_len:]
-        cvd_series = cvd_series[-min_len:]
+    score      = 0
+    multiplier = 1.0
+    detail     = {"short_pct": round(short_pct, 4), "long_pct": round(long_pct, 4),
+                  "ls_signal": ls_signal, "oi_rising": oi_rising}
 
-    # ── OI change z-score (continuous, normalised to 0-1) ────────────────────
-    oi_changes  = [oi_series[i] - oi_series[i - 1] for i in range(1, len(oi_series))]
-    cvd_changes = [cvd_series[i] - cvd_series[i - 1] for i in range(1, len(cvd_series))]
+    if ls_signal == "extreme_short" and oi_strong:
+        # Short >70% + OI naik kuat = squeeze hampir pasti
+        score      = CONFIG["ls_squeeze_bonus"]           # +10
+        multiplier = CONFIG["ls_squeeze_multiplier"]      # ×1.15
+        detail["squeeze_quality"] = "extreme_squeeze_setup"
 
-    cur_oi_change  = oi_changes[-1]  if oi_changes  else 0.0
-    cur_cvd_change = cvd_changes[-1] if cvd_changes else 0.0
+    elif ls_signal == "extreme_short" and oi_rising:
+        score      = CONFIG["ls_squeeze_bonus"]            # +10
+        multiplier = 1.10
+        detail["squeeze_quality"] = "strong_squeeze_setup"
 
-    # Raw z-scores (not normalised to 0-1 here — used directly in clamp formulas)
-    def _raw_zscore(value, series):
-        if len(series) < 2:
-            return 0.0
-        mu  = _mean(series)
-        sig = _std(series)
-        return (value - mu) / sig if sig > 0 else 0.0
+    elif ls_signal == "squeeze_candidate" and oi_rising:
+        score      = 7
+        multiplier = 1.08
+        detail["squeeze_quality"] = "squeeze_candidate"
 
-    oi_z_raw  = _raw_zscore(cur_oi_change,  oi_changes)
-    cvd_z_raw = _raw_zscore(cur_cvd_change, cvd_changes)
+    elif ls_signal == "squeeze_candidate":
+        # Short >60% tapi OI tidak naik = masih potensial tapi kurang konfirmasi
+        score = 4
+        detail["squeeze_quality"] = "weak_squeeze"
 
-    # ── Continuous scoring (spec-exact clamp formulas) ────────────────────────
-    # buildup_score = clamp((oi_z - 0.5) / 2.0, 0, 1)
-    buildup_score    = max(0.0, min(1.0, (oi_z_raw - 0.5) / 2.0))
+    elif ls_signal == "long_dominant":
+        # Terlalu banyak long = risiko reversal
+        score = -6
+        detail["squeeze_quality"] = "long_crowded"
 
-    # flow_absorption = clamp((cvd_z - 0.3) / 2.0, 0, 1)
-    flow_absorption  = max(0.0, min(1.0, (cvd_z_raw - 0.3) / 2.0))
-
-    # squeeze_score = clamp((oi_z - abs(cvd_z)) / 2.0, 0, 1)
-    squeeze_score    = max(0.0, min(1.0, (oi_z_raw - abs(cvd_z_raw)) / 2.0))
-
-    flow_score = (
-        0.4 * buildup_score
-        + 0.3 * flow_absorption
-        + 0.3 * squeeze_score
-    )
-    return flow_score, {
-        "oi_z_raw":        round(oi_z_raw, 4),
-        "cvd_z_raw":       round(cvd_z_raw, 4),
-        "buildup_score":   round(buildup_score, 4),
-        "flow_absorption": round(flow_absorption, 4),
-        "squeeze_score":   round(squeeze_score, 4),
-        "flow_score":      round(flow_score, 4),
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  📖  v3.4 — ORDERBOOK VACUUM (SECTION 6)
-#  Requires live orderbook ask volume near price.
-#  Per spec: vacuum_score = 0 when data unavailable.
-#  Architecture complete for future integration.
-# ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-#  📡  v3.5 — OI + CVD DATA FETCHER (Section 1 — Flow Engine Activation)
-#  Fetches real Open Interest series from Bitget.
-#  CVD is derived from signed candle volume (no tick data needed).
-# ══════════════════════════════════════════════════════════════════════════════
-def get_oi_and_cvd(symbol, candles):
-    """
-    Fetch OI series from Bitget /api/v2/mix/market/open-interest.
-    Derive CVD proxy from signed candle volume (close > open = buy pressure).
-
-    Returns (oi_series list[float] | None, cvd_series list[float] | None).
-    Returns (None, None) on any failure — caller handles gracefully.
-    """
-    # ── OI series from Bitget ─────────────────────────────────────────────────
-    oi_series = None
-    try:
-        data = safe_get(
-            f"{BITGET_BASE}/api/v2/mix/market/open-interest",
-            params={"symbol": symbol, "productType": "usdt-futures"},
-        )
-        if data and data.get("code") == "00000" and data.get("data"):
-            raw = data["data"]
-            # API may return a single value or a list
-            if isinstance(raw, list) and len(raw) > 1:
-                oi_series = [float(item.get("openInterestList", item.get("openInterest", 0)))
-                             for item in raw if item]
-            elif isinstance(raw, list) and len(raw) == 1:
-                # Single-element list — fall through to proxy below
-                pass
-            elif isinstance(raw, dict):
-                # Single snapshot — DO NOT replicate as flat series (causes all-zero changes)
-                # oi_series stays None → will use proxy below
-                pass
-    except Exception as e:
-        log.debug(f"OI fetch failed for {symbol}: {e}")
-        oi_series = None
-
-    # AUDIT FIX: If OI series is unavailable or a single point (flat replication produces
-    # all-zero changes → buildup_score=0 always), derive OI proxy from candle volume.
-    # Logic: large green candles with expanding volume = OI buildup proxy.
-    if oi_series is None or len(oi_series) < 5:
-        if candles and len(candles) >= 10:
-            try:
-                oi_proxy = []
-                running_oi = 1000.0   # arbitrary starting unit
-                for c in candles[-min(len(candles), 50):]:
-                    rng = c["high"] - c["low"]
-                    if rng > 0:
-                        # Estimate OI change: buy candles add OI, sell candles reduce
-                        body_dir = 1.0 if c["close"] >= c["open"] else -0.5
-                        vol_factor = c["volume_usd"] / max(1.0, c["volume_usd"])  # normalised ~1
-                        running_oi += body_dir * (c["volume_usd"] * 0.00001)
-                        running_oi = max(0.1, running_oi)
-                    oi_proxy.append(running_oi)
-                if len(oi_proxy) >= 5:
-                    oi_series = oi_proxy
-                    log.debug(f"OI proxy built for {symbol} ({len(oi_proxy)} points)")
-            except Exception as e:
-                log.debug(f"OI proxy build failed for {symbol}: {e}")
-                oi_series = None
-
-    # ── CVD proxy derived from candles ────────────────────────────────────────
-    # signed_vol = volume * body_direction * body_pct_of_range
-    # This is a candle-level CVD proxy; real CVD requires tick data.
-    cvd_series = None
-    if candles and len(candles) >= 5:
-        try:
-            signed_vols = []
-            for c in candles[-min(len(candles), 50):]:
-                rng = c["high"] - c["low"]
-                if rng > 0:
-                    body_dir = 1.0 if c["close"] >= c["open"] else -1.0
-                    body_pct = abs(c["close"] - c["open"]) / rng
-                    signed_vols.append(c["volume_usd"] * body_dir * body_pct)
-                else:
-                    signed_vols.append(0.0)
-            # Cumulative sum = CVD series
-            cvd_series = []
-            running = 0.0
-            for sv in signed_vols:
-                running += sv
-                cvd_series.append(running)
-        except Exception as e:
-            log.debug(f"CVD proxy build failed for {symbol}: {e}")
-            cvd_series = None
-
-    return oi_series, cvd_series
-
-
-def compute_vacuum_score(ask_volume_near=None, rolling_mean_ask=None):
-    """
-    Orderbook vacuum: low ask-side liquidity near price = price can move up easily.
-
-    CURRENT STATUS: Orderbook data not fetched by this system.
-    Per spec Section 6: vacuum_score = 0 when data unavailable.
-    """
-    if ask_volume_near is None or rolling_mean_ask is None or rolling_mean_ask <= 0:
-        return 0.0, {"reason": "orderbook data not available — vacuum_score=0 per spec §6"}
-
-    ask_liquidity_ratio = ask_volume_near / rolling_mean_ask
-    vacuum_score = 1.0 if ask_liquidity_ratio < 0.5 else 0.0
-    return vacuum_score, {"ask_liquidity_ratio": round(ask_liquidity_ratio, 4)}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🔮  v3.4 — NON-LINEAR SCORE COMPOSER (SECTIONS 2, 7, 8, 9, 10)
-#  Takes normalised sub-scores, applies multiplicative formula,
-#  synergy bonuses, late-entry scaling, phase reclassification,
-#  amplification and final clamp.
-# ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-#  🔴  v3.6 — PRESSURE DETECTION LAYER
-#  Pure additive overlay — zero changes to existing scoring logic.
-#  Window N = CONFIG["vol_avg_long"] (20) — identical to volume normalization.
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_pressure_layer(candles, absorption_score, flow_score):
-    """
-    Detects hidden accumulation, slow buildup, and volume/price divergence.
-
-    Window N uses vol_avg_long (existing system window) — no new windows.
-    All z-scores use the same rolling N, same formula:
-        z = (x - rolling_mean(x, N)) / rolling_std(x, N)
-    All outputs normalised 0–1. No binary logic.
-
-    Returns (pressure_score float [0,1], details_dict).
-    """
-    N = CONFIG.get("vol_avg_long", 20)   # SAME N as volume normalization
-    n = len(candles)
-
-    if n < N + 3:
-        return 0.0, {
-            "pressure_score": 0.0, "vol_price_divergence": 0.0,
-            "micro_accumulation": 0.0, "compression_tightness": 0.0,
-            "volume_z": 0.0, "price_change_z": 0.0,
-        }
-
-    # ── Shared rolling helpers (same N, same formula everywhere) ──────────────
-    def _rolling_zscore(value, series_n):
-        """z = (x - mean(series_N)) / std(series_N)"""
-        if len(series_n) < 2:
-            return 0.0
-        mu  = _mean(series_n)
-        sig = _std(series_n)
-        return (value - mu) / sig if sig > 0 else 0.0
-
-    # ── Section 1: Volume vs Price Divergence ─────────────────────────────────
-    # volume_z = zscore(volume) using same N
-    vols    = [c["volume_usd"] for c in candles[-N:]]
-    cur_vol = candles[-1]["volume_usd"]
-    volume_z = _rolling_zscore(cur_vol, vols)
-
-    # price_change_z = zscore(price_return) using same N
-    returns_n = [
-        (candles[-i]["close"] - candles[-i - 1]["close"]) / candles[-i - 1]["close"]
-        if candles[-i - 1]["close"] > 0 else 0.0
-        for i in range(1, N + 1)
-        if i + 1 <= n
-    ]
-    cur_return = returns_n[0] if returns_n else 0.0
-    price_change_z = _rolling_zscore(cur_return, returns_n)
-
-    # vol_price_divergence = clamp((volume_z - abs(price_change_z)) / 2.0, 0, 1)
-    vol_price_divergence = max(0.0, min(1.0,
-        (volume_z - abs(price_change_z)) / 2.0
-    ))
-
-    # ── Section 2: Micro Accumulation ─────────────────────────────────────────
-    # Higher low: current_low > previous_low (candle LOW values only)
-    recent_lows = [candles[-i]["low"] for i in range(1, min(N + 1, n + 1))]
-    recent_lows.reverse()   # chronological order: oldest first
-
-    hl_count = sum(
-        1 for i in range(1, len(recent_lows))
-        if recent_lows[i] > recent_lows[i - 1]
-    )
-    hl_ratio = hl_count / max(len(recent_lows) - 1, 1)
-    micro_accumulation = max(0.0, min(1.0, hl_ratio))
-
-    # ── Section 3: Compression Tightness ──────────────────────────────────────
-    # range = high - low (absolute); rolling mean of range over N candles
-    ranges_n = [c["high"] - c["low"] for c in candles[-N:]]
-    cur_range = candles[-1]["high"] - candles[-1]["low"]
-    range_avg = _mean(ranges_n) if ranges_n else cur_range
-
-    # compression_tightness = clamp(1 - (range / range_avg), 0, 1)
-    if range_avg > 0:
-        compression_tightness = max(0.0, min(1.0, 1.0 - (cur_range / range_avg)))
     else:
-        compression_tightness = 0.0
+        detail["squeeze_quality"] = "neutral"
 
-    # ── Section 4: Base Pressure Score ────────────────────────────────────────
-    pressure_score = (
-        0.4 * vol_price_divergence
-        + 0.3 * micro_accumulation
-        + 0.3 * compression_tightness
-    )
-
-    # ── Section 5: Absorption Confirmation ────────────────────────────────────
-    if pressure_score > 0.5 and absorption_score > 0.5:
-        pressure_score += 0.3
-
-    # ── Section 6: Flow Confirmation ──────────────────────────────────────────
-    if flow_score > 0.4 and pressure_score > 0.5:
-        pressure_score += 0.2
-
-    # ── Section 7: Noise Control ──────────────────────────────────────────────
-    if volume_z < -0.5:
-        pressure_score *= 0.6
-
-    if compression_tightness < 0.2:
-        pressure_score *= 0.7
-
-    # ── Section 8: Integration Priority Rule (anti false positive) ────────────
-    if pressure_score > 0.6 and absorption_score < 0.3:
-        pressure_score *= 0.7
-
-    # ── Section 9: Final Normalisation ────────────────────────────────────────
-    pressure_score = max(0.0, min(1.0, pressure_score))
-
-    return pressure_score, {
-        "pressure_score":        round(pressure_score, 4),
-        "vol_price_divergence":  round(vol_price_divergence, 4),
-        "micro_accumulation":    round(micro_accumulation, 4),
-        "compression_tightness": round(compression_tightness, 4),
-        "volume_z":              round(volume_z, 4),
-        "price_change_z":        round(price_change_z, 4),
-        "hl_count":              hl_count,
-    }
+    detail["score"]      = score
+    detail["multiplier"] = round(multiplier, 3)
+    return score, multiplier, detail
 
 
-def compose_v34_score(
-    ct_norm,          # compression+tension 0-1
-    v_norm,           # volume 0-1
-    s_norm,           # structure 0-1
-    tension_engine,   # tension engine 0-1
-    absorption_score, # absorption 0-1
-    flow_score,       # flow 0-1
-    vacuum_score,     # vacuum 0-1
-    liquidity_norm,   # liquidity multiplier 0.4-1.0
-    failed_breakdown_strength,   # fbd_strength 0-1
-    pbb_norm,         # pre-breakout bias 0-1
-    candles,          # raw candles for return_z / distance_from_range
-    compression,      # compression zone dict or None
-    phase_v33,        # phase string from detect_phase
-):
+# ══════════════════════════════════════════════════════════════════════════════
+#  💰  FUNDING RATE TREND SCORE (NEW v4.0)
+#  Tren funding 7 hari jauh lebih bermakna dari snapshot tunggal
+# ══════════════════════════════════════════════════════════════════════════════
+def score_funding_trend(funding_h):
     """
-    v3.5 — Unified non-linear score composer.
-    raw_score_additive is NOT used here (kept for logging only, per Section 3).
-
-    Sections applied:
-      S3 — no blending with additive score
-      S4 — base_score = clamp(CT*(1+V)*(1+S), 0, 2)
-      S5 — synergy 0.25 / 0.35
-      S6 — anomaly_score
-      S7 — vacuum safe mode
-      S8 — final composition formula
+    Scoring berdasarkan tren funding rate 7 hari (21 settlement).
+    Sinyal terkuat: funding negatif → bergerak naik = short capitulating.
     """
-    n = len(candles)
+    if not funding_h or not funding_h.get("rates"):
+        return 0, {"reason": "no funding history"}
 
-    # ── Section 4: Non-linear base score — clamp(CT*(1+V)*(1+S), 0, 2) ──────
-    # REMOVED: prior version divided by 4.0 to flatten the score range.
-    # NEW (spec-exact): clamp to [0, 2] without flattening.
-    base_score = max(0.0, min(2.0,
-        ct_norm * (1.0 + v_norm) * (1.0 + s_norm)
-    ))
+    signal = funding_h.get("signal", "none")
+    trend  = funding_h.get("trend",  "unknown")
+    avg    = funding_h.get("avg",    0.0)
+    delta  = funding_h.get("delta",  0.0)
 
-    # ── Section 5: Synergy bonuses (raised from 0.10/0.15 to 0.25/0.35) ────
-    synergy_bonus = 0.0
+    score  = 0
+    detail = {"signal": signal, "trend": trend,
+              "avg_7d": round(avg, 6), "delta": round(delta, 6),
+              "periods": funding_h.get("periods", 0)}
 
-    if ct_norm > 0.7 and v_norm > 0.6:
-        synergy_bonus += 0.25   # was 0.10
+    if signal == "squeeze_setup":
+        # Short capitulating: funding negatif bergerak naik = sinyal squeeze terkuat
+        score = CONFIG["funding_squeeze_bonus"]      # +12
+    elif signal == "negative_to_positive":
+        # Transisi bearish → bullish = early signal
+        score = CONFIG["funding_neg_to_pos_bonus"]   # +8
+    elif signal == "heavy_shorts":
+        # Funding sangat negatif stabil = banyak short = bahan bakar
+        score = CONFIG["funding_heavy_short_bonus"]  # +6
+    elif signal == "overheated":
+        # Funding tinggi dan naik terus = terlalu banyak long = dump risk
+        score = -CONFIG["funding_overheated_penalty"]  # -10
+    elif trend == "rising" and avg > 0:
+        # Funding positif dan naik = bullish bias ringan
+        score = 3
+    elif avg < -0.001 and trend != "rising":
+        # Funding sangat negatif dan tidak membaik = penalti ringan
+        score = -4
 
-    if failed_breakdown_strength > 0.7 and absorption_score > 0.6:
-        synergy_bonus += 0.35   # was 0.15 with different condition
-
-    if pbb_norm > 0.6:
-        synergy_bonus += 0.10   # unchanged
-
-    # ── return_z for late-entry scaling and phase (computed once here) ────────
-    win_s = min(12, n - 1)
-    win_r = min(CONFIG.get("win_structure", 50), n - 1)
-    recent_ret = (
-        (candles[-1]["close"] - candles[-win_s]["close"]) / candles[-win_s]["close"]
-        if win_s > 0 and candles[-win_s]["close"] > 0 else 0.0
-    )
-    ret_history = [
-        (candles[-i]["close"] - candles[-i - win_s]["close"]) / candles[-i - win_s]["close"]
-        for i in range(1, min(win_r, n - win_s))
-        if candles[-i - win_s]["close"] > 0
-    ]
-    return_z = _norm01(recent_ret, ret_history) if ret_history else 0.5
-
-    # price_change_z (raw, not 0-1): used in anomaly_score
-    if ret_history:
-        mu  = _mean(ret_history)
-        sig = _std(ret_history)
-        price_change_z_raw = (recent_ret - mu) / sig if sig > 0 else 0.0
-    else:
-        price_change_z_raw = 0.0
-
-    # ── Section 6: Anomaly detection (critical for ZETA/PHA-type) ─────────────
-    anomaly_score = 0.0
-
-    # Hidden accumulation: absorption present but structure weak and price flat
-    if (absorption_score > 0.6
-            and s_norm < 0.5
-            and abs(price_change_z_raw) < 0.3):
-        anomaly_score += 0.4
-
-    # Flow divergence: flow active but price not moving
-    if (flow_score > 0.5
-            and abs(price_change_z_raw) < 0.3):
-        anomaly_score += 0.3
-
-    anomaly_score = max(0.0, min(1.0, anomaly_score))
-
-    # ── Section 7: Vacuum (safe mode — already handled at call site, kept explicit)
-    # vacuum_score is already 0.0 when data unavailable; no change needed here
-
-    # ── Late entry control ─────────────────────────────────────────────────────
-    distance_from_range = 0.0
-    if compression:
-        comp_high = compression["high"]
-        price_now = candles[-1]["close"]
-        atr_val   = calc_atr(candles[-25:], 14) or price_now * 0.02
-        if atr_val > 0 and price_now > comp_high:
-            distance_from_range = (price_now - comp_high) / atr_val
-
-    late_scale = 1.0
-    if return_z > 0.75 or distance_from_range > 1.2:
-        late_scale = 0.65
-
-    # ── Phase reclassification ─────────────────────────────────────────────────
-    if ct_norm > 0.6 and return_z < 0.58:
-        phase_v34 = "early"
-    elif return_z > 0.75:
-        phase_v34 = "late"
-    else:
-        phase_v34 = "mid"
-
-    recent_pump_detected = return_z > 0.75 and distance_from_range > 0.5
-    if recent_pump_detected and phase_v34 == "early":
-        phase_v34 = "mid"
-
-    # ── Section 8: Final score composition (spec-exact, no blending) ──────────
-    pre_late_score = (
-        base_score
-        + synergy_bonus
-        + tension_engine * 0.20
-        + absorption_score * 0.25
-        + flow_score * 0.25
-        + anomaly_score
-        + vacuum_score * 0.15
-    )
-
-    score = pre_late_score * late_scale * liquidity_norm
-
-    # ── v3.9 FIX: Price position scale — prevents v34=1.0 on distribution coins ──
-    # If price is at the top of its 100-candle range, all the compression/absorption
-    # signals are from OLD accumulation, not current. Scale down proportionally.
-    # This fixes the core bug: v34 amplifies old signals equally for pre-pump AND
-    # post-pump/distribution coins.
-    if n >= 50:
-        price_highs = [c["high"] for c in candles[-min(n, 100):]]
-        price_lows  = [c["low"]  for c in candles[-min(n, 100):]]
-        h100 = max(price_highs)
-        l100 = min(price_lows)
-        rng100 = h100 - l100
-        cur_price = candles[-1]["close"]
-        if rng100 > 0:
-            price_pos = (cur_price - l100) / rng100   # 0=at lows, 1=at highs
-            # Scale: at lows (pos<0.25) = full score. At highs (pos>0.85) = 40% score.
-            # Linear interpolation between 0.25→1.0 and 0.85→0.40
-            if price_pos > 0.85:
-                price_pos_scale = 0.40
-            elif price_pos > 0.25:
-                # Linearly interpolate: 0.25→1.0, 0.85→0.40
-                price_pos_scale = 1.0 - (price_pos - 0.25) / (0.85 - 0.25) * 0.60
-            else:
-                price_pos_scale = 1.0   # at lows — full score
-            score = score * price_pos_scale
-
-    # Amplification (Section 9 preserved)
-    score = score ** 1.25
-
-    # Final clamp 0-1 (Section 10)
-    score = max(0.0, min(1.0, score))
-
-    return score, {
-        "base_score_nonlinear":  round(base_score, 4),
-        "synergy_bonus":         round(synergy_bonus, 4),
-        "tension_engine_contrib":round(tension_engine * 0.20, 4),
-        "absorption_contrib":    round(absorption_score * 0.25, 4),
-        "flow_contrib":          round(flow_score * 0.25, 4),
-        "anomaly_score":         round(anomaly_score, 4),
-        "vacuum_contrib":        round(vacuum_score * 0.15, 4),
-        "return_z_norm":         round(return_z, 4),
-        "price_change_z_raw":    round(price_change_z_raw, 4),
-        "distance_from_range":   round(distance_from_range, 4),
-        "liquidity_norm":        round(liquidity_norm, 4),
-        "late_scale":            round(late_scale, 4),
-        "phase_v34":             phase_v34,
-        "recent_pump_detected":  recent_pump_detected,
-    }
-
+    # Current rate gate tetap berlaku (sudah di master_score)
+    detail["score"] = score
+    return score, detail
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📐  STANDARDIZED LOOKBACK CONSTANTS (v3.3)
-#  All new modules use these exclusively — no mixing with other windows.
-# ══════════════════════════════════════════════════════════════════════════════
-LOOKBACK_SHORT = 12
-LOOKBACK_MID   = 24
-LOOKBACK_LONG  = 48
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🔬  TASK 1 — PHASE DETECTION
-# ══════════════════════════════════════════════════════════════════════════════
-def detect_phase(candles) -> str:
-    n = len(candles)
-    if n < LOOKBACK_LONG + 5:
-        return "early"
-
-    price_now = candles[-1]["close"]
-    price_s   = candles[-LOOKBACK_SHORT]["close"]
-    price_m   = candles[-LOOKBACK_MID]["close"]
-    pc_short  = (price_now - price_s) / price_s if price_s > 0 else 0
-    pc_mid    = (price_now - price_m) / price_m if price_m > 0 else 0
-
-    atr_short = calc_atr(candles[-(LOOKBACK_SHORT + 3):], LOOKBACK_SHORT)
-    atr_long  = calc_atr(candles[-(LOOKBACK_LONG  + 3):], LOOKBACK_LONG)
-    atr_ratio = (atr_short / atr_long) if (atr_short and atr_long and atr_long > 0) else 1.0
-
-    atr_ratio_history = []
-    step = max(1, LOOKBACK_SHORT // 3)
-    for i in range(LOOKBACK_LONG, min(n - LOOKBACK_SHORT - 3, LOOKBACK_LONG * 3), step):
-        as_ = calc_atr(candles[-(i + LOOKBACK_SHORT + 3): -(i)], LOOKBACK_SHORT)
-        al_ = calc_atr(candles[-(i + LOOKBACK_LONG  + 3): -(i)], LOOKBACK_LONG)
-        if as_ and al_ and al_ > 0:
-            atr_ratio_history.append(as_ / al_)
-
-    if atr_ratio_history:
-        atr_p33 = _percentile(atr_ratio_history, 33)
-        atr_p66 = _percentile(atr_ratio_history, 66)
-    else:
-        atr_p33, atr_p66 = 0.7, 1.1
-
-    recent_ranges  = [(c["high"] - c["low"]) / c["low"] for c in candles[-LOOKBACK_SHORT:] if c["low"] > 0]
-    history_ranges = [(c["high"] - c["low"]) / c["low"] for c in candles[-LOOKBACK_LONG:-LOOKBACK_SHORT] if c["low"] > 0]
-    avg_recent_range  = _mean(recent_ranges)
-    avg_history_range = _mean(history_ranges) if history_ranges else avg_recent_range
-    range_expansion_ratio = (avg_recent_range / avg_history_range) if avg_history_range > 0 else 1.0
-
-    vols_recent = [c["volume_usd"] for c in candles[-LOOKBACK_SHORT:]]
-    vols_prior  = [c["volume_usd"] for c in candles[-LOOKBACK_MID:-LOOKBACK_SHORT]]
-    avg_vol_recent = _mean(vols_recent)
-    avg_vol_prior  = _mean(vols_prior) if vols_prior else avg_vol_recent
-    vol_acc_ratio  = (avg_vol_recent / avg_vol_prior) if avg_vol_prior > 0 else 1.0
-
-    is_atr_low       = atr_ratio < atr_p33
-    is_atr_expanding = atr_ratio > atr_p66
-    is_range_wide    = range_expansion_ratio > 1.4
-    is_vol_creeping  = 1.05 < vol_acc_ratio < 2.5
-    is_vol_spiking   = vol_acc_ratio >= 2.5
-
-    if abs(pc_mid) < 0.05 and is_atr_low and is_vol_creeping:
-        return "early"
-    if abs(pc_short) < 0.02 and not is_range_wide and not is_vol_spiking:
-        return "early"
-    if abs(pc_mid) > 0.10 and (is_atr_expanding or is_range_wide):
-        return "late"
-    if abs(pc_short) > 0.08 and is_vol_spiking and is_range_wide:
-        return "late"
-    return "mid"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🏆  TASK 2 — PRIORITY SCORE
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_priority_score(score: float, phase: str,
-                           structure_score: float,
-                           distribution_flag: bool) -> float:
-    STRUCTURE_STRONG_THRESHOLD = 10
-    priority = float(score)
-    if phase == "early":
-        priority += 10
-    elif phase == "late":
-        priority -= 12
-    if structure_score >= STRUCTURE_STRONG_THRESHOLD:
-        priority += 5
-    if distribution_flag:
-        priority -= 10
-    return round(max(0.0, priority), 2)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🔀  TASK 3 — OVERLAP CONTROL PENALTY
-# ══════════════════════════════════════════════════════════════════════════════
-def overlap_penalty(compression_active: bool,
-                    stealth_active: bool,
-                    pre_breakout_active: bool) -> int:
-    active_count = sum([compression_active, stealth_active, pre_breakout_active])
-    if active_count == 3:
-        return -8
-    if active_count == 2:
-        return -5
-    return 0
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ⏰  TASK 4 — ENHANCED ANTI-LATE DETECTION
-# ══════════════════════════════════════════════════════════════════════════════
-def enhanced_late_penalty(candles) -> int:
-    n = len(candles)
-    if n < LOOKBACK_LONG + 3:
-        return 0
-
-    price_now = candles[-1]["close"]
-    price_lb  = candles[-LOOKBACK_SHORT]["close"]
-    pc_short  = abs((price_now - price_lb) / price_lb) if price_lb > 0 else 0
-
-    atr_s = calc_atr(candles[-(LOOKBACK_SHORT + 3):], LOOKBACK_SHORT)
-    atr_l = calc_atr(candles[-(LOOKBACK_LONG  + 3):], LOOKBACK_LONG)
-    atr_expanded = (atr_s is not None and atr_l is not None and atr_l > 0
-                    and atr_s > atr_l * 1.3)
-
-    def avg_body(sl):
-        b = [abs(c["close"] - c["open"]) / c["open"] for c in sl if c["open"] > 0]
-        return _mean(b) if b else 0.0
-
-    body_recent  = avg_body(candles[-LOOKBACK_SHORT:])
-    body_history = avg_body(candles[-LOOKBACK_LONG:-LOOKBACK_SHORT])
-    body_expanded = (body_history > 0 and body_recent > body_history * 1.5)
-
-    late_signals = sum([pc_short > 0.06, atr_expanded, body_expanded])
-
-    if late_signals >= 3:
-        return -10
-    if late_signals == 2:
-        return -7
-    if late_signals == 1 and pc_short > 0.06:
-        return -5
-    return 0
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  💀  TASK 5 — DEAD MARKET PENALTY
-# ══════════════════════════════════════════════════════════════════════════════
-def dead_market_penalty(candles) -> int:
-    n = len(candles)
-    if n < LOOKBACK_LONG + 3:
-        return 0
-
-    vols = [c["volume_usd"] for c in candles[-LOOKBACK_MID:]]
-    avg_v = _mean(vols)
-    std_v = _std(vols)
-    vol_cv = (std_v / avg_v) if avg_v > 0 else 0
-
-    vols_long  = [c["volume_usd"] for c in candles[-LOOKBACK_LONG:]]
-    avg_v_long = _mean(vols_long)
-    std_v_long = _std(vols_long)
-    vol_cv_long = (std_v_long / avg_v_long) if avg_v_long > 0 else 0
-    vol_flat = vol_cv < vol_cv_long * 0.6
-
-    atr_s = calc_atr(candles[-(LOOKBACK_SHORT + 3):], LOOKBACK_SHORT)
-    atr_l = calc_atr(candles[-(LOOKBACK_LONG  + 3):], LOOKBACK_LONG)
-    if atr_s is not None and atr_l is not None and atr_l > 0:
-        atr_flat = 0.85 < (atr_s / atr_l) < 1.15
-    else:
-        atr_flat = False
-
-    lows = [c["low"] for c in candles[-LOOKBACK_MID:]]
-    higher_low_count = sum(1 for i in range(1, len(lows)) if lows[i] > lows[i - 1] * 1.001)
-    no_higher_lows = higher_low_count < len(lows) * 0.30
-
-    dead_signals = sum([vol_flat, atr_flat, no_higher_lows])
-    if dead_signals >= 3:
-        return -8
-    if dead_signals == 2:
-        return -4
-    return 0
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🔍  v3.7 — VOLUME TREND QUALIFIER
-#  Differentiates dead market (flat vol) from real accumulation (vol trend UP).
-#  Returns multiplier 0.3–1.0 applied to working_score.
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_volume_trend_qualifier(candles):
-    """
-    Real accumulation has volume trending UP (smart money quietly entering).
-    Dead market has flat or declining volume.
-    Slow trend has random/flat volume.
-
-    Returns (multiplier float [0.3, 1.0], details dict).
-    multiplier=1.0 → volume trend confirms signal
-    multiplier=0.3 → dead/declining volume, heavy suppression
-    """
-    N = CONFIG.get("vol_avg_long", 20)
-    n = len(candles)
-    if n < N * 3:
-        return 1.0, {"reason": "insufficient history", "vol_trend": "unknown"}
-
-    # Split into 3 equal windows: old → mid → recent
-    third = N
-    vols_old    = [c["volume_usd"] for c in candles[-(third*3):-(third*2)]]
-    vols_mid    = [c["volume_usd"] for c in candles[-(third*2):-third]]
-    vols_recent = [c["volume_usd"] for c in candles[-third:]]
-
-    avg_old    = _mean(vols_old)    if vols_old    else 0.0
-    avg_mid    = _mean(vols_mid)    if vols_mid    else 0.0
-    avg_recent = _mean(vols_recent) if vols_recent else 0.0
-
-    if avg_old <= 0:
-        return 1.0, {"reason": "no vol history"}
-
-    # Trend ratio: recent vs old
-    trend_ratio = avg_recent / avg_old
-
-    # Coefficient of variation across full window — dead market = very low CV
-    all_vols = [c["volume_usd"] for c in candles[-N*3:]]
-    cv = _std(all_vols) / _mean(all_vols) if _mean(all_vols) > 0 else 0.0
-
-    # Classify
-    if trend_ratio >= 1.30 and cv > 0.15:
-        # Clearly rising volume with variance — real accumulation
-        multiplier = 1.0
-        trend_label = f"rising_strong(x{trend_ratio:.2f})"
-    elif trend_ratio >= 1.10:
-        multiplier = 0.90
-        trend_label = f"rising(x{trend_ratio:.2f})"
-    elif trend_ratio >= 0.90 and cv > 0.20:
-        # Flat but with variance — could be pre-pump stealth
-        multiplier = 0.75
-        trend_label = f"flat_with_variance(cv={cv:.2f})"
-    elif trend_ratio >= 0.90 and cv <= 0.10:
-        # Flat volume + low variance = dead market
-        multiplier = 0.35
-        trend_label = f"DEAD_FLAT(x{trend_ratio:.2f},cv={cv:.2f})"
-    elif trend_ratio < 0.80:
-        # Declining volume — no pump coming
-        multiplier = 0.45
-        trend_label = f"declining(x{trend_ratio:.2f})"
-    else:
-        multiplier = 0.65
-        trend_label = f"weak(x{trend_ratio:.2f})"
-
-    return multiplier, {
-        "multiplier": round(multiplier, 3),
-        "trend_ratio": round(trend_ratio, 3),
-        "vol_cv": round(cv, 4),
-        "vol_trend": trend_label,
-        "avg_old": round(avg_old),
-        "avg_recent": round(avg_recent),
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ⚡  v3.7 — VOLATILITY RANK SCORE
-#  Pre-pump coins have HIGH historical ATR relative to current compression.
-#  Dead market has uniformly low ATR (never expanded).
-#  Returns (score 0–20, details dict).
-# ══════════════════════════════════════════════════════════════════════════════
-def compute_volatility_rank_score(candles):
-    """
-    Measures ATR expansion POTENTIAL by comparing:
-      - Current ATR (short window) vs historical ATR distribution
-      - If current ATR is in bottom quartile of history → coiled = bullish
-      - If historical max ATR >> current ATR → coin CAN move fast
-      - If ATR always flat → dead coin, no pump potential
-
-    Returns (score 0-20, details dict).
-    Score 15-20 = coiled high-volatility coin ready to expand
-    Score 5-10  = moderate, possible
-    Score 0-3   = dead, flat ATR history = no pump potential
-    """
-    win_s = CONFIG.get("win_short", 10)
-    win_l = CONFIG.get("win_structure", 50)
-    n = len(candles)
-
-    if n < win_l + win_s + 5:
-        # v3.7 FIX: Don't return blind 5 — compute range CV from available candles.
-        # Dead micro-caps have near-zero range CV even with few candles.
-        if n >= 10:
-            ranges = [c["high"] - c["low"] for c in candles if c["low"] > 0]
-            quick_cv = _std(ranges) / _mean(ranges) if _mean(ranges) > 0 else 0
-            if quick_cv < 0.05:
-                return 0, {"reason": "insufficient_data+dead_range", "atr_cv": quick_cv}
-        return 3, {"reason": "insufficient data"}
-
-    atr_short = calc_atr(candles[-(win_s + 5):], win_s)
-    atr_long  = calc_atr(candles[-(win_l + 5):], win_l)
-
-    if not atr_short or not atr_long or atr_long <= 0:
-        return 0, {"reason": "atr_calc_failed"}
-
-    # Build ATR history: rolling short ATRs over past 200 candles
-    atr_history = []
-    step = max(1, win_s // 2)
-    for i in range(win_s + 5, min(n, 200), step):
-        a = calc_atr(candles[-(i + win_s + 5): -(i)], win_s)
-        if a and a > 0:
-            atr_history.append(a)
-
-    if len(atr_history) < 5:
-        # v3.7 FIX: use available atr_history or range cv to detect dead coin
-        if len(atr_history) >= 2:
-            quick_cv = _std(atr_history) / _mean(atr_history) if _mean(atr_history) > 0 else 0
-            if quick_cv < 0.05:
-                return 0, {"reason": "short_history+dead_atr", "atr_cv": quick_cv}
-        return 3, {"reason": "insufficient atr history"}
-
-    # What percentile is the current ATR in historical distribution?
-    atr_p10  = _percentile(atr_history, 10)
-    atr_p25  = _percentile(atr_history, 25)
-    atr_p50  = _percentile(atr_history, 50)
-    atr_p90  = _percentile(atr_history, 90)
-    atr_max  = max(atr_history)
-    atr_cv   = _std(atr_history) / _mean(atr_history) if _mean(atr_history) > 0 else 0
-
-    # Expansion potential = max ATR / current ATR
-    # High ratio = coin has moved violently before = can do it again
-    expansion_potential = atr_max / atr_short if atr_short > 0 else 1.0
-
-    score = 0
-
-    # [1] Current ATR in low percentile → coiled (0-12 pts)
-    if atr_short <= atr_p10:
-        score += 12
-    elif atr_short <= atr_p25:
-        score += 8
-    elif atr_short <= atr_p50:
-        score += 4
-
-    # [2] Expansion potential (0-5 pts)
-    if expansion_potential >= 5.0:
-        score += 5
-    elif expansion_potential >= 3.0:
-        score += 3
-    elif expansion_potential >= 2.0:
-        score += 1
-
-    # [3] v3.7: ATR actively expanding (cv high + recent ATR > older ATR)
-    # A pump in progress expands ATR from low → high. This IS a valid signal.
-    if atr_cv >= 0.25 and len(atr_history) >= 10:
-        recent_atr_avg = _mean(atr_history[-5:])
-        older_atr_avg  = _mean(atr_history[:5])
-        if older_atr_avg > 0 and recent_atr_avg / older_atr_avg >= 1.5:
-            # ATR expanding = volatility regime change = pump in progress
-            score = max(score, 8)   # floor at 8 for expanding volatile coins
-
-    # [4] ATR CV — dead coins have near-zero CV (flat ATR always)
-    # PENALTY: if CV < 0.05 → monotone ATR → dead market → hard suppress
-    if atr_cv < 0.05:
-        score = max(0, score - 15)   # dead coin: total suppression
-    elif atr_cv < 0.10:
-        score = max(0, score - 5)
-
-    score = max(0, min(20, score))
-
-    return score, {
-        "atr_short": round(atr_short, 8),
-        "atr_long":  round(atr_long, 8),
-        "atr_p25":   round(atr_p25, 8),
-        "atr_p50":   round(atr_p50, 8),
-        "atr_max":   round(atr_max, 8),
-        "atr_cv":    round(atr_cv, 4),
-        "expansion_potential": round(expansion_potential, 2),
-        "vol_rank_score": score,
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ⏰  v3.9 — SESSION ALPHA BONUS
-#  Asia session transition (~02:00 WIB = 19:00 UTC prev day) is historically
-#  the highest-probability window for altcoin ignition by market makers.
-#  Pre-Asia buildup: 17:00–19:00 UTC (00:00–02:00 WIB)
-#  Asia expansion:   19:00–22:00 UTC (02:00–05:00 WIB)
-#  Europe open:      06:00–08:00 UTC (13:00–15:00 WIB) — secondary window
-# ══════════════════════════════════════════════════════════════════════════════
-def session_alpha_bonus(current_utc_hour: int) -> float:
-    """
-    Returns a score bonus based on current UTC hour aligned to WIB (UTC+7).
-    Only applies conditional bonus — never a flat constant.
-
-    Window mapping:
-      UTC 17-18 (WIB 00-01): pre-Asia buildup        → +6  (accumulation phase)
-      UTC 19-21 (WIB 02-04): Asia ignition window    → +10 (highest probability)
-      UTC 22-23 (WIB 05-06): Asia continuation       → +5
-      UTC 06-07 (WIB 13-14): Europe open window      → +4
-      UTC 08-11 (WIB 15-18): US pre-market           → +3
-      All other hours                                 → 0
-    """
-    h = current_utc_hour % 24
-    if h in (17, 18):      return 6.0    # pre-Asia accumulation
-    if h in (19, 20, 21):  return 10.0   # Asia ignition — peak window
-    if h in (22, 23):      return 5.0    # Asia continuation
-    if h in (6, 7):        return 4.0    # Europe open
-    if h in (8, 9, 10, 11): return 3.0  # US pre-market
-    return 0.0
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🔥  v3.9 — IGNITION TRIGGER DETECTOR
-#  Detects the transition: compression+accumulation → expansion.
-#  Uses only internal signals — no price confirmation needed.
-#
-#  Logic:
-#    - pressure_score > 0.55: hidden demand is elevated (buyers absorbing supply)
-#    - flow_score > 0.30: OI/CVD confirms directional intent (not just noise)
-#    - cqi < 0.022: compression is structurally sound (not just random chop)
-#    - compression_length >= 48: coil has aged enough to release (2+ days)
-#
-#  ALL four conditions must align — prevents false triggers on single-factor spikes.
-# ══════════════════════════════════════════════════════════════════════════════
-def detect_ignition(pressure_score: float, flow_score: float,
-                    cqi: float, compression_length: int) -> tuple:
-    """
-    Returns (is_ignition: bool, ignition_score: float, reason: str).
-    ignition_score is graded 0.0-1.0 — partial credit for near-ignition.
-    """
-    conditions_met = 0
-    details = []
-
-    # Condition 1: pressure elevated — demand absorbing supply
-    if pressure_score > 0.55:
-        conditions_met += 1
-        details.append(f"press={pressure_score:.2f}")
-    elif pressure_score > 0.40:
-        conditions_met += 0.5   # partial
-
-    # Condition 2: flow directional intent confirmed
-    if flow_score > 0.30:
-        conditions_met += 1
-        details.append(f"flow={flow_score:.2f}")
-    elif flow_score > 0.15:
-        conditions_met += 0.5
-
-    # Condition 3: compression quality structural (not noise)
-    if 0 < cqi < 0.022:
-        conditions_met += 1
-        details.append(f"cqi={cqi:.4f}")
-    elif 0 < cqi < 0.035:
-        conditions_met += 0.5
-
-    # Condition 4: coil has aged — energy stored (2+ days minimum)
-    if compression_length >= 48:
-        conditions_met += 1
-        details.append(f"coil={compression_length}h")
-    elif compression_length >= 24:
-        conditions_met += 0.5
-
-    # Full ignition: all 4 conditions met
-    is_ignition = conditions_met >= 3.5
-    ignition_score = min(1.0, conditions_met / 4.0)
-
-    reason = "+".join(details) if details else "none"
-    return is_ignition, ignition_score, reason
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  💧  v3.9 — LIQUIDITY VACUUM PROXY
-#  Simulates thin ask-side liquidity WITHOUT orderbook data.
-#
-#  Market maker pattern before a pump:
-#    1. Range narrows (they stop providing wide spreads)
-#    2. Volume declines (not distributing, just holding)
-#    3. Volatility compresses (ATR squeezes relative to history)
-#    4. Then: sudden micro-expansion candle with volume (ignition test)
-#
-#  Proxy score = probability that ask-side is thin above price.
-# ══════════════════════════════════════════════════════════════════════════════
-def liquidity_vacuum_proxy(candles) -> tuple:
-    """
-    Returns (vacuum_score float [0,1], details dict).
-    Higher score = thinner liquidity above = easier breakout.
-
-    Uses last 6 candles (micro-window) vs 30-candle baseline.
-    """
-    n = len(candles)
-    if n < 35:
-        return 0.0, {"reason": "insufficient data"}
-
-    recent6  = candles[-6:]
-    base30   = candles[-30:]
-
-    # [1] Range compression — last 6 candles significantly tighter than baseline
-    ranges6  = [(c["high"] - c["low"]) / c["low"] for c in recent6  if c["low"] > 0]
-    ranges30 = [(c["high"] - c["low"]) / c["low"] for c in base30   if c["low"] > 0]
-    avg_range6  = _mean(ranges6)  if ranges6  else 0.01
-    avg_range30 = _mean(ranges30) if ranges30 else 0.01
-    range_compression = 1.0 - min(1.0, avg_range6 / avg_range30) if avg_range30 > 0 else 0.0
-
-    # [2] Volume declining into compression — supply exhaustion signal
-    vols6  = [c["volume_usd"] for c in recent6]
-    vols30 = [c["volume_usd"] for c in base30]
-    avg_vol6  = _mean(vols6)  if vols6  else 0
-    avg_vol30 = _mean(vols30) if vols30 else 1
-    vol_decline = max(0.0, 1.0 - (avg_vol6 / avg_vol30)) if avg_vol30 > 0 else 0.0
-    vol_decline = min(vol_decline, 0.9)   # cap: complete silence is suspect
-
-    # [3] Micro-expansion on last candle (ignition test candle)
-    # Breakout attempt: last candle range > 1.5× avg of 5 before it
-    last_c = candles[-1]
-    prev5_ranges = [(c["high"] - c["low"]) / c["low"] for c in candles[-6:-1] if c["low"] > 0]
-    avg_prev5 = _mean(prev5_ranges) if prev5_ranges else 0.01
-    last_range = (last_c["high"] - last_c["low"]) / last_c["low"] if last_c["low"] > 0 else 0
-    micro_expansion = max(0.0, min(1.0, (last_range / avg_prev5 - 1.0) / 2.0)) if avg_prev5 > 0 else 0.0
-
-    # [4] Close position bias — consistent closing in upper half = buyers in control
-    close_bias = _mean([
-        (c["close"] - c["low"]) / (c["high"] - c["low"])
-        for c in recent6 if (c["high"] - c["low"]) > 0
-    ]) if recent6 else 0.5
-    close_bias_score = max(0.0, (close_bias - 0.5) * 2.0)   # 0.5→0, 1.0→1.0
-
-    # Weighted combination
-    vacuum_score = (
-        0.35 * range_compression    # most important: supply wall collapsing
-        + 0.25 * vol_decline        # volume drying up = less supply
-        + 0.25 * micro_expansion    # ignition test candle
-        + 0.15 * close_bias_score   # directional intent
-    )
-    vacuum_score = max(0.0, min(1.0, vacuum_score))
-
-    return vacuum_score, {
-        "vacuum_score":      round(vacuum_score, 4),
-        "range_compression": round(range_compression, 4),
-        "vol_decline":       round(vol_decline, 4),
-        "micro_expansion":   round(micro_expansion, 4),
-        "close_bias":        round(close_bias, 4),
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🧠  MASTER SCORE v3.3
+#  🧠  MASTER SCORE v4.0
 # ══════════════════════════════════════════════════════════════════════════════
 def master_score(symbol, ticker):
     """
-    v3.3 — Adds phase detection, priority score, overlap control,
-    enhanced late penalty, dead market penalty.
-    Original scoring logic untouched. Safety gates (data quality /
-    liquidity) preserved. Signal-based return None replaced with penalties.
+    v4.0 — Futures Flows + Aggressive Early Detection.
+    Tambahan: OI module, L/S Ratio, Funding Trend 7 hari.
+    Filter: hanya loloskan coin dengan potensi pump >20% (T2 >= 20%).
     """
     # ── Ambil candle 1H ──────────────────────────────────────────────────────
     c1h = get_candles(symbol, "1h", CONFIG["candle_limit_1h"])
     if len(c1h) < 72:
-        return None   # DATA QUALITY — not a signal gate, cannot score without data
+        return None
 
     try:
         chg_24h = float(ticker.get("change24h", 0)) * 100
         vol_24h = float(ticker.get("quoteVolume", 0))
         price   = float(ticker.get("lastPr", 0))
-    except:
-        return None   # DATA QUALITY — unparseable ticker
+    except Exception:
+        return None
 
     if price <= 0:
-        return None   # DATA QUALITY — zero price is invalid data
+        return None
 
-    # ── Liquidity gates → converted to heavy penalties (Task 6) ──────────────
-    # Coins below min_vol are illiquid — penalise but don't skip entirely
-    # so the scoring pipeline can still categorise them if needed.
-    liquidity_penalty = 0
+    # ── SAFETY GATE 1: Volume 24H ─────────────────────────────────────────────
     if vol_24h < CONFIG["min_vol_24h"]:
-        liquidity_penalty = 30   # very illiquid: heavy penalty
-        log.info(f"  {symbol}: liquidity_penalty=-30 (vol=${vol_24h/1e3:.0f}K < min)")
-    elif vol_24h > CONFIG["max_vol_24h"]:
-        liquidity_penalty = 20   # mega-cap: likely not explosive mover
-        log.info(f"  {symbol}: liquidity_penalty=-20 (vol=${vol_24h/1e6:.1f}M > max)")
+        return None
+    if vol_24h > CONFIG["max_vol_24h"]:
+        return None
 
-    # ── Already-pumped gate → penalty (Task 6) ────────────────────────────────
-    already_pumped_penalty = 0
+    # ── SAFETY GATE 2: Already pumped 50%+ today ─────────────────────────────
     if chg_24h > CONFIG["gate_chg_24h_max"]:
-        already_pumped_penalty = 25
-        log.info(f"  {symbol}: already_pumped_penalty=-25 (chg={chg_24h:.1f}%)")
+        log.info(f"  {symbol}: SKIP chg_24h={chg_24h:.1f}% — already pumped")
+        return None
 
-    # ── Funding gate → penalty (Task 6) ──────────────────────────────────────
+    # ── SAFETY GATE 3: Funding rate current (hard gate) ───────────────────────
     funding = get_funding(symbol)
-    funding_gate_penalty = 0
     if funding < CONFIG["funding_gate"]:
-        funding_gate_penalty = 15
-        log.info(f"  {symbol}: funding_gate_penalty=-15 (funding={funding:.5f})")
+        log.info(f"  {symbol}: SKIP funding={funding:.5f} < gate={CONFIG['funding_gate']}")
+        return None
 
     price_now = c1h[-1]["close"]
+
+    # ── Ambil Futures Flows data (paralel secara konseptual, sequential actual) ─
+    funding_h = get_funding_history(symbol)
+    oi_data   = get_open_interest_history(symbol)
+    ls_data   = get_long_short_ratio(symbol)
 
     # ── Cari compression zone ─────────────────────────────────────────────────
     compression = find_compression_zone(c1h)
 
-    # ── [v3.9] POST-PUMP ZONE INVALIDATION ────────────────────────────────────
-    # Critical bug fix: scanner finds OLD compression zones and scores them as
-    # pre-pump signals even when the coin already pumped above the zone.
-    # Two checks:
-    #   [A] Price > comp_high * 1.10 = coin already broke out (>10% above range)
-    #   [B] Zone age > zone length = breakout happened before current scan window
-    # Both indicate a STALE zone — should not score as pre-pump setup.
-    stale_zone_penalty = 0
-    if compression:
-        comp_high = compression["high"]
-        comp_low  = compression["low"]
-        age       = compression["age_candles"]
-        length    = compression["length"]
-
-        rise_above_zone = (price_now - comp_high) / comp_high if comp_high > 0 else 0.0
-        age_ratio       = age / length if length > 0 else 0.0
-
-        if rise_above_zone > 0.15:
-            # Price is >15% above the compression zone top = ALREADY PUMPED
-            # Nullify the compression — it's a post-pump distribution zone now
-            stale_zone_penalty = 35
-            log.info(f"  {symbol}: stale_zone_penalty=-35 (price {rise_above_zone*100:.0f}% above comp_high)")
-            # Invalidate compression so downstream modules don't use it
-            compression = None
-        elif rise_above_zone > 0.08:
-            # 8-15% above = borderline — penalize but keep zone
-            stale_zone_penalty = 20
-            log.info(f"  {symbol}: stale_zone_penalty=-20 (price {rise_above_zone*100:.0f}% above comp_high)")
-        elif age_ratio > 1.5:
-            # Zone age >> length = breakout happened long ago, zone is expired
-            stale_zone_penalty = 15
-            log.info(f"  {symbol}: stale_zone_penalty=-15 (stale zone: age={age}h length={length}h ratio={age_ratio:.1f}x)")
-
-    # ── [A] COMPRESSION + TENSION SCORE (HIGH PRIORITY, max 35) ──────────────
+    # ── [A] COMPRESSION + TENSION SCORE (max 40) ─────────────────────────────
     comp_tension_score, comp_tension_details = score_compression_tension(c1h, compression)
 
-    # ── [B] VOLUME INTELLIGENCE (MEDIUM, max 25) ──────────────────────────────
+    # ── [B] VOLUME INTELLIGENCE (max 30, incl RVOL) ───────────────────────────
     vol_score, vol_details = score_volume_intelligence(c1h)
     rvol = vol_details.get("rvol", 1.0)
 
-    # ── [C] STRUCTURE (MEDIUM, max 20) ───────────────────────────────────────
+    # ── [C] OPEN INTEREST FLOW (max 15, NEW v4.0) ────────────────────────────
+    oi_score, oi_details = score_open_interest(oi_data, c1h)
+
+    # ── [D] STRUCTURE (max 20) ────────────────────────────────────────────────
     struct_score, struct_details = score_structure(c1h, compression)
 
-    # ── [D] CONTINUATION (MEDIUM, max 15) ─────────────────────────────────────
+    # ── [E] CONTINUATION (max 15) ─────────────────────────────────────────────
     cont_score, cont_details = score_continuation(c1h)
 
-    # ── [E] STEALTH ACCUMULATION (BONUS, max 15) ──────────────────────────────
-    stealth      = detect_stealth_accumulation(c1h)
+    # ── [F] STEALTH ACCUMULATION (BONUS, max 15) ──────────────────────────────
+    stealth = detect_stealth_accumulation(c1h)
     stealth_score_bonus = 0
     if stealth["detected"]:
-        st = stealth["score"]
-        # Interpolate: 70 → +10, 100 → +15
-        t    = CONFIG["stealth_score_threshold"]
-        ratio = max(0.0, min(1.0, (st - t) / (100.0 - t))) if (100.0 - t) > 0 else 1.0
+        t     = CONFIG["stealth_score_threshold"]
+        ratio = max(0.0, min(1.0, (stealth["score"] - t) / (100.0 - t))) if (100.0 - t) > 0 else 1.0
         stealth_score_bonus = round(10 + ratio * 5)
     elif stealth["score"] >= 55:
-        stealth_score_bonus = 5   # partial stealth = small bonus
+        stealth_score_bonus = 5
 
-    # ── [F] PRE-BREAKOUT BIAS (BONUS, max 12) — NEW v3.1 ─────────────────────
+    # ── [G] PRE-BREAKOUT BIAS (BONUS, max 12) ─────────────────────────────────
     pbb_score, pbb_details = score_pre_breakout_bias(c1h)
 
-    # ── [G] DISTRIBUTION PENALTY (capped at 20 in v3.1) ──────────────────────
+    # ── [H] FUNDING RATE TREND (BONUS, max 12, NEW v4.0) ─────────────────────
+    funding_trend_score, funding_trend_details = score_funding_trend(funding_h)
+
+    # ── [I] LONG/SHORT SQUEEZE (BONUS+MULTIPLIER, max 10, NEW v4.0) ──────────
+    ls_score, ls_multiplier, ls_details = score_long_short(ls_data, oi_data)
+
+    # ── [J] LIQUIDITY SWEEP (BONUS, max 8) ────────────────────────────────────
+    comp_low  = compression["low"] if compression else price_now * 0.95
+    liq_sweep = detect_liquidity_sweep(c1h, comp_low)
+    liq_bonus = 8 if liq_sweep else 0
+
+    # ── RSI (informational, max 1) ────────────────────────────────────────────
+    rsi       = get_rsi(c1h[-50:], 14)
+    rsi_bonus = 1 if rsi < 35 else 0
+
+    # ── [K] DISTRIBUTION PENALTY (max -25) ────────────────────────────────────
     dist_penalty, dist_details = calc_distribution_penalty(c1h)
 
-    # ── [H] SLOW TREND PENALTY (capped at 10 in v3.1) ───────────────────────
+    # ── OI konfirmasi distribusi: OI turun + HVNP = perketat penalti ──────────
+    if (oi_data.get("valid") and oi_data.get("delta_pct", 0) < -0.03
+            and dist_details.get("high_vol_no_prog", 0) >= 1):
+        # OI turun + distribusi = konfirmasi kuat = tambah penalti
+        oi_dist_extra = min(10, abs(int(oi_data["delta_pct"] * 50)))
+        dist_penalty  = min(CONFIG["dist_penalty_cap"], dist_penalty + oi_dist_extra)
+        dist_details["oi_confirmed"] = True
+
+    # ── [L] SLOW TREND PENALTY (max -10) ──────────────────────────────────────
     slow_penalty, slow_details = calc_slow_trend_penalty(c1h, compression)
 
-    # ── [I] ANTI-LATE-ENTRY PENALTY (capped at 15 in v3.1) ───────────────────
+    # ── [M] ANTI-LATE-ENTRY PENALTY (max -15) ─────────────────────────────────
     late_penalty, late_details = calc_late_entry_penalty(c1h)
 
-    # ── RSI (v3.2: reduced to 1pt max — informational only, weak predictor) ───
-    rsi       = get_rsi(c1h[-50:], 14)
-    rsi_bonus = 1 if rsi < 35 else 0   # v3.2: was 3/2/1, now max 1
+    # ── FUNDING current penalty ───────────────────────────────────────────────
+    funding_current_penalty = 5 if funding < -0.001 else 0
 
-    # ── Liquidity sweep bonus ─────────────────────────────────────────────────
-    comp_low    = compression["low"] if compression else price_now * 0.95
-    liq_sweep   = detect_liquidity_sweep(c1h, comp_low)
-    liq_bonus   = 8 if liq_sweep else 0
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ── NEW MODULES v3.3 ─────────────────────────────────────────────────────
-    # ══════════════════════════════════════════════════════════════════════════
-
-    # ── [J] PHASE DETECTION (Task 1) ─────────────────────────────────────────
-    phase = detect_phase(c1h)
-    phase_bonus   = 10  if phase == "early" else 0
-    phase_penalty = 12  if phase == "late"  else 0
-
-    # ── [K] ENHANCED LATE PENALTY (Task 4) ───────────────────────────────────
-    # Additive with existing calc_late_entry_penalty (Task 6 constraint respected)
-    enh_late_pen = enhanced_late_penalty(c1h)   # 0 to -10
-
-    # ── [L] DEAD MARKET PENALTY (Task 5) ─────────────────────────────────────
-    dead_pen = dead_market_penalty(c1h)          # 0 to -8
-
-    # ── [M] OVERLAP CONTROL (Task 3) ─────────────────────────────────────────
-    compression_active   = compression is not None
-    stealth_active       = stealth.get("detected", False)
-    pre_breakout_active  = pbb_score >= 6   # threshold: PBB signals are meaningful
-    ovlp_pen = overlap_penalty(compression_active, stealth_active, pre_breakout_active)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ── NEW MODULES v3.4 — NON-LINEAR ENGINE ─────────────────────────────────
-    # ══════════════════════════════════════════════════════════════════════════
-
-    # ── Normalise existing sub-scores to 0-1 ─────────────────────────────────
-    ct_norm   = _norm_score_to_01(comp_tension_score, 40)   # max 40
-    v_norm    = _norm_score_to_01(vol_score, 30)            # max 30 (score_volume_intelligence ceiling is 30)
-    s_norm    = _norm_score_to_01(max(0, struct_score), 41) # max 20 base + 18 fbd + 8 candle + 5 = ~41 real max
-    pbb_norm  = _norm_score_to_01(pbb_score, 12)            # max 12
-
-    # ── Liquidity norm (Section 1 — multiplicative, replaces additive penalty) ─
-    liquidity_norm_v34 = compute_liquidity_norm(vol_24h, c1h)
-
-    # ── Tension engine (Section 3 — multiplicative four-component) ────────────
-    tension_engine_score, tension_engine_details = compute_tension_engine(
-        c1h, compression, comp_tension_details
-    )
-    compression_norm_v34       = tension_engine_details.get("compression_norm", ct_norm)
-    volume_stability_norm_v34  = tension_engine_details.get("volume_stability_norm", v_norm)
-
-    # ── Absorption engine (Section 4 — hidden accumulation detector) ──────────
-    absorption_score, absorption_details = compute_absorption_engine(c1h, compression)
-    fbd_strength = absorption_details.get("fbd_strength", 0.0)  # already normalised 0-1
-
-    # ── Flow engine (Section 1 — fetch real OI + CVD, wire in) ──────────────
-    oi_series, cvd_series = get_oi_and_cvd(symbol, c1h)
-    flow_score_v34, flow_details = compute_flow_engine(
-        oi_series=oi_series,
-        cvd_series=cvd_series,
+    # ── FINAL RAW SCORE ───────────────────────────────────────────────────────
+    raw_before_mult = (
+        comp_tension_score      # +40 max
+        + vol_score             # +30 max
+        + max(0, oi_score)      # +15 max (penalty dari OI ditangani terpisah)
+        + struct_score          # +20 max
+        + cont_score            # +15 max
+        + stealth_score_bonus   # +15 max
+        + pbb_score             # +12 max
+        + funding_trend_score   # +12 max (bisa negatif)
+        + ls_score              # +10 max (bisa negatif)
+        + liq_bonus             # +8 max
+        + rsi_bonus             # +1 max
+        - dist_penalty          # -25 max
+        - slow_penalty          # -10 max
+        - late_penalty          # -15 max
+        - funding_current_penalty  # -5 jika funding sangat negatif
+        + min(0, oi_score)      # OI penalty (negatif) ditambahkan di sini
     )
 
-    # ── Vacuum score (Section 6 — orderbook, returns 0 if data unavailable) ───
-    vacuum_score_v34, vacuum_details = compute_vacuum_score(
-        ask_volume_near=None, rolling_mean_ask=None
-    )
-
-    # ── Non-linear composition (Sections 2, 7, 8, 9, 10) ─────────────────────
-    v34_score_01, v34_composition = compose_v34_score(
-        ct_norm              = ct_norm,
-        v_norm               = v_norm,
-        s_norm               = s_norm,
-        tension_engine       = tension_engine_score,
-        absorption_score     = absorption_score,
-        flow_score           = flow_score_v34,
-        vacuum_score         = vacuum_score_v34,
-        liquidity_norm       = liquidity_norm_v34,
-        failed_breakdown_strength = fbd_strength,
-        pbb_norm             = pbb_norm,
-        candles              = c1h,
-        compression          = compression,
-        phase_v33            = phase,
-    )
-    # Phase may be updated by v3.4 (Section 8 reclassification)
-    phase = v34_composition.get("phase_v34", phase)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ── v3.6 PRESSURE DETECTION LAYER ────────────────────────────────────────
-    # ══════════════════════════════════════════════════════════════════════════
-    pressure_score, pressure_details = compute_pressure_layer(
-        candles        = c1h,
-        absorption_score = absorption_score,
-        flow_score     = flow_score_v34,
-    )
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ── v3.7 NEW FILTERS — differentiates dead market vs accumulation ─────────
-    # ══════════════════════════════════════════════════════════════════════════
-
-    # [N] Volume trend qualifier — dead market = flat/declining vol, accum = rising
-    vol_trend_mult, vol_trend_details = compute_volume_trend_qualifier(c1h)
-
-    # [O] Volatility rank score — pre-pump coins have coiled ATR in low percentile
-    #     AND have expansion potential (high historical ATR vs current ATR)
-    vol_rank_score, vol_rank_details = compute_volatility_rank_score(c1h)
-
-    log.info(
-        f"  {symbol} [v3.7-filters] "
-        f"vol_trend_mult={vol_trend_mult:.3f} ({vol_trend_details.get('vol_trend','?')}) "
-        f"vol_rank={vol_rank_score} (cv={vol_rank_details.get('atr_cv',0):.4f} "
-        f"exp_pot={vol_rank_details.get('expansion_potential',0):.2f}x)"
-    )
-
-    # ── FINAL SCORE (v3.7 — all signal components properly wired) ───────────────
-    #
-    # AUDIT FIX: Previously, ALL of the following went to raw_score_additive
-    # which was explicitly "logging only" — none of them affected the real output.
-    # This has been corrected: non-linear v34 score is the base, and meaningful
-    # additive corrections are applied on top of it before the single final clamp.
-    #
-    # Components now properly wired to final score:
-    #   [+] stealth_score_bonus  — real accumulation signal
-    #   [+] pbb_score (already in v34 via pbb_norm, but cap ensures correct weight)
-    #   [+] liq_bonus            — liquidity sweep is high-quality signal
-    #   [+] phase_bonus/penalty  — early/late phase has real impact on pump timing
-    #   [+] cont_score           — second-leg continuation is valid pump signal
-    #   [+] vol_rank_score       — [NEW v3.7] high-volatility coiled coin bonus
-    #   [-] dist_penalty         — distribution MUST reduce score (was completely dead)
-    #   [-] slow_penalty         — trending without compression = false signal
-    #   [-] late_penalty         — late entry without consolidation = trap
-    #   [-] enh_late_pen         — enhanced late detection
-    #   [-] dead_pen             — dead market = no pump
-    #   [-] ovlp_pen             — overlap noise reduction
-    #   [-] funding_gate_penalty — negative funding = bearish sentiment
-    #   [-] liquidity_penalty    — illiquid coins are dangerous
-    #   [-] already_pumped_penalty — already moved = late entry
-    # [×] vol_trend_mult         — [NEW v3.7] multiplicative: dead vol → suppresses
-
-    # ── Safe defaults for v3.8/v3.9 fields (before any conditional logic) ──────
-    cqi              = 0.0
-    cqi_bonus        = 0
-    pump_started     = False
-    pump_move_12h    = 0.0
-    price_24h_move   = 0.0
-    ignition_fired   = False
-    ignition_score_v = 0.0
-    ignition_reason  = "none"
-    vacuum_score_v39 = 0.0
-    vacuum_det_v39   = {}
-    session_bonus    = 0.0
-
-    # Step 1: convert v34 score (0-1) to 0-100 working space
-    working_score = v34_score_01 * 100.0
-
-    # ── [v3.9 MODULE 1] SESSION ALPHA BONUS ───────────────────────────────────
-    # Asia session transition (02:00 WIB = 19:00 UTC) is the peak pump window.
-    # BUG FIX v3.9: Only apply if price has NOT already moved (not post-pump coin).
-    _utc_hour = datetime.now(timezone.utc).hour
-    _raw_session_bonus = session_alpha_bonus(_utc_hour)
-    # Gate: only apply session bonus if price is flat (<8% in 24h)
-    # This prevents post-pump distribution coins from getting the time bonus
-    _price_24h_check = 0.0
-    if len(c1h) >= 24:
-        _p24 = c1h[-24]["close"]
-        _price_24h_check = abs(c1h[-1]["close"] - _p24) / _p24 if _p24 > 0 else 0.0
-    session_bonus = _raw_session_bonus if _price_24h_check < 0.08 else 0.0
-    working_score += session_bonus
-
-    # ── [v3.9 MODULE 6] LIQUIDITY VACUUM PROXY ────────────────────────────────
-    # Simulates thin ask-side liquidity: range compression + vol decline + micro-expansion
-    vacuum_score_v39, vacuum_det_v39 = liquidity_vacuum_proxy(c1h)
-    vacuum_contrib_v39 = vacuum_score_v39 * 18.0   # max +18 pts (thin liquidity = easy breakout)
-    working_score += vacuum_contrib_v39
-
-    # Step 2: pressure overlay
-    pressure_contribution = pressure_score * 35.0
-    working_score += pressure_contribution
-
-    # Step 3: Standard additive bonuses
-    working_score += stealth_score_bonus        # 0, 5, 10-15
-    working_score += liq_bonus                  # 0 or +8
-    working_score += cont_score * 0.5           # 0-7.5
-    working_score += rsi_bonus                  # 0 or +1
-    working_score += vol_rank_score             # 0-20 pts
-
-    # ── [v3.9 MODULE 5] UPGRADED CQI — compute and wire ───────────────────────
-    # CQI threshold validated from 8 pump coins: CQI 0.009-0.026
-    # Tight coil = more stored energy = sharper pump
-    cqi_bonus = 0
-    cqi = 0.0
-    if compression:
-        cqi = compression["range_pct"] / max(compression["length"] ** 0.5, 1)
-        if cqi < 0.010:
-            cqi_bonus = 15   # ultra-tight (GUSDT/ZETA level) — raised from 12
-        elif cqi < 0.015:
-            cqi_bonus = 10   # tight coil — raised from 8
-        elif cqi < 0.022:
-            cqi_bonus = 5    # moderate coil — raised from 4, threshold from 0.020
-        elif cqi > 0.040:
-            cqi_bonus = -10  # loose — raised penalty from -8
-        working_score += cqi_bonus
-
-        # ── [v3.9 MODULE 2] IGNITION TRIGGER (needs real cqi) ─────────────────
-        # Re-run ignition with real cqi now that compression is confirmed
-        ignition_fired, ignition_score_v, ignition_reason = detect_ignition(
-            pressure_score     = pressure_score,
-            flow_score         = flow_score_v34,
-            cqi                = cqi,
-            compression_length = compression["length"],
-        )
-        if ignition_fired:
-            working_score += 15   # full ignition: all 4 conditions aligned
-            log.info(f"  {symbol} [v3.9] 🔥 IGNITION FIRED: {ignition_reason}")
-        elif ignition_score_v >= 0.5:
-            working_score += round(ignition_score_v * 10)  # partial credit 5-9 pts
+    # Aplikasi multiplier short squeeze (jika ada)
+    # Hanya diterapkan jika raw_score positif — tidak amplifikasi skor negatif
+    if ls_multiplier > 1.0 and raw_before_mult > 0:
+        raw_score = raw_before_mult * ls_multiplier
     else:
-        # No compression → no ignition possible
-        ignition_fired = False
-        ignition_score_v = 0.0
+        raw_score = raw_before_mult
 
-    # ── [v3.9 MODULE 3] FLOW SIGNAL NON-LINEAR AMPLIFICATION ──────────────────
-    # flow_score in linear average loses impact. Non-linear gate restores signal strength.
-    # flow_score > 0.7: OI buildup + CVD absorption + squeeze all aligned = major signal
-    # flow_score < 0.15: flow negative/absent = mild suppression
-    if flow_score_v34 > 0.7:
-        working_score += 15   # strong directional flow — market maker accumulating
-    elif flow_score_v34 > 0.5:
-        working_score += 8    # moderate flow — meaningful
-    elif flow_score_v34 > 0.3:
-        working_score += 4    # weak but present
-    elif flow_score_v34 < 0.15:
-        working_score -= 5    # flow absent/negative — caution
-
-    if phase == "early":
-        working_score += phase_bonus            # +10
-    elif phase == "late":
-        working_score -= phase_penalty          # -12
-
-    # Step 4: Apply ALL penalties (all were previously dead — now active)
-    # Distribution penalty is most critical — MUST suppress pump false positives
-    working_score -= dist_penalty               # 0 to -35 (Track A+B+C)
-    working_score -= slow_penalty               # 0 to -10
-    working_score -= late_penalty               # 0 to -15
-    working_score -= abs(enh_late_pen)          # 0 to -10
-    working_score -= abs(dead_pen)              # 0 to -8
-    working_score -= abs(ovlp_pen)              # 0 to -8
-    working_score -= funding_gate_penalty       # 0 or -15
-    working_score -= liquidity_penalty          # 0, -20, or -30
-    working_score -= already_pumped_penalty     # 0 or -25
-    working_score -= stale_zone_penalty         # [NEW v3.9] 0, -15, -20, or -35
-    if funding < -0.001:
-        working_score -= 5                      # additional funding penalty
-
-    # ── [v3.9 MODULE 4] vol_trend_mult — FIX STEALTH SUPPRESSION ─────────────
-    # BUG FIXED: previously vol_trend_mult suppressed stealth accumulation coins.
-    # Low volume DURING stealth is the signal, not a failure.
-    # Rule: only apply suppression if stealth NOT detected AND phase NOT early.
-    stealth_detected_flag = stealth.get("detected", False)
-    _apply_vol_suppression = (
-        vol_trend_mult < 1.0
-        and not stealth_detected_flag   # stealth = intentional low vol, don't punish
-        and phase != "early"            # early phase by definition has low vol
-    )
-    if _apply_vol_suppression:
-        working_score *= vol_trend_mult
-
-    # Step 6: Single final clamp to 0-100
-    score = max(0, min(100, round(working_score)))
-
-    # For logging transparency, keep raw_score_additive as before
-    raw_score_additive = (
-        comp_tension_score
-        + vol_score
-        + struct_score
-        + cont_score
-        + stealth_score_bonus
-        + pbb_score
-        + rsi_bonus
-        + liq_bonus
-        + phase_bonus
-        - phase_penalty
-        - dist_penalty
-        - slow_penalty
-        - late_penalty
-        + enh_late_pen
-        + dead_pen
-        + ovlp_pen
-        - already_pumped_penalty
-        - funding_gate_penalty
-    )
-    if funding < -0.001:
-        raw_score_additive -= 5
-    score_additive_01 = max(0.0, min(1.0, raw_score_additive / 100.0))  # for log only
-
-    # Derive score_01 from final score for logging/compatibility
-    score_01 = score / 100.0
+    score = max(0, min(100, int(raw_score)))
 
     # ── Confidence band ───────────────────────────────────────────────────────
-    # v3.8 FIX: 'possibly_late' requires price to have ACTUALLY MOVED,
-    # not just score > 78. High score on flat-price coin = compression, not late entry.
-    # Validated from data: PEPE, ZETA, ARIA all labeled LATE incorrectly
-    # despite price being flat. Only label LATE if price moved >12% in 24h.
-    price_24h_move = 0.0
-    if len(c1h) >= 24:
-        p_now   = c1h[-1]["close"]
-        p_24h   = c1h[-24]["close"]
-        price_24h_move = abs(p_now - p_24h) / p_24h if p_24h > 0 else 0.0
-
     if score < CONFIG["score_min_output"]:
         confidence = "ignore"
     elif score < CONFIG["score_target_low"]:
         confidence = "early"
     elif score <= CONFIG["score_target_high"]:
         confidence = "strong"
-    elif price_24h_move > 0.12:
-        # Price truly moved >12% in last 24h AND score > 78 → genuinely late
-        confidence = "possibly_late"
     else:
-        # Score > 78 but price flat → all signals maxed on compressed coin = STRONG, not late
-        confidence = "strong"
+        confidence = "possibly_late"
 
-    # ── PRIORITY SCORE (Task 2) — separate field for final ranking ────────────
-    distribution_flag = dist_penalty >= 8   # meaningful distribution detected
-    priority_score = compute_priority_score(
-        score, phase, struct_score, distribution_flag
-    )
-
-    # ── Score breakdown ────────────────────────────────────────────────────────
-    score_breakdown = [
-        f"Compression+Tension: +{comp_tension_score} ({comp_tension_details.get('comp_length','?')}h, range={comp_tension_details.get('range_pct',0)*100:.1f}%, tension={comp_tension_details.get('tension_score',0)})",
-        f"Volume: +{vol_score} ({vol_details.get('label','')})",
-        f"Structure: {struct_score:+d} ({', '.join(struct_details.get('breakdown',[]))[:50]})",
-        f"Continuation: +{cont_score} ({cont_details.get('pullback_quality', 'no_prior_move')})" if cont_score else "Continuation: 0",
-        f"PreBreakout: +{pbb_score} ({', '.join(pbb_details.get('flags',[])[:3])})" if pbb_score else "PreBreakout: 0",
-        f"Stealth: +{stealth_score_bonus} (stealth_score={stealth['score']:.0f})" if stealth_score_bonus else "Stealth: 0",
-        f"Phase: {phase} (bonus={phase_bonus} pen={phase_penalty})",
-        f"[v3.4] Tension engine: {tension_engine_score:.3f} "
-        f"(comp={compression_norm_v34:.2f} vstab={volume_stability_norm_v34:.2f} "
-        f"fbd={tension_engine_details.get('fbd_count',0)} "
-        f"tir={tension_engine_details.get('time_in_range_norm',0):.2f})",
-        f"[v3.4] Absorption: {absorption_score:.3f} "
-        f"(pcz={absorption_details.get('price_change_z_norm',0):.2f} "
-        f"vz={absorption_details.get('volume_z_norm',0):.2f} "
-        f"cvdz={absorption_details.get('cvd_z_norm',0):.2f} "
-        f"fbd={absorption_details.get('fbd_count',0)})",
-        f"[v3.5] Non-linear base: {v34_composition.get('base_score_nonlinear',0):.3f} "
-        f"synergy: +{v34_composition.get('synergy_bonus',0):.3f} "
-        f"anomaly: +{v34_composition.get('anomaly_score',0):.3f} "
-        f"liq_norm: {liquidity_norm_v34:.3f}",
-        f"[v3.5] final v34={v34_score_01:.3f} "
-        f"(additive_ref={score_additive_01:.3f} — logging only)",
-        f"[v3.7] pressure={pressure_score:.3f} contribution=+{pressure_score*35:.1f}pts "
-        f"(vpd={pressure_details.get('vol_price_divergence',0):.3f} "
-        f"ma={pressure_details.get('micro_accumulation',0):.3f} "
-        f"ct={pressure_details.get('compression_tightness',0):.3f} "
-        f"vz={pressure_details.get('volume_z',0):.3f} "
-        f"pcz={pressure_details.get('price_change_z',0):.3f})",
-        f"[v3.7] vol_trend_mult={vol_trend_mult:.3f} ({vol_trend_details.get('vol_trend','?')}) "
-        f"vol_rank={vol_rank_score} (exp_pot={vol_rank_details.get('expansion_potential',0):.2f}x "
-        f"atr_cv={vol_rank_details.get('atr_cv',0):.4f})",
-        f"[v3.8] CQI={cqi:.4f} bonus={cqi_bonus:+d} | "
-        f"pump_started={'YES ⚠️' if pump_started else 'no'} ({pump_move_12h*100:.1f}% in 12h) | "
-        f"price_24h_move={price_24h_move*100:.1f}% conf={confidence}",
-        f"[v3.9] session=+{session_bonus:.0f}pts(UTC{_utc_hour}h) | "
-        f"ignition={'🔥FIRED' if ignition_fired else f'score={ignition_score_v:.2f}'}({ignition_reason}) | "
-        f"vacuum={vacuum_score_v39:.3f}(+{vacuum_score_v39*18:.1f}pts) | "
-        f"flow_nl={'strong' if flow_score_v34>0.7 else 'mod' if flow_score_v34>0.3 else 'weak'}({flow_score_v34:.3f}) | "
-        f"stealth_vol_bypass={stealth_detected_flag} | "
-        f"stale_zone_pen=-{stale_zone_penalty}",
-        f"RSI: +{rsi_bonus} (RSI={rsi:.0f})",
-        f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
-        f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
-        f"SlowTrend: -{slow_penalty}" if slow_penalty else "",
-        f"LateEntry(orig): -{late_penalty}" if late_penalty else "",
-        f"LateEntry(enh): {enh_late_pen}" if enh_late_pen else "",
-        f"DeadMarket: {dead_pen}" if dead_pen else "",
-        f"Overlap: {ovlp_pen}" if ovlp_pen else "",
-    ]
-    score_breakdown = [s for s in score_breakdown if s]
-
-    log.info(
-        f"  {symbol}: Score={score} priority={priority_score} phase={phase} ({confidence}) "
-        f"| CT={comp_tension_score} V={vol_score} S={struct_score} PBB={pbb_score} "
-        f"| D=-{dist_penalty} Late={enh_late_pen} Dead={dead_pen} Ovlp={ovlp_pen} "
-        f"| v34_base={v34_score_01:.3f} press={pressure_score:.3f}"
-    )
-    # ── Diagnostic logging ────────────────────────────────────────────────────
-    buildup_score_log = flow_details.get("buildup_score", 0.0)
-    fbd_strength_log  = absorption_details.get("fbd_strength", 0.0)
-    anomaly_score_log = v34_composition.get("anomaly_score", 0.0)
-    log.info(
-        f"  {symbol} [v3.7] "
-        f"compression_norm={compression_norm_v34:.3f} "
-        f"volume_norm={v_norm:.3f} "
-        f"structure_norm={s_norm:.3f} "
-        f"tension_score={tension_engine_score:.3f} "
-        f"absorption_score={absorption_score:.3f} "
-        f"fbd_strength={fbd_strength_log:.3f} "
-        f"flow_score={flow_score_v34:.3f} "
-        f"buildup_score={buildup_score_log:.3f} "
-        f"anomaly_score={anomaly_score_log:.3f} "
-        f"vacuum_score={vacuum_score_v34:.3f} "
-        f"liquidity_norm={liquidity_norm_v34:.3f} "
-        f"v34_score={v34_score_01:.3f} "
-        f"pressure_score={pressure_score:.3f} "
-        f"pressure_contrib=+{pressure_score*35:.2f}pts "
-        f"dist_penalty=-{dist_penalty} "
-        f"final_score={score}"
-    )
-
-    # ── Output filter (Task 6: convert to penalty, not hard skip) ────────────
-    # Coins below score_min_output get a low-score penalty applied rather than
-    # being dropped, so they still appear in logs for diagnostics.
+    # ── Filter: skip jika score masih di bawah minimum output ─────────────────
     if score < CONFIG["score_min_output"]:
-        # Return with score recorded — run_scan will filter on priority_score
-        # This keeps the full pipeline running with no hard skips on signals
-        log.info(f"  {symbol}: score={score} below min_output — low priority")
-        # Still build a minimal result so run_scan can track it
-        return {
-            "symbol":          symbol,
-            "score":           score,
-            "priority_score":  priority_score,
-            "phase":           phase,
-            "confidence":      "ignore",
-            "compression":     compression,
-            "vol_details":     vol_details,
-            "struct_details":  struct_details,
-            "cont_details":    cont_details,
-            "stealth":         stealth,
-            "entry":           None,
-            "liq_sweep":       liq_sweep,
-            "rsi":             rsi,
-            "funding":         funding,
-            "rvol":            round(rvol, 1),
-            "price":           price_now,
-            "chg_24h":         chg_24h,
-            "vol_24h":         vol_24h,
-            "rise_from_low":   0.0,
-            "sector":          SECTOR_LOOKUP.get(symbol, "OTHER"),
-            "urgency":         "⚫ BELOW THRESHOLD",
-            "score_breakdown": score_breakdown,
-            "dist_penalty":    dist_penalty, "slow_penalty": slow_penalty,
-            "late_penalty":    late_penalty,
-            "comp_tension_score": comp_tension_score,
-            "vol_score":          vol_score,
-            "struct_score":       struct_score,
-            "cont_score":         cont_score,
-            "pbb_score":          pbb_score,
-            "pbb_details":        pbb_details,
-            "stealth_bonus":      stealth_score_bonus,
-            # v3.4 placeholders (not yet computed at this early-return point)
-            "v34_score": 0.0, "v34_composition": {}, "tension_engine": 0.0,
-            "tension_engine_details": {}, "absorption_score": 0.0,
-            "absorption_details": {}, "flow_score": 0.0,
-            "vacuum_score": 0.0, "liquidity_norm": 0.5,
-            "compression_norm": 0.0, "volume_norm": 0.0, "structure_norm": 0.0,
-            "flags": {
-                "compression":  compression_active,
-                "stealth":      stealth_active,
-                "distribution": distribution_flag,
-            },
-        }
+        return None
 
-    # ── Entry & targets ────────────────────────────────────────────────────────
+    # ── Entry & Targets ────────────────────────────────────────────────────────
     comp_zone_for_entry = compression if compression else {
-        "low": price_now * 0.95,
-        "high": price_now,
-        "length": 0,
-        "avg_vol": 0,
+        "low": price_now * 0.95, "high": price_now, "length": 0, "avg_vol": 0,
     }
     entry_data = calc_entry_targets(c1h, comp_zone_for_entry)
     if not entry_data:
-        # Entry calc failed: penalise score instead of dropping
-        score = max(0, score - 15)
-        entry_data = {
-            "cur": price_now, "entry": price_now, "sl": price_now * 0.95,
-            "sl_pct": 5.0, "t1": price_now * 1.10, "t2": price_now * 1.25,
-            "t1_pct": 10.0, "t2_pct": 25.0, "rr": 1.0, "atr": price_now * 0.02,
-            "z2": None,
-        }
+        return None
+
+    # ── [v4.0] Filter min_pump_target_pct = 20% ──────────────────────────────
+    # Loloskan jika T2 >= 20%, ATAU kompresi sangat panjang (>= 7 hari = 168 jam)
+    # yang secara historis menghasilkan pump besar saat breakout
+    comp_length = compression["length"] if compression else 0
+    t2_pct      = entry_data.get("t2_pct", 0)
+    min_pump    = CONFIG["min_pump_target_pct"]  # 20.0
+
+    if t2_pct < min_pump and comp_length < 168:
+        log.info(f"  {symbol}: SKIP T2={t2_pct:.1f}% < {min_pump}% dan coil={comp_length}h < 168h")
+        return None
+
+    # Penalti ringan jika T1 terlalu kecil tapi T2 memenuhi syarat
     if entry_data["t1_pct"] < CONFIG["min_target_pct"]:
-        log.info(f"  {symbol}: T1={entry_data['t1_pct']:.1f}% < min — still included at lower score")
-        score = max(0, score - 10)
-    if entry_data["rr"] < CONFIG["min_rr"]:
         score = max(0, score - 8)
+    if entry_data["rr"] < CONFIG["min_rr"]:
+        score = max(0, score - 6)
 
     # ── Urgency label ──────────────────────────────────────────────────────────
     vol_ratio = vol_details.get("vol_ratio", 1.0)
-    comp_len  = compression["length"] if compression else 0
+    oi_signal = oi_details.get("signal", "neutral")
+    ls_signal = ls_details.get("squeeze_quality", "neutral")
 
-    # v3.8: Detect if pump has already started (price moved >15% in last 12h)
-    # Validated from GUSDT data: score correctly collapses when pump is active
-    # This flag helps users understand WHY score is low despite showing compression
-    pump_started = False
-    pump_move_12h = 0.0
-    if len(c1h) >= 12:
-        p_12h = c1h[-12]["close"]
-        if p_12h > 0:
-            pump_move_12h = (price_now - p_12h) / p_12h
-            pump_started = pump_move_12h > 0.15   # >15% in 12h = pump active
-
-    if pump_started:
-        urgency = f"🚀 PUMP AKTIF — harga sudah naik {pump_move_12h*100:.0f}% dalam 12 jam — high risk entry"
-    elif phase == "early" and comp_len >= 72:
-        urgency = "🔵 EARLY PHASE — akumulasi aktif sebelum breakout"
-    elif vol_ratio >= 4.0 and comp_len >= 168:
+    if ls_signal in ("extreme_squeeze_setup", "strong_squeeze_setup") and oi_signal in ("strong_divergence", "absorption"):
+        urgency = "🔴 SQUEEZE SETUP — OI naik + short dominan, pump bisa eksplosif 1-6 jam"
+    elif vol_ratio >= 4.0 and comp_length >= 168:
         urgency = "🔴 SANGAT TINGGI — mega spike + coil panjang, pump bisa dalam 1-3 jam"
-    elif vol_ratio >= 2.5 or comp_len >= 168:
+    elif oi_signal == "strong_divergence":
+        urgency = "🟠 OI DIVERGENCE — akumulasi tersembunyi, potensi pump 6-24 jam"
+    elif vol_ratio >= 2.5 or comp_length >= 168:
         urgency = "🟠 TINGGI — potensi pump dalam 6-24 jam"
-    elif vol_ratio >= 1.2 and comp_len >= 72:
+    elif vol_ratio >= 1.2 and comp_length >= 72:
         urgency = "🟡 SEDANG — potensi pump dalam 12-48 jam"
     elif stealth["detected"]:
         urgency = "🔵 STEALTH — fase akumulasi diam-diam, breakout belum terjadi"
@@ -3787,11 +2258,37 @@ def master_score(symbol, ticker):
     if compression:
         rise_from_low = (price_now - compression["low"]) / compression["low"] if compression["low"] > 0 else 0
 
+    # ── Score breakdown ────────────────────────────────────────────────────────
+    score_breakdown = [
+        f"Compression+Tension: +{comp_tension_score} ({comp_tension_details.get('comp_length','?')}h, range={comp_tension_details.get('range_pct',0)*100:.1f}%, tension={comp_tension_details.get('tension_score',0)})",
+        f"Volume: +{vol_score} ({vol_details.get('label','')})",
+        f"OI Flow: {oi_score:+d} ({oi_details.get('signal','?')}, Δ24h={oi_data.get('delta_pct',0)*100:.1f}%)" if oi_data.get("valid") else "OI Flow: no data",
+        f"Structure: {struct_score:+d} ({', '.join(struct_details.get('breakdown',[]))[:50]})",
+        f"Continuation: +{cont_score} ({cont_details.get('pullback_quality','no_prior_move')})" if cont_score else "Continuation: 0",
+        f"PreBreakout: +{pbb_score} ({', '.join(pbb_details.get('flags',[])[:3])})" if pbb_score else "PreBreakout: 0",
+        f"Stealth: +{stealth_score_bonus} ({stealth['score']:.0f}/100)" if stealth_score_bonus else "Stealth: 0",
+        f"FundingTrend: {funding_trend_score:+d} ({funding_h.get('signal','?')}, avg7d={funding_h.get('avg',0):.5f})" if funding_trend_score else "FundingTrend: 0",
+        f"L/S Squeeze: {ls_score:+d} ({ls_details.get('squeeze_quality','?')}, short={ls_data.get('short_pct',0)*100:.0f}%)" if ls_data.get("valid") else "L/S: no data",
+        f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
+        f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
+        f"SlowTrend: -{slow_penalty}" if slow_penalty else "",
+        f"LateEntry: -{late_penalty}" if late_penalty else "",
+        f"Multiplier: x{ls_multiplier:.2f} (squeeze)" if ls_multiplier > 1.0 and raw_before_mult > 0 else "",
+    ]
+    score_breakdown = [s for s in score_breakdown if s]
+
+    log.info(
+        f"  {symbol}: Score={score} ({confidence}) | "
+        f"CT={comp_tension_score} V={vol_score} OI={oi_score:+d} S={struct_score} "
+        f"C={cont_score} FR={funding_trend_score:+d} LS={ls_score:+d}(x{ls_multiplier:.2f}) "
+        f"PBB={pbb_score} St={stealth_score_bonus} | "
+        f"D=-{dist_penalty} Sl=-{slow_penalty} La=-{late_penalty} | "
+        f"T2={t2_pct:.0f}% Coil={comp_length}h"
+    )
+
     return {
         "symbol":          symbol,
         "score":           score,
-        "priority_score":  priority_score,          # Task 2 — used for ranking
-        "phase":           phase,                   # Task 1 — "early"|"mid"|"late"
         "confidence":      confidence,
         "compression":     compression,
         "vol_details":     vol_details,
@@ -3802,6 +2299,11 @@ def master_score(symbol, ticker):
         "liq_sweep":       liq_sweep,
         "rsi":             rsi,
         "funding":         funding,
+        "funding_history": funding_h,
+        "oi_data":         oi_data,
+        "oi_details":      oi_details,
+        "ls_data":         ls_data,
+        "ls_details":      ls_details,
         "rvol":            round(rvol, 1),
         "price":           price_now,
         "chg_24h":         chg_24h,
@@ -3812,60 +2314,22 @@ def master_score(symbol, ticker):
         "score_breakdown": score_breakdown,
         # Penalty details
         "dist_penalty":    dist_penalty,
+        "dist_details":    dist_details,
         "slow_penalty":    slow_penalty,
         "late_penalty":    late_penalty,
-        "enh_late_pen":    enh_late_pen,            # Task 4
-        "dead_pen":        dead_pen,                # Task 5
-        "ovlp_pen":        ovlp_pen,               # Task 3
-        # Sub-scores
-        "comp_tension_score": comp_tension_score,
-        "vol_score":          vol_score,
-        "struct_score":       struct_score,
-        "cont_score":         cont_score,
-        "pbb_score":          pbb_score,
-        "pbb_details":        pbb_details,
-        "stealth_bonus":      stealth_score_bonus,
-        # v3.4 non-linear engine fields
-        "v34_score":           round(v34_score_01, 4),
-        "v34_composition":     v34_composition,
-        "tension_engine":      round(tension_engine_score, 4),
-        "tension_engine_details": tension_engine_details,
-        "absorption_score":    round(absorption_score, 4),
-        "absorption_details":  absorption_details,
-        "flow_score":          round(flow_score_v34, 4),
-        "vacuum_score":        round(vacuum_score_v34, 4),
-        "liquidity_norm":      round(liquidity_norm_v34, 4),
-        "compression_norm":    round(compression_norm_v34, 4),
-        "volume_norm":         round(v_norm, 4),
-        "structure_norm":      round(s_norm, 4),
-        # v3.6 pressure layer
-        "pressure_score":      round(pressure_score, 4),
-        "pressure_details":    pressure_details,
-        # v3.7 new filters
-        "vol_trend_mult":      round(vol_trend_mult, 4),
-        "vol_trend_details":   vol_trend_details,
-        "vol_rank_score":      vol_rank_score,
-        "vol_rank_details":    vol_rank_details,
-        "stale_zone_penalty":  stale_zone_penalty,
-        # v3.8 new fields
-        "cqi":                 round(cqi, 5),
-        "cqi_bonus":           cqi_bonus,
-        "pump_started":        pump_started,
-        "pump_move_12h":       round(pump_move_12h * 100, 1),
-        "price_24h_move_pct":  round(price_24h_move * 100, 1),
-        # v3.9 new fields
-        "session_bonus":       session_bonus,
-        "ignition_fired":      ignition_fired,
-        "ignition_score":      round(ignition_score_v, 3),
-        "ignition_reason":     ignition_reason,
-        "vacuum_score_v39":    round(vacuum_score_v39, 4),
-        "vacuum_details_v39":  vacuum_det_v39,
-        # Task 6 — required output structure
-        "flags": {
-            "compression":  compression_active,
-            "stealth":      stealth_active,
-            "distribution": distribution_flag,
-        },
+        # Sub-scores untuk transparansi
+        "comp_tension_score":    comp_tension_score,
+        "vol_score":             vol_score,
+        "oi_score":              oi_score,
+        "struct_score":          struct_score,
+        "cont_score":            cont_score,
+        "pbb_score":             pbb_score,
+        "pbb_details":           pbb_details,
+        "stealth_bonus":         stealth_score_bonus,
+        "funding_trend_score":   funding_trend_score,
+        "funding_trend_details": funding_trend_details,
+        "ls_score":              ls_score,
+        "ls_multiplier":         ls_multiplier,
     }
 
 
@@ -3875,35 +2339,69 @@ def master_score(symbol, ticker):
 def _confidence_emoji(conf):
     return {"ignore": "⚫", "early": "🟡", "strong": "🟢", "possibly_late": "🟠"}.get(conf, "⚪")
 
-def _phase_emoji(phase):
-    return {"early": "🔵", "mid": "🟡", "late": "🔴"}.get(phase, "⚪")
-
 def build_alert(r, rank=None):
-    sc    = r["score"]
-    conf  = r["confidence"]
-    phase = r.get("phase", "?")
-    prio  = r.get("priority_score", sc)
-    bar   = "█" * int(sc / 5) + "░" * (20 - int(sc / 5))
-    e     = r["entry"]
-    comp  = r["compression"]
-    rk    = f"#{rank} " if rank else ""
-    vol   = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
-             else f"${r['vol_24h']/1e3:.0f}K")
+    sc   = r["score"]
+    conf = r["confidence"]
+    bar  = "█" * int(sc / 5) + "░" * (20 - int(sc / 5))
+    e    = r["entry"]
+    comp = r["compression"]
+    rk   = f"#{rank} " if rank else ""
+    vol  = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
+            else f"${r['vol_24h']/1e3:.0f}K")
 
     comp_str = "N/A"
     if comp:
         comp_days = comp["length"] / 24
         comp_str  = f"{comp_days:.0f} hari" if comp_days >= 1 else f"{comp['length']} jam"
 
-    # Sub-scores summary (v3.3: includes phase and new penalties)
-    enh_l = r.get("enh_late_pen", 0)
-    dead  = r.get("dead_pen", 0)
-    ovlp  = r.get("ovlp_pen", 0)
+    # Sub-scores summary
     sub = (
-        f"  CT:{r['comp_tension_score']} V:{r['vol_score']} "
-        f"S:{r['struct_score']:+d} PBB:{r.get('pbb_score',0)} St:{r['stealth_bonus']}\n"
-        f"  D:-{r['dist_penalty']} La:-{r['late_penalty']} EnhL:{enh_l} Dead:{dead} Ovlp:{ovlp}"
+        f"  CT:{r['comp_tension_score']} V:{r['vol_score']} OI:{r.get('oi_score',0):+d} "
+        f"S:{r['struct_score']:+d} C:{r['cont_score']} "
+        f"FR:{r.get('funding_trend_score',0):+d} LS:{r.get('ls_score',0):+d}"
+        f"(x{r.get('ls_multiplier',1.0):.2f}) "
+        f"PBB:{r.get('pbb_score',0)} St:{r['stealth_bonus']} | "
+        f"D:-{r['dist_penalty']} Sl:-{r['slow_penalty']} La:-{r['late_penalty']}"
     )
+
+    # ── Futures Flows section (NEW v4.0) ──────────────────────────────────────
+    futures_str = ""
+    oi_d  = r.get("oi_data",  {})
+    oi_dt = r.get("oi_details", {})
+    ls_d  = r.get("ls_data",  {})
+    ls_dt = r.get("ls_details", {})
+    fh    = r.get("funding_history", {})
+    ft_dt = r.get("funding_trend_details", {})
+
+    oi_line  = ""
+    ls_line  = ""
+    fr_line  = ""
+
+    if oi_d.get("valid"):
+        oi_emoji = "📈" if oi_d["delta_pct"] >= 0.03 else ("📉" if oi_d["delta_pct"] <= -0.03 else "➡️")
+        oi_line  = (f"  OI Δ24h : {oi_d['delta_pct']*100:+.1f}%  "
+                    f"Δ12h:{oi_d['delta_12h_pct']*100:+.1f}%  "
+                    f"{oi_emoji} {oi_dt.get('signal','?')}\n")
+
+    if ls_d.get("valid"):
+        sq_label = ls_dt.get("squeeze_quality", "neutral")
+        ls_emoji = "🔥" if "squeeze" in sq_label.lower() else ("⚠️" if "crowded" in sq_label else "➡️")
+        ls_line  = (f"  L/S     : Long {ls_d['long_pct']*100:.0f}% / "
+                    f"Short {ls_d['short_pct']*100:.0f}%  "
+                    f"{ls_emoji} {sq_label}\n")
+
+    if fh.get("rates"):
+        fr_emoji = "🟢" if fh.get("signal") in ("squeeze_setup","negative_to_positive") else (
+                   "🔴" if fh.get("signal") == "overheated" else "🟡")
+        fr_line  = (f"  FR Tren  : {fh.get('trend','?')} · "
+                    f"Avg7d:{fh.get('avg',0)*100:.4f}%  "
+                    f"{fr_emoji} {fh.get('signal','?')}\n")
+
+    if oi_line or ls_line or fr_line:
+        futures_str = (
+            f"\n⚡ <b>FUTURES FLOWS</b>\n"
+            + oi_line + ls_line + fr_line
+        )
 
     # Stealth section
     stealth     = r.get("stealth", {})
@@ -3928,31 +2426,32 @@ def build_alert(r, rank=None):
     pbb_flags = r.get("pbb_details", {}).get("flags", [])
     if pbb_flags:
         forensic_items.append(f"PreBreakout: {', '.join(pbb_flags[:3])} 🔵")
-    cd = r.get("cont_details", {})
     if r.get("cont_score", 0) > 0:
+        cd = r.get("cont_details", {})
         forensic_items.append(f"Continuation ✅ ({cd.get('pullback_quality','?')})")
     forensic_str = "  " + " · ".join(forensic_items) if forensic_items else "  — sinyal masih awal"
 
     # Distribution warning
     dist_warn = ""
-    df = r.get("dist_details", {})
     if r.get("dist_penalty", 0) >= 20:
-        dist_str = ", ".join(r.get("dist_details", {}).get("flags", ["?"])[:3])
+        dd       = r.get("dist_details", {})
+        dist_str = ", ".join(dd.get("flags", ["?"])[:3])
         dist_warn = f"\n⚠️ <b>DISTRIBUSI TERDETEKSI:</b> {dist_str}\n"
+        if dd.get("oi_confirmed"):
+            dist_warn += "⚠️ <i>OI turun konfirmasi distribusi</i>\n"
 
     msg = (
-        f"🚀 <b>PRE-PUMP SIGNAL {rk}— v3.3</b>\n\n"
+        f"🚀 <b>PRE-PUMP SIGNAL {rk}— v4.0</b>\n\n"
         f"<b>Symbol    :</b> {r['symbol']} [{r['sector']}]\n"
         f"<b>Skor      :</b> {sc}/100  {_confidence_emoji(conf)} {conf.upper()}\n"
-        f"<b>Phase     :</b> {_phase_emoji(phase)} {phase.upper()}  |  Priority: {prio:.0f}\n"
         f"<b>Bar       :</b> {bar}\n"
         f"<b>Urgency   :</b> {r['urgency']}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>SUB-SCORES</b>\n"
         f"{sub}\n"
-        f"  CT=Compression+Tension  V=Volume  S=Structure\n"
-        f"  PBB=Pre-Breakout  St=Stealth  D=Dist\n"
-        f"  La=Late(orig)  EnhL=Late(enh)  Dead  Ovlp=Overlap\n"
+        f"  CT=Compress+Tension  V=Volume  OI=OpenInterest\n"
+        f"  S=Structure  C=Continuation  FR=FundingTrend\n"
+        f"  LS=LongShort(×=multiplier)  PBB=PreBreakout  St=Stealth\n"
         f"\n📦 <b>COMPRESSION ZONE</b>\n"
         f"  Durasi : {comp_str}\n"
     )
@@ -3963,40 +2462,20 @@ def build_alert(r, rank=None):
             f"  Harga  : ${r['price']:.6g} (+{r['rise_from_low']*100:.1f}% dari low)\n"
         )
 
-    # Flags summary (required output structure — Task 6)
-    flg = r.get("flags", {})
-    flags_str = (
-        f"  Comp:{('✅' if flg.get('compression') else '❌')}  "
-        f"Stealth:{('✅' if flg.get('stealth') else '❌')}  "
-        f"Dist:{('⚠️' if flg.get('distribution') else '✅')}\n"
-    )
-
-    # Pressure layer display (v3.6)
-    pd_ = r.get("pressure_details", {})
-    ps  = r.get("pressure_score", 0.0)
-    pressure_str = ""
-    if ps > 0.2:
-        pressure_str = (
-            f"\n🔴 <b>PRESSURE LAYER</b> ({ps:.2f})\n"
-            f"  VPD:{pd_.get('vol_price_divergence',0):.2f}  "
-            f"MA:{pd_.get('micro_accumulation',0):.2f}  "
-            f"CT:{pd_.get('compression_tightness',0):.2f}  "
-            f"Vz:{pd_.get('volume_z',0):.2f}  "
-            f"PCz:{pd_.get('price_change_z',0):.2f}\n"
-        )
-
     vd = r.get("vol_details", {})
     msg += (
         f"\n⚡ <b>VOLUME</b>\n"
         f"  Ratio  : {vd.get('vol_ratio',0):.2f}x avg20  |  RVOL: {r['rvol']:.1f}x\n"
         f"  Acc    : {vd.get('vol_acceleration',0):+.2f}  |  Vol24H: {vol}\n"
+    )
+
+    msg += futures_str
+
+    msg += (
         f"\n📊 <b>TEKNIKAL</b>\n"
         f"  RSI    : {r['rsi']:.0f}  |  Chg24H: {r['chg_24h']:+.1f}%\n"
         f"  Candle : {sd.get('candle_label','?')}\n"
         f"  Funding: {r['funding']:.5f}\n"
-        f"\n🏷 <b>FLAGS</b>\n"
-        f"{flags_str}"
-        f"{pressure_str}"
         f"\n🔬 <b>SINYAL AKUMULASI</b>\n"
         f"{forensic_str}\n"
         f"{stealth_str}"
@@ -4016,7 +2495,6 @@ def build_alert(r, rank=None):
             f"  R/R   : 1:{e['rr']}  |  ATR: ${e['atr']}\n"
         )
 
-    # Score breakdown
     msg += (
         f"\n🔢 <b>BREAKDOWN:</b>\n"
         + "\n".join(f"  {s}" for s in r["score_breakdown"][:8])
@@ -4026,22 +2504,23 @@ def build_alert(r, rank=None):
 
 
 def build_summary(results):
-    msg  = f"📋 <b>PRE-PUMP WATCHLIST v3.3 — {utc_now()}</b>\n{'━'*30}\n"
+    msg  = f"📋 <b>PRE-PUMP WATCHLIST v4.0 — {utc_now()}</b>\n{'━'*30}\n"
     for i, r in enumerate(results, 1):
         comp  = r["compression"]
         vol   = (f"${r['vol_24h']/1e6:.1f}M" if r["vol_24h"] >= 1e6
                  else f"${r['vol_24h']/1e3:.0f}K")
         comp_str   = f"{comp['length']}h" if comp else "?"
         conf_emoji = _confidence_emoji(r["confidence"])
-        phase_emoji = _phase_emoji(r.get("phase", "mid"))
-        prio = r.get("priority_score", r["score"])
-        vd = r.get("vol_details", {})
-        entry = r.get("entry")
-        t1_str = f"+{entry['t1_pct']:.0f}%" if entry else "?"
+        vd         = r.get("vol_details", {})
+        oi_d       = r.get("oi_data", {})
+        oi_str     = f" OI:{oi_d['delta_pct']*100:+.0f}%" if oi_d.get("valid") else ""
+        ls_d       = r.get("ls_data", {})
+        ls_str     = f" S:{ls_d['short_pct']*100:.0f}%" if ls_d.get("valid") else ""
         msg += (
-            f"{i}. <b>{r['symbol']}</b> "
-            f"[S:{r['score']} P:{prio:.0f} {phase_emoji}{r.get('phase','?')} {conf_emoji}]\n"
-            f"   Coil:{comp_str} · Vol:{vd.get('vol_ratio',0):.1f}x · T1:{t1_str} · {vol}\n"
+            f"{i}. <b>{r['symbol']}</b> [S:{r['score']} {conf_emoji}]\n"
+            f"   Coil:{comp_str} · Vol:{vd.get('vol_ratio',0):.1f}x"
+            f"{oi_str}{ls_str} · "
+            f"T2:+{r['entry']['t2_pct']:.0f}% · {vol}\n"
         )
     return msg
 
@@ -4055,7 +2534,7 @@ def build_candidate_list(tickers):
     stats      = defaultdict(int)
 
     log.info("=" * 70)
-    log.info(f"🔍 SCANNING {len(WHITELIST_SYMBOLS)} coin — PRE-PUMP v3.0 (PROBABILISTIC)")
+    log.info(f"🔍 SCANNING {len(WHITELIST_SYMBOLS)} coin — PRE-PUMP v4.0 (FUTURES FLOWS)")
     log.info("=" * 70)
 
     for sym in WHITELIST_SYMBOLS:
@@ -4109,7 +2588,7 @@ def build_candidate_list(tickers):
 #  🚀  MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 def run_scan():
-    log.info(f"=== PRE-PUMP SCANNER v3.0 — {utc_now()} ===")
+    log.info(f"=== PRE-PUMP SCANNER v4.0 — {utc_now()} ===")
 
     tickers = get_all_tickers()
     if not tickers:
@@ -4119,7 +2598,7 @@ def run_scan():
     log.info(f"Total ticker Bitget: {len(tickers)}")
 
     candidates = build_candidate_list(tickers)
-    all_results = []   # semua coin yang punya score >= min_output (termasuk weak)
+    all_results = []
 
     for i, (sym, t) in enumerate(candidates):
         log.info(f"[{i+1}/{len(candidates)}] {sym} ...")
@@ -4130,38 +2609,35 @@ def run_scan():
                 log.info(
                     f"  ✅ SCORED! Score={res['score']} ({res['confidence']}) "
                     f"CT={res['comp_tension_score']} V={res['vol_score']} "
-                    f"S={res['struct_score']} C={res['cont_score']}"
+                    f"OI={res['oi_score']:+d} FR={res['funding_trend_score']:+d} "
+                    f"LS={res['ls_score']:+d}(x{res['ls_multiplier']:.2f}) "
+                    f"T2={res['entry']['t2_pct']:.0f}%"
                 )
         except Exception as ex:
             log.warning(f"  Error {sym}: {ex}", exc_info=True)
 
         time.sleep(CONFIG["sleep_coins"])
 
-    # Sort by priority_score DESC (Task 2 — early phases float to top)
-    all_results.sort(key=lambda x: x["priority_score"], reverse=True)
+    # Sort by score descending
+    all_results.sort(key=lambda x: x["score"], reverse=True)
 
     log.info(f"\n{'='*70}")
     log.info(f"✅ Total coin scored: {len(all_results)}")
-    conf_counts  = defaultdict(int)
-    phase_counts = defaultdict(int)
+    conf_counts = defaultdict(int)
     for r in all_results:
         conf_counts[r["confidence"]] += 1
-        phase_counts[r["phase"]] += 1
-    log.info(f"   Confidence — Strong: {conf_counts['strong']} | Early: {conf_counts['early']} | Late: {conf_counts['possibly_late']}")
-    log.info(f"   Phase      — Early: {phase_counts['early']} | Mid: {phase_counts['mid']} | Late: {phase_counts['late']}")
+    log.info(f"   Strong: {conf_counts['strong']} | Early: {conf_counts['early']} | Late: {conf_counts['possibly_late']}")
     log.info(f"{'='*70}\n")
 
     if not all_results:
         log.info("Tidak ada sinyal pre-pump saat ini")
         return
 
-    # Filter: only send coins with non-ignore confidence AND valid entry
-    sendable = [r for r in all_results if r["confidence"] != "ignore" and r.get("entry")]
-
-    # Prioritize phase=="early" in the top_list (Task 2)
-    early_ph = [r for r in sendable if r["phase"] == "early"]
-    others_ph = [r for r in sendable if r["phase"] != "early"]
-    top_list = (early_ph + others_ph)[:CONFIG["max_alerts_per_run"]]
+    # Prioritize 'strong' (60-78) first, then 'early' (42-60), then others
+    strong   = [r for r in all_results if r["confidence"] == "strong"]
+    early    = [r for r in all_results if r["confidence"] == "early"]
+    others   = [r for r in all_results if r["confidence"] not in ("strong", "early")]
+    top_list = (strong + early + others)[:CONFIG["max_alerts_per_run"]]
 
     if len(top_list) >= 2:
         send_telegram(build_summary(top_list))
@@ -4181,13 +2657,11 @@ def run_scan():
 #  ▶️  ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    log.info("╔════════════════════════════════════════════════════╗")
-    log.info("║  PRE-PUMP SCANNER v3.6 — PRESSURE DETECTION LAYER ║")
-    log.info("║  +VPD: volume vs price divergence                 ║")
-    log.info("║  +Micro accumulation (higher lows ratio)          ║")
-    log.info("║  +Compression tightness overlay                   ║")
-    log.info("║  pressure_score * 0.35 → final score             ║")
-    log.info("╚════════════════════════════════════════════════════╝")
+    log.info("╔══════════════════════════════════════════════════════╗")
+    log.info("║  PRE-PUMP SCANNER v4.0 — FUTURES FLOWS EDITION      ║")
+    log.info("║  OI+LS+FundingTrend · T2>=20% filter · Squeeze mult ║")
+    log.info("║  CT:40 Vol:30 OI:15 Struct:20 | Dist(HVNP+OI):25   ║")
+    log.info("╚══════════════════════════════════════════════════════╝")
 
     if not BOT_TOKEN or not CHAT_ID:
         log.error("FATAL: BOT_TOKEN / CHAT_ID tidak ditemukan!")
