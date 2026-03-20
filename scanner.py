@@ -1399,6 +1399,13 @@ def calc_distribution_penalty(candles):
     penalty = 0
     flags   = []
 
+    # ── OVERALL WINDOW PRICE DIRECTION ────────────────────────────────────────
+    # v3.7 FIX: If price is clearly UP over the 10-candle window, this is NOT
+    # distribution — it's a breakout/pump. Distribution = high vol + price flat or DOWN.
+    # Skip Track A entirely if overall move is positive and significant.
+    overall_move = (price_now - price_10a) / price_10a if price_10a > 0 else 0
+    is_breakout_up = overall_move > 0.04   # price up >4% in 10 candles = pump, not dist
+
     # ── TRACK A: High volume + no price progress (heaviest signal) ─────────────
     # This is what distribution looks like: smart money dumps into volume
     # while retail sees the volume and thinks it's a buy signal.
@@ -1414,20 +1421,24 @@ def calc_distribution_penalty(candles):
             if c["close"] < c["open"]:   # red + high volume
                 high_vol_red += 1
 
-    if high_vol_no_prog >= 3:
-        penalty += 25
-        flags.append(f"hvnp:{high_vol_no_prog}x (severe)")
-    elif high_vol_no_prog >= 2:
-        penalty += 18
-        flags.append(f"hvnp:{high_vol_no_prog}x")
-    elif high_vol_no_prog >= 1:
-        penalty += 8
-        flags.append(f"hvnp:1x")
+    # v3.7 FIX: Skip Track A if price clearly broke out upward (pump, not distribution)
+    if not is_breakout_up:
+        if high_vol_no_prog >= 3:
+            penalty += 25
+            flags.append(f"hvnp:{high_vol_no_prog}x (severe)")
+        elif high_vol_no_prog >= 2:
+            penalty += 18
+            flags.append(f"hvnp:{high_vol_no_prog}x")
+        elif high_vol_no_prog >= 1:
+            penalty += 8
+            flags.append(f"hvnp:1x")
 
-    # High volume + red candles compound the penalty
-    if high_vol_red >= 2 and high_vol_no_prog >= 1:
-        penalty += 7
-        flags.append(f"hvred:{high_vol_red}x")
+        # High volume + red candles compound the penalty
+        if high_vol_red >= 2 and high_vol_no_prog >= 1:
+            penalty += 7
+            flags.append(f"hvred:{high_vol_red}x")
+    else:
+        flags.append(f"track_a_skipped(breakout_up={overall_move*100:.1f}%)")
 
     # ── TRACK B: Structural distribution signals (softer) ─────────────────────
     track_b = 0
@@ -1479,6 +1490,7 @@ def calc_distribution_penalty(candles):
 def calc_slow_trend_penalty(candles, compression):
     """
     Penalize coins that are just drifting up/down without tension.
+    v3.7: also penalizes trending compression (compression window itself is sloping).
     Return (penalty 0-20, details)
     """
     if len(candles) < 30:
@@ -1498,13 +1510,32 @@ def calc_slow_trend_penalty(candles, compression):
     no_compression = (atr_s is not None and atr_l is not None and atr_l > 0
                       and atr_s / atr_l > 0.90)
 
-    # Compression zone exists — if yes, no slow-trend penalty
+    # Compression zone exists — if yes, no slow-trend penalty UNLESS the
+    # compression itself is trending (price moved significantly within the zone window)
     has_compression = compression is not None
 
+    # v3.7 FIX: Check if price moved significantly WITHIN the compression window.
+    # A real compression zone has price go NOWHERE (tight base).
+    # A slow trend has price drifting consistently upward even inside the "zone".
+    trending_compression = False
+    if has_compression and compression["length"] >= 20:
+        comp_len = min(compression["length"], len(candles) - 1)
+        price_at_comp_start = candles[-comp_len]["close"]
+        price_now_comp      = candles[-1]["close"]
+        if price_at_comp_start > 0:
+            comp_price_move = abs(price_now_comp - price_at_comp_start) / price_at_comp_start
+            # If price moved >8% during the compression window, it's a trend, not a base
+            if comp_price_move > 0.08 and trending:
+                trending_compression = True
+
     if trending and no_compression and not has_compression:
-        return min(10, 10), {"reason": "smooth trend without compression"}   # v3.1: capped at 10
+        return 10, {"reason": "smooth trend without compression"}
     elif trending and no_compression and has_compression and compression["length"] < 30:
-        return min(5, 10), {"reason": "short compression + trending"}
+        return 5, {"reason": "short compression + trending"}
+    elif trending_compression:
+        # v3.7: trending within compression = not a real base = penalize
+        comp_move_pct = abs(price_now_comp - price_at_comp_start) / price_at_comp_start
+        return 8, {"reason": f"trending_compression (moved {comp_move_pct*100:.1f}% in zone)"}
     return 0, {}
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2594,6 +2625,183 @@ def dead_market_penalty(candles) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  🔍  v3.7 — VOLUME TREND QUALIFIER
+#  Differentiates dead market (flat vol) from real accumulation (vol trend UP).
+#  Returns multiplier 0.3–1.0 applied to working_score.
+# ══════════════════════════════════════════════════════════════════════════════
+def compute_volume_trend_qualifier(candles):
+    """
+    Real accumulation has volume trending UP (smart money quietly entering).
+    Dead market has flat or declining volume.
+    Slow trend has random/flat volume.
+
+    Returns (multiplier float [0.3, 1.0], details dict).
+    multiplier=1.0 → volume trend confirms signal
+    multiplier=0.3 → dead/declining volume, heavy suppression
+    """
+    N = CONFIG.get("vol_avg_long", 20)
+    n = len(candles)
+    if n < N * 3:
+        return 1.0, {"reason": "insufficient history", "vol_trend": "unknown"}
+
+    # Split into 3 equal windows: old → mid → recent
+    third = N
+    vols_old    = [c["volume_usd"] for c in candles[-(third*3):-(third*2)]]
+    vols_mid    = [c["volume_usd"] for c in candles[-(third*2):-third]]
+    vols_recent = [c["volume_usd"] for c in candles[-third:]]
+
+    avg_old    = _mean(vols_old)    if vols_old    else 0.0
+    avg_mid    = _mean(vols_mid)    if vols_mid    else 0.0
+    avg_recent = _mean(vols_recent) if vols_recent else 0.0
+
+    if avg_old <= 0:
+        return 1.0, {"reason": "no vol history"}
+
+    # Trend ratio: recent vs old
+    trend_ratio = avg_recent / avg_old
+
+    # Coefficient of variation across full window — dead market = very low CV
+    all_vols = [c["volume_usd"] for c in candles[-N*3:]]
+    cv = _std(all_vols) / _mean(all_vols) if _mean(all_vols) > 0 else 0.0
+
+    # Classify
+    if trend_ratio >= 1.30 and cv > 0.15:
+        # Clearly rising volume with variance — real accumulation
+        multiplier = 1.0
+        trend_label = f"rising_strong(x{trend_ratio:.2f})"
+    elif trend_ratio >= 1.10:
+        multiplier = 0.90
+        trend_label = f"rising(x{trend_ratio:.2f})"
+    elif trend_ratio >= 0.90 and cv > 0.20:
+        # Flat but with variance — could be pre-pump stealth
+        multiplier = 0.75
+        trend_label = f"flat_with_variance(cv={cv:.2f})"
+    elif trend_ratio >= 0.90 and cv <= 0.10:
+        # Flat volume + low variance = dead market
+        multiplier = 0.35
+        trend_label = f"DEAD_FLAT(x{trend_ratio:.2f},cv={cv:.2f})"
+    elif trend_ratio < 0.80:
+        # Declining volume — no pump coming
+        multiplier = 0.45
+        trend_label = f"declining(x{trend_ratio:.2f})"
+    else:
+        multiplier = 0.65
+        trend_label = f"weak(x{trend_ratio:.2f})"
+
+    return multiplier, {
+        "multiplier": round(multiplier, 3),
+        "trend_ratio": round(trend_ratio, 3),
+        "vol_cv": round(cv, 4),
+        "vol_trend": trend_label,
+        "avg_old": round(avg_old),
+        "avg_recent": round(avg_recent),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ⚡  v3.7 — VOLATILITY RANK SCORE
+#  Pre-pump coins have HIGH historical ATR relative to current compression.
+#  Dead market has uniformly low ATR (never expanded).
+#  Returns (score 0–20, details dict).
+# ══════════════════════════════════════════════════════════════════════════════
+def compute_volatility_rank_score(candles):
+    """
+    Measures ATR expansion POTENTIAL by comparing:
+      - Current ATR (short window) vs historical ATR distribution
+      - If current ATR is in bottom quartile of history → coiled = bullish
+      - If historical max ATR >> current ATR → coin CAN move fast
+      - If ATR always flat → dead coin, no pump potential
+
+    Returns (score 0-20, details dict).
+    Score 15-20 = coiled high-volatility coin ready to expand
+    Score 5-10  = moderate, possible
+    Score 0-3   = dead, flat ATR history = no pump potential
+    """
+    win_s = CONFIG.get("win_short", 10)
+    win_l = CONFIG.get("win_structure", 50)
+    n = len(candles)
+
+    if n < win_l + win_s + 5:
+        return 5, {"reason": "insufficient data"}
+
+    atr_short = calc_atr(candles[-(win_s + 5):], win_s)
+    atr_long  = calc_atr(candles[-(win_l + 5):], win_l)
+
+    if not atr_short or not atr_long or atr_long <= 0:
+        return 0, {"reason": "atr_calc_failed"}
+
+    # Build ATR history: rolling short ATRs over past 200 candles
+    atr_history = []
+    step = max(1, win_s // 2)
+    for i in range(win_s + 5, min(n, 200), step):
+        a = calc_atr(candles[-(i + win_s + 5): -(i)], win_s)
+        if a and a > 0:
+            atr_history.append(a)
+
+    if len(atr_history) < 5:
+        return 5, {"reason": "insufficient atr history"}
+
+    # What percentile is the current ATR in historical distribution?
+    atr_p10  = _percentile(atr_history, 10)
+    atr_p25  = _percentile(atr_history, 25)
+    atr_p50  = _percentile(atr_history, 50)
+    atr_p90  = _percentile(atr_history, 90)
+    atr_max  = max(atr_history)
+    atr_cv   = _std(atr_history) / _mean(atr_history) if _mean(atr_history) > 0 else 0
+
+    # Expansion potential = max ATR / current ATR
+    # High ratio = coin has moved violently before = can do it again
+    expansion_potential = atr_max / atr_short if atr_short > 0 else 1.0
+
+    score = 0
+
+    # [1] Current ATR in low percentile → coiled (0-12 pts)
+    if atr_short <= atr_p10:
+        score += 12
+    elif atr_short <= atr_p25:
+        score += 8
+    elif atr_short <= atr_p50:
+        score += 4
+
+    # [2] Expansion potential (0-5 pts)
+    if expansion_potential >= 5.0:
+        score += 5
+    elif expansion_potential >= 3.0:
+        score += 3
+    elif expansion_potential >= 2.0:
+        score += 1
+
+    # [3] v3.7: ATR actively expanding (cv high + recent ATR > older ATR)
+    # A pump in progress expands ATR from low → high. This IS a valid signal.
+    if atr_cv >= 0.25 and len(atr_history) >= 10:
+        recent_atr_avg = _mean(atr_history[-5:])
+        older_atr_avg  = _mean(atr_history[:5])
+        if older_atr_avg > 0 and recent_atr_avg / older_atr_avg >= 1.5:
+            # ATR expanding = volatility regime change = pump in progress
+            score = max(score, 8)   # floor at 8 for expanding volatile coins
+
+    # [4] ATR CV — dead coins have near-zero CV (flat ATR always)
+    # PENALTY: if CV < 0.05 → monotone ATR → dead market → hard suppress
+    if atr_cv < 0.05:
+        score = max(0, score - 15)   # dead coin: total suppression
+    elif atr_cv < 0.10:
+        score = max(0, score - 5)
+
+    score = max(0, min(20, score))
+
+    return score, {
+        "atr_short": round(atr_short, 8),
+        "atr_long":  round(atr_long, 8),
+        "atr_p25":   round(atr_p25, 8),
+        "atr_p50":   round(atr_p50, 8),
+        "atr_max":   round(atr_max, 8),
+        "atr_cv":    round(atr_cv, 4),
+        "expansion_potential": round(expansion_potential, 2),
+        "vol_rank_score": score,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  🧠  MASTER SCORE v3.3
 # ══════════════════════════════════════════════════════════════════════════════
 def master_score(symbol, ticker):
@@ -2779,6 +2987,24 @@ def master_score(symbol, ticker):
         flow_score     = flow_score_v34,
     )
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── v3.7 NEW FILTERS — differentiates dead market vs accumulation ─────────
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # [N] Volume trend qualifier — dead market = flat/declining vol, accum = rising
+    vol_trend_mult, vol_trend_details = compute_volume_trend_qualifier(c1h)
+
+    # [O] Volatility rank score — pre-pump coins have coiled ATR in low percentile
+    #     AND have expansion potential (high historical ATR vs current ATR)
+    vol_rank_score, vol_rank_details = compute_volatility_rank_score(c1h)
+
+    log.info(
+        f"  {symbol} [v3.7-filters] "
+        f"vol_trend_mult={vol_trend_mult:.3f} ({vol_trend_details.get('vol_trend','?')}) "
+        f"vol_rank={vol_rank_score} (cv={vol_rank_details.get('atr_cv',0):.4f} "
+        f"exp_pot={vol_rank_details.get('expansion_potential',0):.2f}x)"
+    )
+
     # ── FINAL SCORE (v3.7 — all signal components properly wired) ───────────────
     #
     # AUDIT FIX: Previously, ALL of the following went to raw_score_additive
@@ -2792,6 +3018,7 @@ def master_score(symbol, ticker):
     #   [+] liq_bonus            — liquidity sweep is high-quality signal
     #   [+] phase_bonus/penalty  — early/late phase has real impact on pump timing
     #   [+] cont_score           — second-leg continuation is valid pump signal
+    #   [+] vol_rank_score       — [NEW v3.7] high-volatility coiled coin bonus
     #   [-] dist_penalty         — distribution MUST reduce score (was completely dead)
     #   [-] slow_penalty         — trending without compression = false signal
     #   [-] late_penalty         — late entry without consolidation = trap
@@ -2801,6 +3028,7 @@ def master_score(symbol, ticker):
     #   [-] funding_gate_penalty — negative funding = bearish sentiment
     #   [-] liquidity_penalty    — illiquid coins are dangerous
     #   [-] already_pumped_penalty — already moved = late entry
+    # [×] vol_trend_mult         — [NEW v3.7] multiplicative: dead vol → suppresses
 
     # Step 1: convert v34 score (0-1) to 0-100 working space
     working_score = v34_score_01 * 100.0
@@ -2816,6 +3044,7 @@ def master_score(symbol, ticker):
     working_score += liq_bonus                  # 0 or +8
     working_score += cont_score * 0.5           # 0-15 → 0-7.5 (partial weight, already in v34)
     working_score += rsi_bonus                  # 0 or +1
+    working_score += vol_rank_score             # [NEW v3.7] 0-20 pts coiled volatility bonus
     if phase == "early":
         working_score += phase_bonus            # +10
     elif phase == "late":
@@ -2835,7 +3064,14 @@ def master_score(symbol, ticker):
     if funding < -0.001:
         working_score -= 5                      # additional funding penalty
 
-    # Step 5: Single final clamp to 0-100
+    # Step 5: [NEW v3.7] Apply volume trend multiplier AFTER all additive adjustments.
+    # This is a multiplicative gate: dead-volume coins are suppressed regardless
+    # of how good their compression looks. Multiplier 0.35-1.0.
+    # Only applied when it would suppress (< 1.0) to not artificially boost.
+    if vol_trend_mult < 1.0:
+        working_score *= vol_trend_mult
+
+    # Step 6: Single final clamp to 0-100
     score = max(0, min(100, round(working_score)))
 
     # For logging transparency, keep raw_score_additive as before
@@ -2912,6 +3148,9 @@ def master_score(symbol, ticker):
         f"ct={pressure_details.get('compression_tightness',0):.3f} "
         f"vz={pressure_details.get('volume_z',0):.3f} "
         f"pcz={pressure_details.get('price_change_z',0):.3f})",
+        f"[v3.7] vol_trend_mult={vol_trend_mult:.3f} ({vol_trend_details.get('vol_trend','?')}) "
+        f"vol_rank={vol_rank_score} (exp_pot={vol_rank_details.get('expansion_potential',0):.2f}x "
+        f"atr_cv={vol_rank_details.get('atr_cv',0):.4f})",
         f"RSI: +{rsi_bonus} (RSI={rsi:.0f})",
         f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
         f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
@@ -3103,6 +3342,11 @@ def master_score(symbol, ticker):
         # v3.6 pressure layer
         "pressure_score":      round(pressure_score, 4),
         "pressure_details":    pressure_details,
+        # v3.7 new filters
+        "vol_trend_mult":      round(vol_trend_mult, 4),
+        "vol_trend_details":   vol_trend_details,
+        "vol_rank_score":      vol_rank_score,
+        "vol_rank_details":    vol_rank_details,
         # Task 6 — required output structure
         "flags": {
             "compression":  compression_active,
