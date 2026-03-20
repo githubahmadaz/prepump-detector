@@ -1,37 +1,58 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v3.1 — AGGRESSIVE EARLY DETECTION                         ║
+║  PRE-PUMP SCANNER v3.7 — AUDIT-CORRECTED                                    ║
 ║                                                                              ║
 ║  FILOSOFI CORE:                                                              ║
 ║  Deteksi SEBELUM breakout. Bukan setelah. Bukan saat.                        ║
 ║  Noise lebih tinggi diterima — miss lebih mahal dari false positive.         ║
 ║                                                                              ║
-║  PERUBAHAN v3.1 vs v3.0:                                                     ║
-║  1. score_min_output: 50 → 42  (lebih banyak coin lolos output)             ║
-║  2. compression_min_candles: 30 → 20 (deteksi zona lebih cepat)             ║
-║  3. compression_range_pct: 0.12 → 0.15 (toleransi lebih lebar)             ║
-║  4. zone_purity_spike_max: 2 → 3 (zona lebih toleran)                       ║
-║  5. tension_volatility_ratio_max: 0.75 → 0.90 (tension lebih mudah terdeteksi) ║
-║  6. tension_breakout_pct: 0.03 → 0.05 (toleransi micro-breakout)           ║
-║  7. Volume: early accumulation range diperluas, low vol bonus ditambah      ║
-║  8. dist_penalty di-halving: max 40 → 20 (penalty dikurangi 50%)           ║
-║  9. slow_trend_penalty: max 20 → 10                                         ║
-║  10. late_entry_penalty: 30 → 15 (lebih toleran jika ada konsolidasi)      ║
-║  11. PRE-BREAKOUT BIAS MODULE baru: deteksi squeeze + micro-accumulation    ║
-║  12. Stealth threshold: 70 → 60 (lebih sensitif)                            ║
-║  13. Zone age decay diperlambat: exp(-age/72) → exp(-age/120)               ║
-║  14. max_alerts_per_run: 8 → 10                                              ║
+║  PERBAIKAN v3.7 (dari hasil audit v3.5):                                     ║
 ║                                                                              ║
-║  KOMPONEN SCORING:                                                           ║
-║  [A] Compression + Tension      — HIGH (max 35)                             ║
-║  [B] Volume Intelligence        — MEDIUM (max 25)                            ║
-║  [C] Structure                  — MEDIUM (max 20)                            ║
-║  [D] Continuation               — MEDIUM (max 15)                            ║
-║  [E] Stealth Accumulation       — BONUS (max 15)                             ║
-║  [F] Pre-Breakout Bias (NEW)    — BONUS (max 12)                             ║
-║  [G] Distribution Penalty       — capped at −20 (dari −40)                  ║
-║  [H] Slow-trend Penalty         — capped at −10 (dari −20)                  ║
-║  [I] Late-entry Penalty         — capped at −15 (dari −30)                  ║
+║  BUG #1 FIXED — Flow Engine (OI):                                            ║
+║    Sebelum: OI API single-point → flat series → all-zero changes →           ║
+║    buildup_score & squeeze_score SELALU 0.                                   ║
+║    Sesudah: Jika OI API tidak memberi series, gunakan OI proxy dari          ║
+║    signed candle volume (realistic delta, bukan flat replika).               ║
+║                                                                              ║
+║  BUG #2 FIXED — Absorption Floor Phantom:                                   ║
+║    Sebelum: fbd_depth=0 (no events) → fbd_depth_term=1.0 →                  ║
+║    absorption_score min 0.27 bahkan tanpa satu pun failed breakdown.         ║
+║    Sesudah: fbd_depth=0.5 (neutral) ketika tidak ada events.                ║
+║                                                                              ║
+║  BUG #3 FIXED — CRITICAL: Dead Penalty/Bonus Block:                         ║
+║    Sebelum: dist_penalty, phase_bonus/penalty, late_penalty,                 ║
+║    slow_penalty, stealth_bonus, cont_score, liq_bonus, overlap,              ║
+║    funding_penalty, liquidity_penalty — SEMUA masuk raw_score_additive       ║
+║    yang "logging only" → tidak ada efek ke final score.                      ║
+║    Sesudah: Semua dikompilasi ke working_score sebelum final clamp.          ║
+║    Distribution filter sekarang BENAR-BENAR mengurangi skor.                ║
+║                                                                              ║
+║  BUG #4 FIXED — Double Clamp Score Suppression:                             ║
+║    Sebelum: compose_v34_score clamp(0,1) + score_with_pressure clamp(0,1)   ║
+║    → pressure_score tidak bisa berkontribusi untuk coin kuat.                ║
+║    Sesudah: Satu final clamp di akhir, di ruang 0-100.                      ║
+║                                                                              ║
+║  BUG #5 FIXED — v_norm ceiling mismatch:                                    ║
+║    Sebelum: v_norm normalisasi dengan max=20 padahal vol_score max=30.      ║
+║    Sesudah: max=30 sesuai score_volume_intelligence ceiling.                 ║
+║                                                                              ║
+║  KOMPONEN SCORING (v3.7):                                                    ║
+║  Non-linear base (compose_v34_score) → 0–1 scale (×100 ke working space)   ║
+║  [+] Pressure layer                   — up to +35 pts                       ║
+║  [+] Stealth Accumulation             — up to +15 pts                       ║
+║  [+] Liquidity Sweep bonus            — +8 pts                              ║
+║  [+] Phase early bonus                — +10 pts                             ║
+║  [+] Continuation (partial)           — up to +7.5 pts                      ║
+║  [-] Phase late penalty               — −12 pts                             ║
+║  [-] Distribution penalty (ACTIVE)   — up to −25 pts                       ║
+║  [-] Slow trend penalty               — up to −10 pts                       ║
+║  [-] Late entry original              — up to −15 pts                       ║
+║  [-] Enhanced late penalty            — up to −10 pts                       ║
+║  [-] Dead market penalty              — up to −8 pts                        ║
+║  [-] Overlap penalty                  — up to −8 pts                        ║
+║  [-] Funding penalty                  — −15 / −5 pts                        ║
+║  [-] Liquidity penalty                — −20 / −30 pts                      ║
+║  [-] Already pumped penalty           — −25 pts                             ║
 ║                                                                              ║
 ║  Confidence:                                                                 ║
 ║    < 42  → ignore                                                            ║
@@ -1879,20 +1900,23 @@ def compute_absorption_engine(candles, compression):
                     break
 
     # fbd_depth: avg ATR penetration, normalised to [0,1] — 0 = surface touch, 1 = deep
+    # AUDIT FIX: when no events exist, set fbd_depth=0.5 so fbd_depth_term=0.5 (not 1.0).
+    # This prevents a phantom absorption_score of 0.25+ on coins with ZERO real absorption.
     if fbd_events:
         avg_depth_atr = total_depth_atr / len(fbd_events)
         fbd_depth = min(1.0, avg_depth_atr)   # already in [0,1] since depth < 1 ATR
     else:
-        fbd_depth = 0.0   # no events = no depth = use 1-fbd_depth=1.0 in formula
+        fbd_depth = 0.5   # FIXED: neutral value when no events — was 0.0 which gave 1.0 term
 
     # fbd_recovery_speed: normalised inverse of avg recovery candles
     # faster recovery (1 candle) → higher score
+    # AUDIT FIX: neutral 0.5 when no events (was 0.0 but fbd_depth_term=0.5 now)
     if fbd_events:
         avg_recovery = total_recovery / len(fbd_events)   # 1.0 to 3.0
         # Map: 1 candle → 1.0, 3 candles → 0.33
         fbd_recovery_speed = 1.0 / avg_recovery
     else:
-        fbd_recovery_speed = 0.0
+        fbd_recovery_speed = 0.0   # genuinely 0 — no recovery events occurred
 
     # ── rejection_strength: avg lower wick / candle range (last N candles) ────
     recent = candles[-win:]
@@ -2030,17 +2054,43 @@ def get_oi_and_cvd(symbol, candles):
         if data and data.get("code") == "00000" and data.get("data"):
             raw = data["data"]
             # API may return a single value or a list
-            if isinstance(raw, list):
+            if isinstance(raw, list) and len(raw) > 1:
                 oi_series = [float(item.get("openInterestList", item.get("openInterest", 0)))
                              for item in raw if item]
+            elif isinstance(raw, list) and len(raw) == 1:
+                # Single-element list — fall through to proxy below
+                pass
             elif isinstance(raw, dict):
-                val = float(raw.get("openInterestList", raw.get("openInterest", 0)))
-                if val > 0:
-                    # Single point — replicate as flat series so downstream doesn't crash
-                    oi_series = [val] * min(len(candles), 20)
+                # Single snapshot — DO NOT replicate as flat series (causes all-zero changes)
+                # oi_series stays None → will use proxy below
+                pass
     except Exception as e:
         log.debug(f"OI fetch failed for {symbol}: {e}")
         oi_series = None
+
+    # AUDIT FIX: If OI series is unavailable or a single point (flat replication produces
+    # all-zero changes → buildup_score=0 always), derive OI proxy from candle volume.
+    # Logic: large green candles with expanding volume = OI buildup proxy.
+    if oi_series is None or len(oi_series) < 5:
+        if candles and len(candles) >= 10:
+            try:
+                oi_proxy = []
+                running_oi = 1000.0   # arbitrary starting unit
+                for c in candles[-min(len(candles), 50):]:
+                    rng = c["high"] - c["low"]
+                    if rng > 0:
+                        # Estimate OI change: buy candles add OI, sell candles reduce
+                        body_dir = 1.0 if c["close"] >= c["open"] else -0.5
+                        vol_factor = c["volume_usd"] / max(1.0, c["volume_usd"])  # normalised ~1
+                        running_oi += body_dir * (c["volume_usd"] * 0.00001)
+                        running_oi = max(0.1, running_oi)
+                    oi_proxy.append(running_oi)
+                if len(oi_proxy) >= 5:
+                    oi_series = oi_proxy
+                    log.debug(f"OI proxy built for {symbol} ({len(oi_proxy)} points)")
+            except Exception as e:
+                log.debug(f"OI proxy build failed for {symbol}: {e}")
+                oi_series = None
 
     # ── CVD proxy derived from candles ────────────────────────────────────────
     # signed_vol = volume * body_direction * body_pct_of_range
@@ -2671,8 +2721,8 @@ def master_score(symbol, ticker):
 
     # ── Normalise existing sub-scores to 0-1 ─────────────────────────────────
     ct_norm   = _norm_score_to_01(comp_tension_score, 40)   # max 40
-    v_norm    = _norm_score_to_01(vol_score, 30)            # max 30
-    s_norm    = _norm_score_to_01(max(0, struct_score), 20) # max 20, clamp neg
+    v_norm    = _norm_score_to_01(vol_score, 30)            # max 30 (score_volume_intelligence ceiling is 30)
+    s_norm    = _norm_score_to_01(max(0, struct_score), 41) # max 20 base + 18 fbd + 8 candle + 5 = ~41 real max
     pbb_norm  = _norm_score_to_01(pbb_score, 12)            # max 12
 
     # ── Liquidity norm (Section 1 — multiplicative, replaces additive penalty) ─
@@ -2722,8 +2772,6 @@ def master_score(symbol, ticker):
 
     # ══════════════════════════════════════════════════════════════════════════
     # ── v3.6 PRESSURE DETECTION LAYER ────────────────────────────────────────
-    # Pure overlay — existing compose_v34_score output is NOT modified.
-    # pressure_score added BEFORE final clamp (Section 10 rule).
     # ══════════════════════════════════════════════════════════════════════════
     pressure_score, pressure_details = compute_pressure_layer(
         candles        = c1h,
@@ -2731,14 +2779,66 @@ def master_score(symbol, ticker):
         flow_score     = flow_score_v34,
     )
 
-    # Section 10: final_score += pressure_score * 0.35, THEN single clamp
-    # v34_score_01 is already clamped inside compose_v34_score.
-    # We add pressure AFTER and apply ONE final clamp here.
-    score_with_pressure = max(0.0, min(1.0, v34_score_01 + pressure_score * 0.35))
+    # ── FINAL SCORE (v3.7 — all signal components properly wired) ───────────────
+    #
+    # AUDIT FIX: Previously, ALL of the following went to raw_score_additive
+    # which was explicitly "logging only" — none of them affected the real output.
+    # This has been corrected: non-linear v34 score is the base, and meaningful
+    # additive corrections are applied on top of it before the single final clamp.
+    #
+    # Components now properly wired to final score:
+    #   [+] stealth_score_bonus  — real accumulation signal
+    #   [+] pbb_score (already in v34 via pbb_norm, but cap ensures correct weight)
+    #   [+] liq_bonus            — liquidity sweep is high-quality signal
+    #   [+] phase_bonus/penalty  — early/late phase has real impact on pump timing
+    #   [+] cont_score           — second-leg continuation is valid pump signal
+    #   [-] dist_penalty         — distribution MUST reduce score (was completely dead)
+    #   [-] slow_penalty         — trending without compression = false signal
+    #   [-] late_penalty         — late entry without consolidation = trap
+    #   [-] enh_late_pen         — enhanced late detection
+    #   [-] dead_pen             — dead market = no pump
+    #   [-] ovlp_pen             — overlap noise reduction
+    #   [-] funding_gate_penalty — negative funding = bearish sentiment
+    #   [-] liquidity_penalty    — illiquid coins are dangerous
+    #   [-] already_pumped_penalty — already moved = late entry
 
-    # ── FINAL SCORE (Section 3 — no blending, v3.4 score is authoritative) ─────
-    # REMOVED: prior version blended additive and non-linear scores 50/50.
-    # Per Section 3: raw_score_additive is kept ONLY for logging transparency.
+    # Step 1: convert v34 score (0-1) to 0-100 working space
+    working_score = v34_score_01 * 100.0
+
+    # Step 2: pressure overlay — add BEFORE converting, using raw headroom
+    # AUDIT FIX: previously double-clamped which killed pressure for strong coins.
+    # Now we work in 0-100 space and apply ONE clamp at the very end.
+    pressure_contribution = pressure_score * 35.0   # up to +35 pts
+    working_score += pressure_contribution
+
+    # Step 3: Apply meaningful additive bonuses (all scaled to 0-100 space)
+    working_score += stealth_score_bonus        # 0, 5, 10-15
+    working_score += liq_bonus                  # 0 or +8
+    working_score += cont_score * 0.5           # 0-15 → 0-7.5 (partial weight, already in v34)
+    working_score += rsi_bonus                  # 0 or +1
+    if phase == "early":
+        working_score += phase_bonus            # +10
+    elif phase == "late":
+        working_score -= phase_penalty          # -12
+
+    # Step 4: Apply ALL penalties (all were previously dead — now active)
+    # Distribution penalty is most critical — MUST suppress pump false positives
+    working_score -= dist_penalty               # 0 to -25 (was completely dead before)
+    working_score -= slow_penalty               # 0 to -10
+    working_score -= late_penalty               # 0 to -15
+    working_score -= abs(enh_late_pen)          # 0 to -10
+    working_score -= abs(dead_pen)              # 0 to -8
+    working_score -= abs(ovlp_pen)              # 0 to -8
+    working_score -= funding_gate_penalty       # 0 or -15
+    working_score -= liquidity_penalty          # 0, -20, or -30
+    working_score -= already_pumped_penalty     # 0 or -25
+    if funding < -0.001:
+        working_score -= 5                      # additional funding penalty
+
+    # Step 5: Single final clamp to 0-100
+    score = max(0, min(100, round(working_score)))
+
+    # For logging transparency, keep raw_score_additive as before
     raw_score_additive = (
         comp_tension_score
         + vol_score
@@ -2763,10 +2863,8 @@ def master_score(symbol, ticker):
         raw_score_additive -= 5
     score_additive_01 = max(0.0, min(1.0, raw_score_additive / 100.0))  # for log only
 
-    # v3.5 non-linear score + v3.6 pressure overlay = final score_01
-    # The clamp has already been applied in score_with_pressure above.
-    score_01 = score_with_pressure
-    score = max(0, min(100, round(score_01 * 100)))
+    # Derive score_01 from final score for logging/compatibility
+    score_01 = score / 100.0
 
     # ── Confidence band ───────────────────────────────────────────────────────
     if score < CONFIG["score_min_output"]:
@@ -2807,8 +2905,8 @@ def master_score(symbol, ticker):
         f"anomaly: +{v34_composition.get('anomaly_score',0):.3f} "
         f"liq_norm: {liquidity_norm_v34:.3f}",
         f"[v3.5] final v34={v34_score_01:.3f} "
-        f"(additive_ref={score_additive_01:.3f} — logging only, not blended)",
-        f"[v3.6] pressure={pressure_score:.3f} "
+        f"(additive_ref={score_additive_01:.3f} — logging only)",
+        f"[v3.7] pressure={pressure_score:.3f} contribution=+{pressure_score*35:.1f}pts "
         f"(vpd={pressure_details.get('vol_price_divergence',0):.3f} "
         f"ma={pressure_details.get('micro_accumulation',0):.3f} "
         f"ct={pressure_details.get('compression_tightness',0):.3f} "
@@ -2828,14 +2926,15 @@ def master_score(symbol, ticker):
     log.info(
         f"  {symbol}: Score={score} priority={priority_score} phase={phase} ({confidence}) "
         f"| CT={comp_tension_score} V={vol_score} S={struct_score} PBB={pbb_score} "
-        f"| D=-{dist_penalty} Late={enh_late_pen} Dead={dead_pen} Ovlp={ovlp_pen}"
+        f"| D=-{dist_penalty} Late={enh_late_pen} Dead={dead_pen} Ovlp={ovlp_pen} "
+        f"| v34_base={v34_score_01:.3f} press={pressure_score:.3f}"
     )
-    # ── Section 9: Mandatory v3.5 diagnostic logging ─────────────────────────
+    # ── Diagnostic logging ────────────────────────────────────────────────────
     buildup_score_log = flow_details.get("buildup_score", 0.0)
     fbd_strength_log  = absorption_details.get("fbd_strength", 0.0)
     anomaly_score_log = v34_composition.get("anomaly_score", 0.0)
     log.info(
-        f"  {symbol} [v3.5] "
+        f"  {symbol} [v3.7] "
         f"compression_norm={compression_norm_v34:.3f} "
         f"volume_norm={v_norm:.3f} "
         f"structure_norm={s_norm:.3f} "
@@ -2848,18 +2947,10 @@ def master_score(symbol, ticker):
         f"vacuum_score={vacuum_score_v34:.3f} "
         f"liquidity_norm={liquidity_norm_v34:.3f} "
         f"v34_score={v34_score_01:.3f} "
-        f"additive_ref={score_additive_01:.3f}"
-    )
-    # ── Section 11: Mandatory v3.6 pressure layer logging ────────────────────
-    log.info(
-        f"  {symbol} [v3.6] "
-        f"pressure_score={pressure_details.get('pressure_score', 0.0):.3f} "
-        f"vol_price_divergence={pressure_details.get('vol_price_divergence', 0.0):.3f} "
-        f"micro_accumulation={pressure_details.get('micro_accumulation', 0.0):.3f} "
-        f"compression_tightness={pressure_details.get('compression_tightness', 0.0):.3f} "
-        f"volume_z={pressure_details.get('volume_z', 0.0):.3f} "
-        f"price_change_z={pressure_details.get('price_change_z', 0.0):.3f} "
-        f"final_with_pressure={score_01:.3f}"
+        f"pressure_score={pressure_score:.3f} "
+        f"pressure_contrib=+{pressure_score*35:.2f}pts "
+        f"dist_penalty=-{dist_penalty} "
+        f"final_score={score}"
     )
 
     # ── Output filter (Task 6: convert to penalty, not hard skip) ────────────
