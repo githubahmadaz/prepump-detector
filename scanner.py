@@ -645,7 +645,20 @@ def calc_entry_targets(candles, compression_zone):
     atr  = calc_atr(candles[-48:], 14) or cur * 0.025
 
     comp_mid = (compression_zone["high"] + compression_zone["low"]) / 2
-    entry    = min(cur * 0.999, compression_zone["high"] * 1.005)
+    comp_low  = compression_zone["low"]
+    comp_high = compression_zone["high"]
+
+    # v3.9 MODULE 7: PRE-BREAKOUT ENTRY LOGIC
+    # Old logic: entry = min(cur, comp_high * 1.005) — waits near top of range
+    # New logic: if price is INSIDE compression, enter at current price (or slight discount)
+    #            This enables positioning BEFORE the breakout, not after confirmation.
+    price_in_compression = comp_low <= cur <= comp_high
+    if price_in_compression:
+        # Inside zone: enter at current price with small discount for limit order
+        entry = cur * 0.998
+    else:
+        # Above zone (already breaking out): revert to confirmation entry
+        entry = min(cur * 0.999, comp_high * 1.005)
 
     sl = compression_zone["low"] - atr * CONFIG["atr_sl_mult"]
     sl = max(sl, entry * 0.85)
@@ -2831,6 +2844,168 @@ def compute_volatility_rank_score(candles):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ⏰  v3.9 — SESSION ALPHA BONUS
+#  Asia session transition (~02:00 WIB = 19:00 UTC prev day) is historically
+#  the highest-probability window for altcoin ignition by market makers.
+#  Pre-Asia buildup: 17:00–19:00 UTC (00:00–02:00 WIB)
+#  Asia expansion:   19:00–22:00 UTC (02:00–05:00 WIB)
+#  Europe open:      06:00–08:00 UTC (13:00–15:00 WIB) — secondary window
+# ══════════════════════════════════════════════════════════════════════════════
+def session_alpha_bonus(current_utc_hour: int) -> float:
+    """
+    Returns a score bonus based on current UTC hour aligned to WIB (UTC+7).
+    Only applies conditional bonus — never a flat constant.
+
+    Window mapping:
+      UTC 17-18 (WIB 00-01): pre-Asia buildup        → +6  (accumulation phase)
+      UTC 19-21 (WIB 02-04): Asia ignition window    → +10 (highest probability)
+      UTC 22-23 (WIB 05-06): Asia continuation       → +5
+      UTC 06-07 (WIB 13-14): Europe open window      → +4
+      UTC 08-11 (WIB 15-18): US pre-market           → +3
+      All other hours                                 → 0
+    """
+    h = current_utc_hour % 24
+    if h in (17, 18):      return 6.0    # pre-Asia accumulation
+    if h in (19, 20, 21):  return 10.0   # Asia ignition — peak window
+    if h in (22, 23):      return 5.0    # Asia continuation
+    if h in (6, 7):        return 4.0    # Europe open
+    if h in (8, 9, 10, 11): return 3.0  # US pre-market
+    return 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🔥  v3.9 — IGNITION TRIGGER DETECTOR
+#  Detects the transition: compression+accumulation → expansion.
+#  Uses only internal signals — no price confirmation needed.
+#
+#  Logic:
+#    - pressure_score > 0.55: hidden demand is elevated (buyers absorbing supply)
+#    - flow_score > 0.30: OI/CVD confirms directional intent (not just noise)
+#    - cqi < 0.022: compression is structurally sound (not just random chop)
+#    - compression_length >= 48: coil has aged enough to release (2+ days)
+#
+#  ALL four conditions must align — prevents false triggers on single-factor spikes.
+# ══════════════════════════════════════════════════════════════════════════════
+def detect_ignition(pressure_score: float, flow_score: float,
+                    cqi: float, compression_length: int) -> tuple:
+    """
+    Returns (is_ignition: bool, ignition_score: float, reason: str).
+    ignition_score is graded 0.0-1.0 — partial credit for near-ignition.
+    """
+    conditions_met = 0
+    details = []
+
+    # Condition 1: pressure elevated — demand absorbing supply
+    if pressure_score > 0.55:
+        conditions_met += 1
+        details.append(f"press={pressure_score:.2f}")
+    elif pressure_score > 0.40:
+        conditions_met += 0.5   # partial
+
+    # Condition 2: flow directional intent confirmed
+    if flow_score > 0.30:
+        conditions_met += 1
+        details.append(f"flow={flow_score:.2f}")
+    elif flow_score > 0.15:
+        conditions_met += 0.5
+
+    # Condition 3: compression quality structural (not noise)
+    if 0 < cqi < 0.022:
+        conditions_met += 1
+        details.append(f"cqi={cqi:.4f}")
+    elif 0 < cqi < 0.035:
+        conditions_met += 0.5
+
+    # Condition 4: coil has aged — energy stored (2+ days minimum)
+    if compression_length >= 48:
+        conditions_met += 1
+        details.append(f"coil={compression_length}h")
+    elif compression_length >= 24:
+        conditions_met += 0.5
+
+    # Full ignition: all 4 conditions met
+    is_ignition = conditions_met >= 3.5
+    ignition_score = min(1.0, conditions_met / 4.0)
+
+    reason = "+".join(details) if details else "none"
+    return is_ignition, ignition_score, reason
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  💧  v3.9 — LIQUIDITY VACUUM PROXY
+#  Simulates thin ask-side liquidity WITHOUT orderbook data.
+#
+#  Market maker pattern before a pump:
+#    1. Range narrows (they stop providing wide spreads)
+#    2. Volume declines (not distributing, just holding)
+#    3. Volatility compresses (ATR squeezes relative to history)
+#    4. Then: sudden micro-expansion candle with volume (ignition test)
+#
+#  Proxy score = probability that ask-side is thin above price.
+# ══════════════════════════════════════════════════════════════════════════════
+def liquidity_vacuum_proxy(candles) -> tuple:
+    """
+    Returns (vacuum_score float [0,1], details dict).
+    Higher score = thinner liquidity above = easier breakout.
+
+    Uses last 6 candles (micro-window) vs 30-candle baseline.
+    """
+    n = len(candles)
+    if n < 35:
+        return 0.0, {"reason": "insufficient data"}
+
+    recent6  = candles[-6:]
+    base30   = candles[-30:]
+
+    # [1] Range compression — last 6 candles significantly tighter than baseline
+    ranges6  = [(c["high"] - c["low"]) / c["low"] for c in recent6  if c["low"] > 0]
+    ranges30 = [(c["high"] - c["low"]) / c["low"] for c in base30   if c["low"] > 0]
+    avg_range6  = _mean(ranges6)  if ranges6  else 0.01
+    avg_range30 = _mean(ranges30) if ranges30 else 0.01
+    range_compression = 1.0 - min(1.0, avg_range6 / avg_range30) if avg_range30 > 0 else 0.0
+
+    # [2] Volume declining into compression — supply exhaustion signal
+    vols6  = [c["volume_usd"] for c in recent6]
+    vols30 = [c["volume_usd"] for c in base30]
+    avg_vol6  = _mean(vols6)  if vols6  else 0
+    avg_vol30 = _mean(vols30) if vols30 else 1
+    vol_decline = max(0.0, 1.0 - (avg_vol6 / avg_vol30)) if avg_vol30 > 0 else 0.0
+    vol_decline = min(vol_decline, 0.9)   # cap: complete silence is suspect
+
+    # [3] Micro-expansion on last candle (ignition test candle)
+    # Breakout attempt: last candle range > 1.5× avg of 5 before it
+    last_c = candles[-1]
+    prev5_ranges = [(c["high"] - c["low"]) / c["low"] for c in candles[-6:-1] if c["low"] > 0]
+    avg_prev5 = _mean(prev5_ranges) if prev5_ranges else 0.01
+    last_range = (last_c["high"] - last_c["low"]) / last_c["low"] if last_c["low"] > 0 else 0
+    micro_expansion = max(0.0, min(1.0, (last_range / avg_prev5 - 1.0) / 2.0)) if avg_prev5 > 0 else 0.0
+
+    # [4] Close position bias — consistent closing in upper half = buyers in control
+    close_bias = _mean([
+        (c["close"] - c["low"]) / (c["high"] - c["low"])
+        for c in recent6 if (c["high"] - c["low"]) > 0
+    ]) if recent6 else 0.5
+    close_bias_score = max(0.0, (close_bias - 0.5) * 2.0)   # 0.5→0, 1.0→1.0
+
+    # Weighted combination
+    vacuum_score = (
+        0.35 * range_compression    # most important: supply wall collapsing
+        + 0.25 * vol_decline        # volume drying up = less supply
+        + 0.25 * micro_expansion    # ignition test candle
+        + 0.15 * close_bias_score   # directional intent
+    )
+    vacuum_score = max(0.0, min(1.0, vacuum_score))
+
+    return vacuum_score, {
+        "vacuum_score":      round(vacuum_score, 4),
+        "range_compression": round(range_compression, 4),
+        "vol_decline":       round(vol_decline, 4),
+        "micro_expansion":   round(micro_expansion, 4),
+        "close_bias":        round(close_bias, 4),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  🧠  MASTER SCORE v3.3
 # ══════════════════════════════════════════════════════════════════════════════
 def master_score(symbol, ticker):
@@ -3059,44 +3234,93 @@ def master_score(symbol, ticker):
     #   [-] already_pumped_penalty — already moved = late entry
     # [×] vol_trend_mult         — [NEW v3.7] multiplicative: dead vol → suppresses
 
-    # Step 1: convert v34 score (0-1) to 0-100 working space
-    working_score = v34_score_01 * 100.0
-
-    # ── Safe defaults for v3.8 fields (set before any early returns) ──────────
-    cqi          = 0.0
-    cqi_bonus    = 0
+    # ── Safe defaults for v3.8/v3.9 fields (before any conditional logic) ──────
+    cqi              = 0.0
+    cqi_bonus        = 0
     pump_started     = False
     pump_move_12h    = 0.0
     price_24h_move   = 0.0
+    ignition_fired   = False
+    ignition_score_v = 0.0
+    ignition_reason  = "none"
+    vacuum_score_v39 = 0.0
+    vacuum_det_v39   = {}
+    session_bonus    = 0.0
 
-    # Step 2: pressure overlay — add BEFORE converting, using raw headroom
-    # AUDIT FIX: previously double-clamped which killed pressure for strong coins.
-    # Now we work in 0-100 space and apply ONE clamp at the very end.
-    pressure_contribution = pressure_score * 35.0   # up to +35 pts
+    # Step 1: convert v34 score (0-1) to 0-100 working space
+    working_score = v34_score_01 * 100.0
+
+    # ── [v3.9 MODULE 1] SESSION ALPHA BONUS ───────────────────────────────────
+    # Asia session transition (02:00 WIB = 19:00 UTC) is the peak pump window.
+    # Validated: most altcoin ignitions happen UTC 19-21.
+    _utc_hour = datetime.now(timezone.utc).hour
+    session_bonus = session_alpha_bonus(_utc_hour)
+    working_score += session_bonus
+
+    # ── [v3.9 MODULE 6] LIQUIDITY VACUUM PROXY ────────────────────────────────
+    # Simulates thin ask-side liquidity: range compression + vol decline + micro-expansion
+    vacuum_score_v39, vacuum_det_v39 = liquidity_vacuum_proxy(c1h)
+    vacuum_contrib_v39 = vacuum_score_v39 * 18.0   # max +18 pts (thin liquidity = easy breakout)
+    working_score += vacuum_contrib_v39
+
+    # Step 2: pressure overlay
+    pressure_contribution = pressure_score * 35.0
     working_score += pressure_contribution
 
-    # Step 3: Apply meaningful additive bonuses (all scaled to 0-100 space)
+    # Step 3: Standard additive bonuses
     working_score += stealth_score_bonus        # 0, 5, 10-15
     working_score += liq_bonus                  # 0 or +8
-    working_score += cont_score * 0.5           # 0-15 → 0-7.5 (partial weight, already in v34)
+    working_score += cont_score * 0.5           # 0-7.5
     working_score += rsi_bonus                  # 0 or +1
-    working_score += vol_rank_score             # [NEW v3.7] 0-20 pts coiled volatility bonus
+    working_score += vol_rank_score             # 0-20 pts
 
-    # [NEW v3.8] CQI bonus — tighter coil relative to length = higher pump potential
-    # Validated from data: GUSDT (CQI=0.009) and ZETA (CQI=0.012) pumped hardest
+    # ── [v3.9 MODULE 5] UPGRADED CQI — compute and wire ───────────────────────
+    # CQI threshold validated from 8 pump coins: CQI 0.009-0.026
+    # Tight coil = more stored energy = sharper pump
     cqi_bonus = 0
     cqi = 0.0
     if compression:
         cqi = compression["range_pct"] / max(compression["length"] ** 0.5, 1)
         if cqi < 0.010:
-            cqi_bonus = 12   # ultra-tight coil (GUSDT/ZETA level)
+            cqi_bonus = 15   # ultra-tight (GUSDT/ZETA level) — raised from 12
         elif cqi < 0.015:
-            cqi_bonus = 8    # tight coil
-        elif cqi < 0.020:
-            cqi_bonus = 4    # moderate coil
+            cqi_bonus = 10   # tight coil — raised from 8
+        elif cqi < 0.022:
+            cqi_bonus = 5    # moderate coil — raised from 4, threshold from 0.020
         elif cqi > 0.040:
-            cqi_bonus = -8   # loose "compression" — likely not a real base
+            cqi_bonus = -10  # loose — raised penalty from -8
         working_score += cqi_bonus
+
+        # ── [v3.9 MODULE 2] IGNITION TRIGGER (needs real cqi) ─────────────────
+        # Re-run ignition with real cqi now that compression is confirmed
+        ignition_fired, ignition_score_v, ignition_reason = detect_ignition(
+            pressure_score     = pressure_score,
+            flow_score         = flow_score_v34,
+            cqi                = cqi,
+            compression_length = compression["length"],
+        )
+        if ignition_fired:
+            working_score += 15   # full ignition: all 4 conditions aligned
+            log.info(f"  {symbol} [v3.9] 🔥 IGNITION FIRED: {ignition_reason}")
+        elif ignition_score_v >= 0.5:
+            working_score += round(ignition_score_v * 10)  # partial credit 5-9 pts
+    else:
+        # No compression → no ignition possible
+        ignition_fired = False
+        ignition_score_v = 0.0
+
+    # ── [v3.9 MODULE 3] FLOW SIGNAL NON-LINEAR AMPLIFICATION ──────────────────
+    # flow_score in linear average loses impact. Non-linear gate restores signal strength.
+    # flow_score > 0.7: OI buildup + CVD absorption + squeeze all aligned = major signal
+    # flow_score < 0.15: flow negative/absent = mild suppression
+    if flow_score_v34 > 0.7:
+        working_score += 15   # strong directional flow — market maker accumulating
+    elif flow_score_v34 > 0.5:
+        working_score += 8    # moderate flow — meaningful
+    elif flow_score_v34 > 0.3:
+        working_score += 4    # weak but present
+    elif flow_score_v34 < 0.15:
+        working_score -= 5    # flow absent/negative — caution
 
     if phase == "early":
         working_score += phase_bonus            # +10
@@ -3117,11 +3341,17 @@ def master_score(symbol, ticker):
     if funding < -0.001:
         working_score -= 5                      # additional funding penalty
 
-    # Step 5: [NEW v3.7] Apply volume trend multiplier AFTER all additive adjustments.
-    # This is a multiplicative gate: dead-volume coins are suppressed regardless
-    # of how good their compression looks. Multiplier 0.35-1.0.
-    # Only applied when it would suppress (< 1.0) to not artificially boost.
-    if vol_trend_mult < 1.0:
+    # ── [v3.9 MODULE 4] vol_trend_mult — FIX STEALTH SUPPRESSION ─────────────
+    # BUG FIXED: previously vol_trend_mult suppressed stealth accumulation coins.
+    # Low volume DURING stealth is the signal, not a failure.
+    # Rule: only apply suppression if stealth NOT detected AND phase NOT early.
+    stealth_detected_flag = stealth.get("detected", False)
+    _apply_vol_suppression = (
+        vol_trend_mult < 1.0
+        and not stealth_detected_flag   # stealth = intentional low vol, don't punish
+        and phase != "early"            # early phase by definition has low vol
+    )
+    if _apply_vol_suppression:
         working_score *= vol_trend_mult
 
     # Step 6: Single final clamp to 0-100
@@ -3221,6 +3451,11 @@ def master_score(symbol, ticker):
         f"[v3.8] CQI={cqi:.4f} bonus={cqi_bonus:+d} | "
         f"pump_started={'YES ⚠️' if pump_started else 'no'} ({pump_move_12h*100:.1f}% in 12h) | "
         f"price_24h_move={price_24h_move*100:.1f}% conf={confidence}",
+        f"[v3.9] session=+{session_bonus:.0f}pts(UTC{_utc_hour}h) | "
+        f"ignition={'🔥FIRED' if ignition_fired else f'score={ignition_score_v:.2f}'}({ignition_reason}) | "
+        f"vacuum={vacuum_score_v39:.3f}(+{vacuum_score_v39*18:.1f}pts) | "
+        f"flow_nl={'strong' if flow_score_v34>0.7 else 'mod' if flow_score_v34>0.3 else 'weak'}({flow_score_v34:.3f}) | "
+        f"stealth_vol_bypass={stealth_detected_flag}",
         f"RSI: +{rsi_bonus} (RSI={rsi:.0f})",
         f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
         f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
@@ -3437,6 +3672,13 @@ def master_score(symbol, ticker):
         "pump_started":        pump_started,
         "pump_move_12h":       round(pump_move_12h * 100, 1),
         "price_24h_move_pct":  round(price_24h_move * 100, 1),
+        # v3.9 new fields
+        "session_bonus":       session_bonus,
+        "ignition_fired":      ignition_fired,
+        "ignition_score":      round(ignition_score_v, 3),
+        "ignition_reason":     ignition_reason,
+        "vacuum_score_v39":    round(vacuum_score_v39, 4),
+        "vacuum_details_v39":  vacuum_det_v39,
         # Task 6 — required output structure
         "flags": {
             "compression":  compression_active,
