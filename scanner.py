@@ -723,13 +723,46 @@ def calc_entry_targets(candles, compression_zone):
 #  🔬  FORENSIC PATTERN DETECTORS
 # ══════════════════════════════════════════════════════════════════════════════
 def detect_higher_lows(candles, lookback=4):
-    if len(candles) < lookback:
+    """
+    v3.9 FIX: Original used 4 candles with 1.5% tolerance.
+    With ATR=1%, random walk creates 'higher lows' 75% of the time on ANY coin.
+    
+    Fixed requirements:
+    1. Use 8-candle lookback (not 4) — reduces noise sensitivity
+    2. Require net upward slope: last low > first low by >0.3% (trend, not noise)
+    3. Price POSITION check: higher lows are only bullish when price is at/below
+       the compression zone midpoint — NOT when price is already elevated (distribution)
+    """
+    # Use wider lookback for noise resistance
+    effective_lookback = max(lookback, 8)
+    if len(candles) < effective_lookback:
         return False
-    recent = candles[-lookback:]
+
+    recent = candles[-effective_lookback:]
     lows   = [c["low"] for c in recent]
+
+    # Requirement 1: No lower low (original check, now over 8 candles)
     for i in range(1, len(lows)):
         if lows[i] < lows[i-1] * 0.985:
             return False
+
+    # Requirement 2: Net upward trend in lows (not just flat/noise)
+    if lows[0] > 0:
+        net_slope = (lows[-1] - lows[0]) / lows[0]
+        if net_slope < 0.003:   # must rise at least 0.3% over the window
+            return False
+
+    # Requirement 3: Price position — higher lows are bullish ONLY near lows.
+    # If current price is >15% above the 8-candle low range, it's distribution.
+    low_range_floor = min(lows)
+    cur_price = candles[-1]["close"]
+    if low_range_floor > 0:
+        price_above_range = (cur_price - low_range_floor) / low_range_floor
+        if price_above_range > 0.15:
+            # Price too far above the lows — higher lows are from OLD compression,
+            # current price is at distribution level
+            return False
+
     return True
 
 def detect_price_acceleration(candles, lookback=6):
@@ -1166,6 +1199,40 @@ def score_volume_intelligence(candles):
     # RVOL < 1.0 = no bonus, no penalty (could be accumulation before RVOL rises)
 
     vol_score = min(vol_score + rvol_score, 30)   # v3.2: ceiling raised 25→30
+
+    # ── v3.9 FIX: PRICE POSITION CONTEXT ─────────────────────────────────────
+    # Low volume means different things at different price levels:
+    #   Low vol at LOWS  = accumulation (smart money quietly buying) → BULLISH
+    #   Low vol at HIGHS = distribution exhaustion (supply absorbed, less selling)
+    #                      OR dead top (no buyers left) → BEARISH/NEUTRAL
+    #
+    # Check: is current price near the 100-candle HIGH or LOW?
+    # If near high → discount low-vol score heavily
+    if len(candles) >= 50:
+        highs100 = [c["high"] for c in candles[-100:]] if len(candles) >= 100 else [c["high"] for c in candles]
+        lows100  = [c["low"]  for c in candles[-100:]] if len(candles) >= 100 else [c["low"]  for c in candles]
+        h100 = max(highs100)
+        l100 = min(lows100)
+        price_range = h100 - l100
+        cur_close = candles[-1]["close"]
+
+        if price_range > 0:
+            # Position within 100-candle range: 0.0 = at low, 1.0 = at high
+            price_position = (cur_close - l100) / price_range
+
+            if price_position > 0.80 and vol_ratio < 0.8:
+                # Price at top 20% of range + declining vol = distribution exhaustion
+                # NOT accumulation. Reduce score significantly.
+                vol_score = max(0, vol_score - 12)
+                vol_label += f" [TOP_DIST_zone:{price_position:.2f}]"
+            elif price_position > 0.65 and vol_ratio < 0.5:
+                # Price in upper third + low vol = likely post-pump
+                vol_score = max(0, vol_score - 6)
+                vol_label += f" [upper_zone:{price_position:.2f}]"
+            elif price_position < 0.30 and vol_ratio < 0.7:
+                # Price near lows + low vol = genuine accumulation zone → boost
+                vol_score = min(30, vol_score + 3)
+                vol_label += f" [accum_zone:{price_position:.2f}]"
 
     return vol_score, {
         "vol_ratio":        round(vol_ratio, 3),
@@ -2485,8 +2552,6 @@ def compose_v34_score(
         phase_v34 = "mid"
 
     # ── Section 8: Final score composition (spec-exact, no blending) ──────────
-    # final_score = base_score + synergy_bonus + absorption*0.25
-    #             + flow*0.25 + anomaly_score + vacuum*0.15
     pre_late_score = (
         base_score
         + synergy_bonus
@@ -2498,6 +2563,31 @@ def compose_v34_score(
     )
 
     score = pre_late_score * late_scale * liquidity_norm
+
+    # ── v3.9 FIX: Price position scale — prevents v34=1.0 on distribution coins ──
+    # If price is at the top of its 100-candle range, all the compression/absorption
+    # signals are from OLD accumulation, not current. Scale down proportionally.
+    # This fixes the core bug: v34 amplifies old signals equally for pre-pump AND
+    # post-pump/distribution coins.
+    if n >= 50:
+        price_highs = [c["high"] for c in candles[-min(n, 100):]]
+        price_lows  = [c["low"]  for c in candles[-min(n, 100):]]
+        h100 = max(price_highs)
+        l100 = min(price_lows)
+        rng100 = h100 - l100
+        cur_price = candles[-1]["close"]
+        if rng100 > 0:
+            price_pos = (cur_price - l100) / rng100   # 0=at lows, 1=at highs
+            # Scale: at lows (pos<0.25) = full score. At highs (pos>0.85) = 40% score.
+            # Linear interpolation between 0.25→1.0 and 0.85→0.40
+            if price_pos > 0.85:
+                price_pos_scale = 0.40
+            elif price_pos > 0.25:
+                # Linearly interpolate: 0.25→1.0, 0.85→0.40
+                price_pos_scale = 1.0 - (price_pos - 0.25) / (0.85 - 0.25) * 0.60
+            else:
+                price_pos_scale = 1.0   # at lows — full score
+            score = score * price_pos_scale
 
     # Amplification (Section 9 preserved)
     score = score ** 1.25
