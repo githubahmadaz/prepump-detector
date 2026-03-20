@@ -1015,6 +1015,30 @@ def detect_stealth_accumulation(candles):
     detected  = stealth_score >= threshold
     status    = "STEALTH_ACCUMULATION_DETECTED" if detected else "NONE"
 
+    # BUG FIX v3.9: Stealth fires on distribution coins (flat price + stable high vol
+    # = high score_vol_suppress + score_price_compress). Add distribution context check:
+    # Stealth is NOT valid when volume is ELEVATED (>2x historical baseline).
+    # Real stealth accumulation has LOW/DECLINING volume, not steady high volume.
+    if detected:
+        # Check: is the current vol level elevated vs 60-candle baseline?
+        baseline_window = confirmed[-60:] if len(confirmed) >= 60 else confirmed
+        baseline_vols = [c.get("volume_usd", c.get("volume", 0)) for c in baseline_window[:-len(window)]] if len(baseline_window) > len(window) else []
+        if baseline_vols:
+            baseline_avg = _mean(baseline_vols)
+            current_avg  = avg_vol_window
+            vol_elevation = current_avg / baseline_avg if baseline_avg > 0 else 1.0
+            if vol_elevation > 2.0:
+                # Volume is elevated 2x+ — this is NOT stealth, it's active trading
+                detected = False
+                status   = f"STEALTH_INVALIDATED(vol_elevation={vol_elevation:.1f}x)"
+                stealth_score = max(0.0, stealth_score - 25.0)
+            elif vol_elevation > 1.5:
+                # Elevated but not extreme — reduce score, don't fully invalidate
+                stealth_score = max(0.0, stealth_score - 10.0)
+                detected = stealth_score >= threshold
+                if not detected:
+                    status = "NONE"
+
     # Entry trigger
     breakout_vol_mult = cfg.get("stealth_breakout_vol_mult", 1.5) if hasattr(cfg, "get") else 1.5
     breakout_vol_mult = 1.5
@@ -1508,10 +1532,35 @@ def calc_distribution_penalty(candles):
 
     penalty += min(track_b, 15)   # cap track B contribution
 
+    # ── TRACK C: Stable elevated volume distribution (BUG FIX v3.9) ───────────
+    # Track A only fires on vol SPIKES (>3x median). But real distribution often
+    # has STEADILY HIGH volume without individual spikes — smart money distributing
+    # over many candles. This was the core gap causing false pre-pump signals.
+    track_c = 0
+    if not is_breakout_up:
+        # Compare current 10-candle avg vol vs baseline 30-candle avg
+        baseline_vol = _mean([c["volume_usd"] for c in candles[-30:-10]]) if len(candles) >= 30 else avg_vol
+        elevated_vol_ratio = avg_vol / baseline_vol if baseline_vol > 0 else 1.0
+
+        if elevated_vol_ratio >= 2.0 and overall_move <= 0.01:
+            # Vol is 2x+ elevated but price going nowhere or down = distribution
+            # Scale: 2x=8pts, 3x=14pts, 4x+=20pts (capped at 20)
+            track_c = min(20, int((elevated_vol_ratio - 1.0) * 8))
+            flags.append(f"stable_elevated_vol({elevated_vol_ratio:.1f}x_no_progress)")
+        elif elevated_vol_ratio >= 1.5 and overall_move < -0.02:
+            # Elevated vol + price declining = clear distribution
+            track_c = 10
+            flags.append(f"elevated_vol_price_down({elevated_vol_ratio:.1f}x)")
+
+    penalty += min(track_c, 20)   # cap track C at 20
+
     cap = CONFIG.get("dist_penalty_cap", 25)   # v3.2: raised cap 20→25
+    # v3.9: raise total cap to 35 — stable distribution must be properly penalized
+    cap = 35
     penalty = min(penalty, cap)
     return penalty, {"penalty": penalty, "flags": flags,
-                     "high_vol_no_prog": high_vol_no_prog, "upper_wick_count": upper_wick_count}
+                     "high_vol_no_prog": high_vol_no_prog, "upper_wick_count": upper_wick_count,
+                     "track_c": track_c}
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  🐢  SLOW TREND PENALTY
@@ -1845,22 +1894,21 @@ def compute_tension_engine(candles, compression, comp_tension_details):
         atr_val = candles[-1]["close"] * 0.02
 
     # Count failed breakdowns (spec: break < 1 ATR below support, recover ≤ 3 candles)
+    # BUG FIX v3.9: ONLY count failed breaks BELOW support (buyers defending lows).
+    # Previously also counted failed breaks ABOVE resistance — that is SELLING pressure
+    # (distribution), not absorption. Removing it stops false inflation of fbd_count.
     lookback20 = candles[-20:] if len(candles) >= 20 else candles
     fbd_count  = 0
     for i in range(len(lookback20) - 1):
         c = lookback20[i]
-        # Break below support
+        # Break below support → buyer absorbs sell pressure → recovery = bullish
         if c["low"] < comp_low and (comp_low - c["low"]) < atr_val:
             for j in range(i + 1, min(i + 4, len(lookback20))):
                 if lookback20[j]["close"] > comp_low:
                     fbd_count += 1
                     break
-        # Break above resistance
-        if c["high"] > comp_high and (c["high"] - comp_high) < atr_val:
-            for j in range(i + 1, min(i + 4, len(lookback20))):
-                if lookback20[j]["close"] < comp_high:
-                    fbd_count += 1
-                    break
+        # REMOVED: "Break above resistance" was counting DISTRIBUTION as absorption
+        # A high that pierces resistance and gets sold back = supply overhead, not demand
 
     # Normalise against possible maximum (up to 5 events in 20 candles)
     breakout_suppression_norm = min(1.0, fbd_count / 4.0)
@@ -3059,6 +3107,39 @@ def master_score(symbol, ticker):
     # ── Cari compression zone ─────────────────────────────────────────────────
     compression = find_compression_zone(c1h)
 
+    # ── [v3.9] POST-PUMP ZONE INVALIDATION ────────────────────────────────────
+    # Critical bug fix: scanner finds OLD compression zones and scores them as
+    # pre-pump signals even when the coin already pumped above the zone.
+    # Two checks:
+    #   [A] Price > comp_high * 1.10 = coin already broke out (>10% above range)
+    #   [B] Zone age > zone length = breakout happened before current scan window
+    # Both indicate a STALE zone — should not score as pre-pump setup.
+    stale_zone_penalty = 0
+    if compression:
+        comp_high = compression["high"]
+        comp_low  = compression["low"]
+        age       = compression["age_candles"]
+        length    = compression["length"]
+
+        rise_above_zone = (price_now - comp_high) / comp_high if comp_high > 0 else 0.0
+        age_ratio       = age / length if length > 0 else 0.0
+
+        if rise_above_zone > 0.15:
+            # Price is >15% above the compression zone top = ALREADY PUMPED
+            # Nullify the compression — it's a post-pump distribution zone now
+            stale_zone_penalty = 35
+            log.info(f"  {symbol}: stale_zone_penalty=-35 (price {rise_above_zone*100:.0f}% above comp_high)")
+            # Invalidate compression so downstream modules don't use it
+            compression = None
+        elif rise_above_zone > 0.08:
+            # 8-15% above = borderline — penalize but keep zone
+            stale_zone_penalty = 20
+            log.info(f"  {symbol}: stale_zone_penalty=-20 (price {rise_above_zone*100:.0f}% above comp_high)")
+        elif age_ratio > 1.5:
+            # Zone age >> length = breakout happened long ago, zone is expired
+            stale_zone_penalty = 15
+            log.info(f"  {symbol}: stale_zone_penalty=-15 (stale zone: age={age}h length={length}h ratio={age_ratio:.1f}x)")
+
     # ── [A] COMPRESSION + TENSION SCORE (HIGH PRIORITY, max 35) ──────────────
     comp_tension_score, comp_tension_details = score_compression_tension(c1h, compression)
 
@@ -3252,9 +3333,16 @@ def master_score(symbol, ticker):
 
     # ── [v3.9 MODULE 1] SESSION ALPHA BONUS ───────────────────────────────────
     # Asia session transition (02:00 WIB = 19:00 UTC) is the peak pump window.
-    # Validated: most altcoin ignitions happen UTC 19-21.
+    # BUG FIX v3.9: Only apply if price has NOT already moved (not post-pump coin).
     _utc_hour = datetime.now(timezone.utc).hour
-    session_bonus = session_alpha_bonus(_utc_hour)
+    _raw_session_bonus = session_alpha_bonus(_utc_hour)
+    # Gate: only apply session bonus if price is flat (<8% in 24h)
+    # This prevents post-pump distribution coins from getting the time bonus
+    _price_24h_check = 0.0
+    if len(c1h) >= 24:
+        _p24 = c1h[-24]["close"]
+        _price_24h_check = abs(c1h[-1]["close"] - _p24) / _p24 if _p24 > 0 else 0.0
+    session_bonus = _raw_session_bonus if _price_24h_check < 0.08 else 0.0
     working_score += session_bonus
 
     # ── [v3.9 MODULE 6] LIQUIDITY VACUUM PROXY ────────────────────────────────
@@ -3329,7 +3417,7 @@ def master_score(symbol, ticker):
 
     # Step 4: Apply ALL penalties (all were previously dead — now active)
     # Distribution penalty is most critical — MUST suppress pump false positives
-    working_score -= dist_penalty               # 0 to -25 (was completely dead before)
+    working_score -= dist_penalty               # 0 to -35 (Track A+B+C)
     working_score -= slow_penalty               # 0 to -10
     working_score -= late_penalty               # 0 to -15
     working_score -= abs(enh_late_pen)          # 0 to -10
@@ -3338,6 +3426,7 @@ def master_score(symbol, ticker):
     working_score -= funding_gate_penalty       # 0 or -15
     working_score -= liquidity_penalty          # 0, -20, or -30
     working_score -= already_pumped_penalty     # 0 or -25
+    working_score -= stale_zone_penalty         # [NEW v3.9] 0, -15, -20, or -35
     if funding < -0.001:
         working_score -= 5                      # additional funding penalty
 
@@ -3455,7 +3544,8 @@ def master_score(symbol, ticker):
         f"ignition={'🔥FIRED' if ignition_fired else f'score={ignition_score_v:.2f}'}({ignition_reason}) | "
         f"vacuum={vacuum_score_v39:.3f}(+{vacuum_score_v39*18:.1f}pts) | "
         f"flow_nl={'strong' if flow_score_v34>0.7 else 'mod' if flow_score_v34>0.3 else 'weak'}({flow_score_v34:.3f}) | "
-        f"stealth_vol_bypass={stealth_detected_flag}",
+        f"stealth_vol_bypass={stealth_detected_flag} | "
+        f"stale_zone_pen=-{stale_zone_penalty}",
         f"RSI: +{rsi_bonus} (RSI={rsi:.0f})",
         f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
         f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
@@ -3666,6 +3756,7 @@ def master_score(symbol, ticker):
         "vol_trend_details":   vol_trend_details,
         "vol_rank_score":      vol_rank_score,
         "vol_rank_details":    vol_rank_details,
+        "stale_zone_penalty":  stale_zone_penalty,
         # v3.8 new fields
         "cqi":                 round(cqi, 5),
         "cqi_bonus":           cqi_bonus,
