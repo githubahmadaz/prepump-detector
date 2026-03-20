@@ -3062,6 +3062,13 @@ def master_score(symbol, ticker):
     # Step 1: convert v34 score (0-1) to 0-100 working space
     working_score = v34_score_01 * 100.0
 
+    # ── Safe defaults for v3.8 fields (set before any early returns) ──────────
+    cqi          = 0.0
+    cqi_bonus    = 0
+    pump_started     = False
+    pump_move_12h    = 0.0
+    price_24h_move   = 0.0
+
     # Step 2: pressure overlay — add BEFORE converting, using raw headroom
     # AUDIT FIX: previously double-clamped which killed pressure for strong coins.
     # Now we work in 0-100 space and apply ONE clamp at the very end.
