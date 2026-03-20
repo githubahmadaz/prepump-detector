@@ -1396,6 +1396,19 @@ def calc_distribution_penalty(candles):
     uw_thresh   = CONFIG["dist_upper_wick_ratio"]    # 0.65
     prog_thresh = CONFIG["dist_high_vol_no_prog_pct"] # 0.010
 
+    # ── MINIMUM LIQUIDITY GATE ────────────────────────────────────────────────
+    # v3.7 FIX: Distribution signal is meaningless on ultra-illiquid coins.
+    # If median vol < $10K/candle, signals are statistical noise not real distribution.
+    MIN_DIST_VOL_USD = 10_000   # $10K minimum median candle volume for dist to fire
+    if vol_median < MIN_DIST_VOL_USD:
+        return 0, {"reason": f"illiquid_vol_median=${vol_median:.0f} < ${MIN_DIST_VOL_USD}"}
+
+    # ── CONTEXT CHECK: tight price range = accumulation zone, not distribution ──
+    # If overall price hasn't moved much in the window, "high vol no progress" 
+    # candles are likely accumulation noise, not smart money distribution.
+    price_range_pct = abs(max(c["high"] for c in recent) - min(c["low"] for c in recent)) / min(c["low"] for c in recent) if min(c["low"] for c in recent) > 0 else 1.0
+    is_tight_range = price_range_pct < 0.08   # less than 8% range = compression zone
+
     penalty = 0
     flags   = []
 
@@ -1422,19 +1435,23 @@ def calc_distribution_penalty(candles):
                 high_vol_red += 1
 
     # v3.7 FIX: Skip Track A if price clearly broke out upward (pump, not distribution)
+    # Also: reduce Track A significantly in tight range zones (could be accumulation)
     if not is_breakout_up:
         if high_vol_no_prog >= 3:
-            penalty += 25
+            base_pen = 25 if not is_tight_range else 10
+            penalty += base_pen
             flags.append(f"hvnp:{high_vol_no_prog}x (severe)")
         elif high_vol_no_prog >= 2:
-            penalty += 18
+            base_pen = 18 if not is_tight_range else 6
+            penalty += base_pen
             flags.append(f"hvnp:{high_vol_no_prog}x")
         elif high_vol_no_prog >= 1:
-            penalty += 8
+            base_pen = 8 if not is_tight_range else 2
+            penalty += base_pen
             flags.append(f"hvnp:1x")
 
-        # High volume + red candles compound the penalty
-        if high_vol_red >= 2 and high_vol_no_prog >= 1:
+        # High volume + red candles compound the penalty (only outside tight range)
+        if high_vol_red >= 2 and high_vol_no_prog >= 1 and not is_tight_range:
             penalty += 7
             flags.append(f"hvred:{high_vol_red}x")
     else:
@@ -2722,7 +2739,14 @@ def compute_volatility_rank_score(candles):
     n = len(candles)
 
     if n < win_l + win_s + 5:
-        return 5, {"reason": "insufficient data"}
+        # v3.7 FIX: Don't return blind 5 — compute range CV from available candles.
+        # Dead micro-caps have near-zero range CV even with few candles.
+        if n >= 10:
+            ranges = [c["high"] - c["low"] for c in candles if c["low"] > 0]
+            quick_cv = _std(ranges) / _mean(ranges) if _mean(ranges) > 0 else 0
+            if quick_cv < 0.05:
+                return 0, {"reason": "insufficient_data+dead_range", "atr_cv": quick_cv}
+        return 3, {"reason": "insufficient data"}
 
     atr_short = calc_atr(candles[-(win_s + 5):], win_s)
     atr_long  = calc_atr(candles[-(win_l + 5):], win_l)
@@ -2739,7 +2763,12 @@ def compute_volatility_rank_score(candles):
             atr_history.append(a)
 
     if len(atr_history) < 5:
-        return 5, {"reason": "insufficient atr history"}
+        # v3.7 FIX: use available atr_history or range cv to detect dead coin
+        if len(atr_history) >= 2:
+            quick_cv = _std(atr_history) / _mean(atr_history) if _mean(atr_history) > 0 else 0
+            if quick_cv < 0.05:
+                return 0, {"reason": "short_history+dead_atr", "atr_cv": quick_cv}
+        return 3, {"reason": "insufficient atr history"}
 
     # What percentile is the current ATR in historical distribution?
     atr_p10  = _percentile(atr_history, 10)
@@ -3045,6 +3074,23 @@ def master_score(symbol, ticker):
     working_score += cont_score * 0.5           # 0-15 → 0-7.5 (partial weight, already in v34)
     working_score += rsi_bonus                  # 0 or +1
     working_score += vol_rank_score             # [NEW v3.7] 0-20 pts coiled volatility bonus
+
+    # [NEW v3.8] CQI bonus — tighter coil relative to length = higher pump potential
+    # Validated from data: GUSDT (CQI=0.009) and ZETA (CQI=0.012) pumped hardest
+    cqi_bonus = 0
+    cqi = 0.0
+    if compression:
+        cqi = compression["range_pct"] / max(compression["length"] ** 0.5, 1)
+        if cqi < 0.010:
+            cqi_bonus = 12   # ultra-tight coil (GUSDT/ZETA level)
+        elif cqi < 0.015:
+            cqi_bonus = 8    # tight coil
+        elif cqi < 0.020:
+            cqi_bonus = 4    # moderate coil
+        elif cqi > 0.040:
+            cqi_bonus = -8   # loose "compression" — likely not a real base
+        working_score += cqi_bonus
+
     if phase == "early":
         working_score += phase_bonus            # +10
     elif phase == "late":
@@ -3103,14 +3149,28 @@ def master_score(symbol, ticker):
     score_01 = score / 100.0
 
     # ── Confidence band ───────────────────────────────────────────────────────
+    # v3.8 FIX: 'possibly_late' requires price to have ACTUALLY MOVED,
+    # not just score > 78. High score on flat-price coin = compression, not late entry.
+    # Validated from data: PEPE, ZETA, ARIA all labeled LATE incorrectly
+    # despite price being flat. Only label LATE if price moved >12% in 24h.
+    price_24h_move = 0.0
+    if len(c1h) >= 24:
+        p_now   = c1h[-1]["close"]
+        p_24h   = c1h[-24]["close"]
+        price_24h_move = abs(p_now - p_24h) / p_24h if p_24h > 0 else 0.0
+
     if score < CONFIG["score_min_output"]:
         confidence = "ignore"
     elif score < CONFIG["score_target_low"]:
         confidence = "early"
     elif score <= CONFIG["score_target_high"]:
         confidence = "strong"
-    else:
+    elif price_24h_move > 0.12:
+        # Price truly moved >12% in last 24h AND score > 78 → genuinely late
         confidence = "possibly_late"
+    else:
+        # Score > 78 but price flat → all signals maxed on compressed coin = STRONG, not late
+        confidence = "strong"
 
     # ── PRIORITY SCORE (Task 2) — separate field for final ranking ────────────
     distribution_flag = dist_penalty >= 8   # meaningful distribution detected
@@ -3151,6 +3211,9 @@ def master_score(symbol, ticker):
         f"[v3.7] vol_trend_mult={vol_trend_mult:.3f} ({vol_trend_details.get('vol_trend','?')}) "
         f"vol_rank={vol_rank_score} (exp_pot={vol_rank_details.get('expansion_potential',0):.2f}x "
         f"atr_cv={vol_rank_details.get('atr_cv',0):.4f})",
+        f"[v3.8] CQI={cqi:.4f} bonus={cqi_bonus:+d} | "
+        f"pump_started={'YES ⚠️' if pump_started else 'no'} ({pump_move_12h*100:.1f}% in 12h) | "
+        f"price_24h_move={price_24h_move*100:.1f}% conf={confidence}",
         f"RSI: +{rsi_bonus} (RSI={rsi:.0f})",
         f"LiqSweep: +{liq_bonus}" if liq_bonus else "",
         f"DistPenalty: -{dist_penalty} ({', '.join(dist_details.get('flags',[])[:3])})" if dist_penalty else "",
@@ -3271,7 +3334,21 @@ def master_score(symbol, ticker):
     # ── Urgency label ──────────────────────────────────────────────────────────
     vol_ratio = vol_details.get("vol_ratio", 1.0)
     comp_len  = compression["length"] if compression else 0
-    if phase == "early" and comp_len >= 72:
+
+    # v3.8: Detect if pump has already started (price moved >15% in last 12h)
+    # Validated from GUSDT data: score correctly collapses when pump is active
+    # This flag helps users understand WHY score is low despite showing compression
+    pump_started = False
+    pump_move_12h = 0.0
+    if len(c1h) >= 12:
+        p_12h = c1h[-12]["close"]
+        if p_12h > 0:
+            pump_move_12h = (price_now - p_12h) / p_12h
+            pump_started = pump_move_12h > 0.15   # >15% in 12h = pump active
+
+    if pump_started:
+        urgency = f"🚀 PUMP AKTIF — harga sudah naik {pump_move_12h*100:.0f}% dalam 12 jam — high risk entry"
+    elif phase == "early" and comp_len >= 72:
         urgency = "🔵 EARLY PHASE — akumulasi aktif sebelum breakout"
     elif vol_ratio >= 4.0 and comp_len >= 168:
         urgency = "🔴 SANGAT TINGGI — mega spike + coil panjang, pump bisa dalam 1-3 jam"
@@ -3347,6 +3424,12 @@ def master_score(symbol, ticker):
         "vol_trend_details":   vol_trend_details,
         "vol_rank_score":      vol_rank_score,
         "vol_rank_details":    vol_rank_details,
+        # v3.8 new fields
+        "cqi":                 round(cqi, 5),
+        "cqi_bonus":           cqi_bonus,
+        "pump_started":        pump_started,
+        "pump_move_12h":       round(pump_move_12h * 100, 1),
+        "price_24h_move_pct":  round(price_24h_move * 100, 1),
         # Task 6 — required output structure
         "flags": {
             "compression":  compression_active,
