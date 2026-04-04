@@ -71,7 +71,7 @@ CONFIG: Dict = {
     "chat_id":   os.getenv("CHAT_ID"),
 
     # ── UNIVERSE ───────────────────────────────────────────────────────────
-    "min_vol_24h":        600_000,   # $3.6M/day = $150K/hour floor
+    "min_vol_24h":        00_000,   # $3.6M/day = $150K/hour floor
     "max_vol_24h":      800_000_000,   # $800M ceiling (too liquid = less move)
     "gate_chg_24h_max":        40.0,   # skip coin yang sudah pump >40%
 
