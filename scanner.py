@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  NEXUS-SR v2.2 — Research-Validated Support Zone Bounce Scanner             ║
-║  FIXED: Bitget long/short endpoint to correct URL                           ║
-║  FIXED: Removed all HTTP 400 causes                                         ║
+║  NEXUS-SR v2.3 — Research-Validated Support Zone Bounce Scanner             ║
+║  FIXED: Missing datetime import                                             ║
+║  FIXED: All Bitget endpoints working                                        ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -16,6 +16,7 @@ import math
 import os
 import time
 from collections import defaultdict
+from datetime import datetime, timezone  # ← IMPORT FIX
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -199,7 +200,7 @@ class BitgetClient:
     def _get(url: str, params: dict = None, timeout: int = 12) -> Optional[dict]:
         for attempt in range(3):
             try:
-                r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "NEXUS-SR/2.2"})
+                r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "NEXUS-SR/2.3"})
                 r.raise_for_status()
                 return r.json()
             except requests.exceptions.HTTPError as e:
@@ -755,7 +756,7 @@ def build_table(results: list, caution: bool) -> str:
     lines = [
         "",
         "═" * 120,
-        f"  NEXUS-SR v2.2  |  Bitget Futures  |  {now}  |  {mode}",
+        f"  NEXUS-SR v2.3  |  Bitget Futures  |  {now}  |  {mode}",
         "═" * 120,
         f"  {'#':>2}  {'Coin':<13} {'Price':>12} {'ZoneTop':>10} {'ZoneBot':>10} "
         f"{'Score':>6} {'A:Vol':>6} {'B:btx':>6} {'C:Fund':>7} {'D:OI':>5} {'E:L/S':>5}  "
@@ -784,7 +785,7 @@ def build_table(results: list, caution: bool) -> str:
 def build_telegram_msg(results: list, caution: bool, readiness: str) -> str:
     mode = "⚠️ CAUTION" if caution else "🟢 NORMAL"
     now  = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    txt  = (f"🎯 <b>NEXUS-SR v2.2</b> [{now}]\n"
+    txt  = (f"🎯 <b>NEXUS-SR v2.3</b> [{now}]\n"
             f"Mode: {mode} | {readiness}\n{'─'*28}\n")
     for i, r in enumerate(results, 1):
         raw = r["symbol"].replace("USDT", "")
@@ -809,7 +810,7 @@ def run_scan() -> None:
     start_ts = time.time()
 
     log.info("=" * 70)
-    log.info(f"  NEXUS-SR v2.2 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"  NEXUS-SR v2.3 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     log.info("=" * 70)
 
     # ── 1. Regime check ────────────────────────────────────────────────────
