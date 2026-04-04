@@ -946,6 +946,9 @@ def build_approaching_table(approaching: list) -> str:
         )
     lines.append("  " + "─" * 80)
     return "\n".join(lines)
+
+
+def build_terminal_table(results: list, caution: bool) -> str:
     """Tabel terminal untuk top-N sinyal."""
     mode_str = "⚠️  CAUTION (threshold=80)" if caution else "✅ NORMAL (threshold=65)"
     now_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
