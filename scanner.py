@@ -85,9 +85,10 @@ CONFIG: Dict = {
     },
 
     # API limits
-    "candle_limit_bitget": 200,
-    "coinalyze_lookback_h": 168,
+    "candle_limit_bitget": 100,      # Reduced from 200 to 100 (faster)
+    "coinalyze_lookback_h": 72,      # Reduced from 168 to 72 hours (3 days)
     "coinalyze_interval": "1hour",
+    "coinalyze_max_symbols": 100,    # NEW: Hard limit on symbols
 
     # Baseline scoring
     "baseline_recent_exclude": 3,
@@ -124,11 +125,11 @@ CONFIG: Dict = {
     "sector_momentum": 20,           # Sector up 15%+
     "multiwave_history": 30,         # Previous pumps
 
-    # Alert thresholds (adaptive by phase)
-    "alert_threshold_early": 70,      # Early phase (clean setup)
-    "alert_threshold_momentum": 90,   # Momentum phase (need confirmation)
-    "alert_threshold_parabolic": 110, # Parabolic (very strict)
-    "alert_threshold_reversal": 80,   # Reversal (moderate)
+    # Alert thresholds (adaptive by phase) - STRICTER!
+    "alert_threshold_early": 100,     # Raised from 70 to 100 (more selective!)
+    "alert_threshold_momentum": 110,  # Raised from 90
+    "alert_threshold_parabolic": 130, # Raised from 110
+    "alert_threshold_reversal": 90,   # Raised from 80
 
     # Score display
     "score_display_max": 150,  # NEW: Real scale (not capped at 100)
@@ -143,6 +144,10 @@ CONFIG: Dict = {
     "atr_candles": 14,
     "atr_sl_mult": 1.5,
     "min_target_pct": 10.0,
+    "account_balance": 10000.0,
+    "risk_per_trade_pct": 1.0,
+    "max_position_pct": 5.0,
+    "max_leverage": 10,
 }
 
 
@@ -327,6 +332,97 @@ def score_from_z(z: float, strong_thresh: float, medium_thresh: float, weight: i
     elif z >= medium_thresh:
         return int(weight * 0.6)
     return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🎯  ENTRY & RISK CALCULATION
+# ══════════════════════════════════════════════════════════════════════════════
+def calc_entry_targets(data: CoinData) -> Optional[dict]:
+    """Calculate entry, SL, TP based on ATR"""
+    candles = data.candles
+    n_atr = CONFIG["atr_candles"]
+    if len(candles) < n_atr + 2:
+        return None
+    
+    price_ref = candles[-2]["close"]
+    
+    # Calculate ATR
+    trs_pct = []
+    for i in range(1, min(n_atr + 1, len(candles))):
+        c = candles[-i]
+        pc = candles[-(i + 1)]["close"]
+        if pc > 0:
+            tr = max(
+                (c["high"] - c["low"]) / pc,
+                abs(c["high"] - pc) / pc,
+                abs(c["low"] - pc) / pc
+            )
+            trs_pct.append(tr)
+    
+    atr_pct = mean(trs_pct) if trs_pct else 0.02
+    
+    # Entry = current price
+    entry = data.price
+    
+    # SL multiplier based on ATR
+    mult = CONFIG["atr_sl_mult"]
+    if atr_pct > 0.04:
+        mult = 1.2
+    elif atr_pct < 0.015:
+        mult = 2.0
+    
+    # Stop Loss
+    sl = entry * (1 - atr_pct * mult)
+    
+    # Targets
+    t1 = max(entry * (1 + CONFIG["min_target_pct"] / 100), entry * (1 + atr_pct * 3))
+    t2 = max(entry * 1.20, entry * (1 + atr_pct * 6))
+    
+    return {
+        "entry": round(entry, 8),
+        "sl": round(sl, 8),
+        "sl_pct": round((entry - sl) / entry * 100, 1),
+        "t1": round(t1, 8),
+        "t2": round(t2, 8),
+        "t1_pct": round((t1 - entry) / entry * 100, 1),
+        "t2_pct": round((t2 - entry) / entry * 100, 1),
+        "rr": round((t1 - entry) / (entry - sl), 2) if (entry - sl) > 0 else 0.0,
+        "atr_pct": round(atr_pct * 100, 2),
+        "atr_decimal": atr_pct,
+    }
+
+
+def calculate_position_size(entry: float, stop_loss: float, atr_pct_decimal: float) -> Dict:
+    """Calculate position size and leverage"""
+    account_balance = CONFIG.get("account_balance", 10000.0)
+    risk_per_trade = CONFIG.get("risk_per_trade_pct", 1.0) / 100.0
+    max_position_pct = CONFIG.get("max_position_pct", 5.0) / 100.0
+    max_leverage = CONFIG.get("max_leverage", 10)
+    
+    # Risk per unit
+    risk_per_unit = (entry - stop_loss) / entry
+    if risk_per_unit <= 0:
+        risk_per_unit = atr_pct_decimal * CONFIG["atr_sl_mult"]
+    
+    risk_amount = account_balance * risk_per_trade
+    position_value_raw = risk_amount / risk_per_unit
+    max_position_value = account_balance * max_position_pct
+    position_value = min(position_value_raw, max_position_value)
+    
+    if position_value > account_balance:
+        leverage = min(position_value / account_balance, max_leverage)
+        position_value = account_balance * leverage
+    else:
+        leverage = 1.0
+    
+    position_size = position_value / entry
+    
+    return {
+        "position_size": round(position_size, 8),
+        "leverage": round(leverage, 2),
+        "risk_usd": round(risk_amount, 2),
+        "position_value": round(position_value, 2),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1133,8 +1229,14 @@ def score_coin_v12(data: CoinData) -> Optional[ScoreResult]:
         urg = f"⚪ WATCH — Score {total}/{cfg['score_display_max']}"
     
     # === ENTRY CALCULATION ===
-    entry_data = None
-    # TODO: Implement deep entry calculation
+    entry_data = calc_entry_targets(data)
+    position_info = None
+    if entry_data:
+        position_info = calculate_position_size(
+            entry=entry_data["entry"],
+            stop_loss=entry_data["sl"],
+            atr_pct_decimal=entry_data.get("atr_decimal", 0.02)
+        )
     
     # === CONFIDENCE ===
     if total >= 120:
@@ -1165,7 +1267,8 @@ def score_coin_v12(data: CoinData) -> Optional[ScoreResult]:
         funding=data.funding,
         urgency=urg,
         data_quality={"phase": phase.phase, "risk": phase.risk_level},
-        risk_warnings=risk_warnings
+        risk_warnings=risk_warnings,
+        position=position_info
     )
 
 
@@ -1226,8 +1329,19 @@ def build_alert_v12(r: ScoreResult, rank: int) -> str:
     # Entry (if available)
     if r.entry:
         e = r.entry
-        lines.append(f"   Entry: ${e['entry']:.8f} | SL: ${e['sl']:.8f} (-{e['sl_pct']:.1f}%)")
-        lines.append(f"   T1: +{e['t1_pct']:.1f}% | T2: +{e['t2_pct']:.1f}% | R/R: {e['rr']:.2f}")
+        lines.append(f"   💰 ENTRY:")
+        lines.append(f"      Price: ${e['entry']:.8f}")
+        lines.append(f"      SL: ${e['sl']:.8f} (-{e['sl_pct']:.1f}%)")
+        lines.append(f"      TP1: ${e['t1']:.8f} (+{e['t1_pct']:.1f}%)")
+        lines.append(f"      TP2: ${e['t2']:.8f} (+{e['t2_pct']:.1f}%)")
+        lines.append(f"      R/R: {e['rr']:.2f}x | ATR: {e['atr_pct']:.2f}%")
+        
+        # Position sizing
+        if r.position:
+            p = r.position
+            lines.append(f"      Size: {p['position_size']:.4f} | Leverage: {p['leverage']:.1f}x")
+            lines.append(f"      Value: ${p['position_value']:.0f} | Risk: ${p['risk_usd']:.0f}")
+        
         lines.append("")
     
     return "\n".join(lines)
@@ -1321,19 +1435,21 @@ class CoinalyzeClient:
         self._cache = {}
 
     def _wait(self) -> None:
-        wait = 0.5 - (time.time() - CoinalyzeClient._last_call)
+        wait = 0.3 - (time.time() - CoinalyzeClient._last_call)  # Reduced from 0.5 to 0.3
         if wait > 0:
             time.sleep(wait)
         CoinalyzeClient._last_call = time.time()
 
     def _get(self, endpoint: str, params: dict) -> Optional[list]:
         params["api_key"] = self.api_key
-        for attempt in range(3):
+        for attempt in range(2):  # Reduced from 3 to 2 attempts
             self._wait()
             try:
-                r = requests.get(f"{self.BASE}/{endpoint}", params=params, timeout=15)
+                r = requests.get(f"{self.BASE}/{endpoint}", params=params, timeout=10)  # Reduced from 15 to 10
                 if r.status_code == 429:
-                    time.sleep(int(r.headers.get("Retry-After", 10)) + 1)
+                    wait_time = int(r.headers.get("Retry-After", 5))
+                    log.warning(f"  Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time + 1)
                     continue
                 if r.status_code in (401, 400, 404):
                     return None
@@ -1343,9 +1459,14 @@ class CoinalyzeClient:
                 if isinstance(data, dict) and "error" in data:
                     return None
                 return data
-            except Exception:
-                if attempt < 2:
-                    time.sleep(3)
+            except requests.exceptions.Timeout:
+                log.warning(f"  Request timeout on {endpoint} (attempt {attempt + 1}/2)")
+                if attempt < 1:
+                    time.sleep(2)
+            except Exception as e:
+                log.warning(f"  Request failed: {e}")
+                if attempt < 1:
+                    time.sleep(2)
         return None
 
     def get_future_markets(self) -> List[dict]:
@@ -1357,17 +1478,30 @@ class CoinalyzeClient:
         return res
 
     def _batch_fetch(self, endpoint: str, symbols: List[str], extra_params: dict) -> Dict[str, list]:
-        batch_size = 20
+        batch_size = 10  # Reduced from 20 to 10
         res = {}
+        total_batches = (len(symbols) + batch_size - 1) // batch_size
+        
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
-            data = self._get(endpoint, {"symbols": ",".join(batch), **extra_params})
-            if data and isinstance(data, list):
-                for item in data:
-                    sym = item.get("symbol", "")
-                    hist = item.get("history", [])
-                    if sym and hist:
-                        res[sym] = hist
+            batch_num = i // batch_size + 1
+            
+            # Progress logging
+            if batch_num % 5 == 0 or batch_num == 1:
+                log.info(f"  Batch {batch_num}/{total_batches} ({endpoint})...")
+            
+            try:
+                data = self._get(endpoint, {"symbols": ",".join(batch), **extra_params})
+                if data and isinstance(data, list):
+                    for item in data:
+                        sym = item.get("symbol", "")
+                        hist = item.get("history", [])
+                        if sym and hist:
+                            res[sym] = hist
+            except Exception as e:
+                log.warning(f"  Batch {batch_num} failed: {e}")
+                continue
+        
         return res
 
     def fetch_buy_sell_batch(self, symbols: List[str], from_ts: int, to_ts: int) -> Dict[str, list]:
@@ -1512,16 +1646,50 @@ def main():
         
         # === STEP 4: Fetch Coinalyze data ===
         log.info("📈 Fetching Coinalyze data...")
+        
+        # LIMIT symbols to prevent timeout (top volume only)
+        if len(active) > 100:
+            log.warning(f"⚠️  Too many symbols ({len(active)}), limiting to top 100 by volume")
+            sorted_active = sorted(
+                active,
+                key=lambda s: float(tickers.get(s, {}).get("quoteVolume", 0)),
+                reverse=True
+            )
+            active = set(sorted_active[:100])
+        
         now_ts = int(time.time())
         from_ts = now_ts - CONFIG["coinalyze_lookback_h"] * 3600
         
         clz_syms = mapper.clz_symbols_for(list(active))
+        log.info(f"  Fetching for {len(clz_syms)} symbols...")
         
-        btx_data = clz_client.fetch_buy_sell_batch(clz_syms, from_ts, now_ts)
-        liq_data = clz_client.fetch_liquidations_batch(clz_syms, from_ts, now_ts)
-        oi_data = clz_client.fetch_oi_batch(clz_syms, from_ts, now_ts)
+        # Fetch with timeout protection
+        btx_data = {}
+        liq_data = {}
+        oi_data = {}
         
-        log.info(f"✅ Coinalyze data: BTX={len(btx_data)}, LIQ={len(liq_data)}, OI={len(oi_data)}")
+        try:
+            log.info("  → Buy/Sell data...")
+            btx_data = clz_client.fetch_buy_sell_batch(clz_syms, from_ts, now_ts)
+            log.info(f"  ✅ Got {len(btx_data)} buy/sell")
+        except Exception as e:
+            log.warning(f"  ⚠️ Buy/Sell fetch failed: {e}")
+        
+        try:
+            log.info("  → Liquidations data...")
+            liq_data = clz_client.fetch_liquidations_batch(clz_syms, from_ts, now_ts)
+            log.info(f"  ✅ Got {len(liq_data)} liquidations")
+        except Exception as e:
+            log.warning(f"  ⚠️ Liquidations fetch failed: {e}")
+        
+        try:
+            log.info("  → Open Interest data...")
+            oi_data = clz_client.fetch_oi_batch(clz_syms, from_ts, now_ts)
+            log.info(f"  ✅ Got {len(oi_data)} OI")
+        except Exception as e:
+            log.warning(f"  ⚠️ OI fetch failed: {e}")
+        
+        log.info(f"✅ Coinalyze complete: BTX={len(btx_data)}, LIQ={len(liq_data)}, OI={len(oi_data)}")
         
         # === STEP 5: Score each coin ===
         log.info("🎯 Scoring coins...")
@@ -1548,7 +1716,7 @@ def main():
                 
                 # Fetch candles
                 candles = BitgetClient.get_candles(sym, CONFIG["candle_limit_bitget"])
-                if len(candles) < 50:
+                if len(candles) < 30:  # Reduced from 50 to 30
                     continue
                 
                 # Fetch funding
