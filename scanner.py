@@ -4,8 +4,8 @@
 ║  NEXUS-SR v2.3 — Research-Validated Support Zone Bounce Scanner             ║
 ║                                                                              ║
 ║  PERBAIKAN:                                                                  ║
-║  · Endpoint Long/Short sekarang menggunakan suffix _UMCBL (fix 404)         ║
-║  · Logging score components untuk debugging                                 ║
+║  · Endpoint Long/Short sekarang menggunakan symbol polos (tanpa _UMCBL)    ║
+║  · Parameter productType dihapus dari long-short request                    ║
 ║  · Error handling lebih robust                                               ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
@@ -19,7 +19,6 @@ import math
 import os
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -207,7 +206,7 @@ def score_from_z(z: float, z_strong: float, z_medium: float, weight: int) -> int
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🌐  BITGET CLIENT (dengan perbaikan Long/Short suffix)
+#  🌐  BITGET CLIENT (dengan perbaikan Long/Short)
 # ══════════════════════════════════════════════════════════════════════════════
 class BitgetClient:
     BASE = "https://api.bitget.com"
@@ -225,7 +224,9 @@ class BitgetClient:
                     log.warning("Bitget rate limit — tunggu 30s")
                     time.sleep(30)
                     continue
-                log.warning(f"Bitget HTTP {e.response.status_code} for {url}")
+                # Jangan log 404/400 terlalu berisik
+                if e.response.status_code not in (400, 404):
+                    log.warning(f"Bitget HTTP {e.response.status_code} for {url}")
                 break
             except Exception as e:
                 if attempt < 2:
@@ -305,19 +306,16 @@ class BitgetClient:
     @classmethod
     def get_long_short_ratio(cls, symbol: str) -> Optional[float]:
         """
-        Endpoint long-short Bitget membutuhkan suffix _UMCBL untuk USDT-M futures.
-        Contoh: BTCUSDT → BTCUSDT_UMCBL
+        Mendapatkan data Long/Short Ratio untuk futures.
+        Endpoint: GET /api/v2/mix/market/long-short
+        PERBAIKAN: Hanya kirim symbol (tanpa productType), symbol polos (BTCUSDT)
         """
-        # Tambahkan suffix jika belum ada
-        if not symbol.endswith("_UMCBL"):
-            ls_symbol = f"{symbol}_UMCBL"
-        else:
-            ls_symbol = symbol
+        # Hanya kirim symbol polos, tanpa productType
+        params = {"symbol": symbol, "period": "1h"}
 
         data = cls._get(
             f"{cls.BASE}/api/v2/mix/market/long-short",
-            params={"symbol": ls_symbol, "productType": "USDT-FUTURES",
-                    "period": "1h"}
+            params=params
         )
         if not data or data.get("code") != "00000":
             return None
@@ -325,6 +323,7 @@ class BitgetClient:
         if not items:
             return None
         try:
+            # Ambil entry paling baru
             item = items[-1] if isinstance(items, list) else items
             return float(item.get("longRatio", item.get("longShortRatio", 0.5)))
         except Exception:
@@ -847,8 +846,6 @@ def run_scan() -> None:
                 skip_stats["no_zones"] += 1; continue
 
             # Cari TESTING zone (last 2 candles)
-            c_low  = candles[-1]["low"]
-            c_high = candles[-1]["high"]
             testing_zones = []
             for z in zones:
                 if z["break_count"] >= cfg["max_break_count"]:
@@ -903,7 +900,7 @@ def run_scan() -> None:
             clz_sym   = mapper.to_clz(sym) if mapper else None
             clz_ohlcv = clz_data.get(clz_sym, []) if clz_sym else []
 
-            # L/S Ratio (dengan suffix _UMCBL sudah ditangani di method)
+            # L/S Ratio (sudah diperbaiki)
             long_ratio = BitgetClient.get_long_short_ratio(sym)
             time.sleep(1.05)  # rate limit 1 req/sec
 
