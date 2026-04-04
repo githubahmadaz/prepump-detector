@@ -71,7 +71,7 @@ CONFIG: Dict = {
     "chat_id":   os.getenv("CHAT_ID"),
 
     # ── UNIVERSE ───────────────────────────────────────────────────────────
-    "min_vol_24h":        3_600_000,   # $3.6M/day = $150K/hour floor
+    "min_vol_24h":        1_000_000,   # $1M/day — lebih inklusif di bear market
     "max_vol_24h":      800_000_000,   # $800M ceiling (too liquid = less move)
     "gate_chg_24h_max":        40.0,   # skip coin yang sudah pump >40%
 
@@ -79,7 +79,7 @@ CONFIG: Dict = {
     "lookback_period":           20,   # Pine: lookbackPeriod — pivot kiri & kanan
     "vol_len":                    2,   # Pine: vol_len — delta volume filter window
     "box_width_multiplier":     1.0,   # Pine: box_withd — ATR multiplier zone height
-    "candle_limit_1h":          200,   # candle 1H (~8 hari)
+    "candle_limit_1h":         1000,   # 1000 candle 1H = ~41 hari history (pagination)
     "candle_limit_4h":          120,   # candle 4H (~20 hari)
     "candle_limit_1d":          210,   # candle 1D (>200 untuk EMA200)
     "candle_limit_1w":           60,   # candle 1W (>50 untuk EMA50)
@@ -131,6 +131,7 @@ CONFIG: Dict = {
     "alert_cooldown_sec":      3600,
     "cooldown_file":   "/tmp/nexus_sr_cooldown.json",
     "sleep_between_coins":      0.25,  # detik jeda antar coin saat fetch
+    "approaching_pct":           3.0,  # tampilkan pre-alert jika harga dalam 3% di atas zone_top
 }
 
 # ── Derived threshold ─────────────────────────────────────────────────────────
@@ -289,43 +290,92 @@ class BitgetClient:
         """
         GET /api/v2/mix/market/candles
         Candle row: [ts, open, high, low, close, base_vol, quote_vol_usd]
+        Mendukung limit > 200 via pagination otomatis (max 5 halaman = 1000 candle).
         Returns list sorted ascending by ts.
         """
         cache_key = f"{symbol}:{granularity}:{limit}"
         if cache_key in cls._candle_cache:
             return cls._candle_cache[cache_key]
 
-        data = cls._get(
-            f"{cls.BASE}/api/v2/mix/market/candles",
-            params={
+        def _parse_rows(raw_rows: list) -> List[dict]:
+            out = []
+            for row in raw_rows:
+                try:
+                    vol_usd = float(row[6]) if len(row) > 6 else float(row[5]) * float(row[4])
+                    out.append({
+                        "ts":    int(row[0]),
+                        "open":  float(row[1]),
+                        "high":  float(row[2]),
+                        "low":   float(row[3]),
+                        "close": float(row[4]),
+                        "vol":   vol_usd,
+                    })
+                except (IndexError, ValueError):
+                    continue
+            return out
+
+        if limit <= 200:
+            # ── single request (original v5 pattern) ─────────────────────────
+            data = cls._get(
+                f"{cls.BASE}/api/v2/mix/market/candles",
+                params={
+                    "symbol":      symbol,
+                    "productType": "USDT-FUTURES",
+                    "granularity": granularity,
+                    "limit":       limit,
+                }
+            )
+            if not data or data.get("code") != "00000":
+                return []
+            candles = _parse_rows(data.get("data", []))
+            candles.sort(key=lambda x: x["ts"])
+            cls._candle_cache[cache_key] = candles
+            return candles
+
+        # ── Paginated fetch (limit > 200) ─────────────────────────────────────
+        # Bitget returns newest-first; we walk backwards using endTime.
+        collected: Dict[int, dict] = {}
+        end_time: Optional[int]    = None
+        max_pages                  = math.ceil(limit / 200)
+
+        for page in range(max_pages):
+            params: dict = {
                 "symbol":      symbol,
                 "productType": "USDT-FUTURES",
                 "granularity": granularity,
-                "limit":       limit,
+                "limit":       200,
             }
-        )
-        if not data or data.get("code") != "00000":
-            return []
+            if end_time is not None:
+                params["endTime"] = str(end_time)
 
-        candles = []
-        for row in data.get("data", []):
-            try:
-                # row[6] = quote volume (USD); fallback to base*close
-                vol_usd = float(row[6]) if len(row) > 6 else float(row[5]) * float(row[4])
-                candles.append({
-                    "ts":    int(row[0]),
-                    "open":  float(row[1]),
-                    "high":  float(row[2]),
-                    "low":   float(row[3]),
-                    "close": float(row[4]),
-                    "vol":   vol_usd,
-                })
-            except (IndexError, ValueError):
-                continue
+            data = cls._get(f"{cls.BASE}/api/v2/mix/market/candles", params=params)
+            if not data or data.get("code") != "00000":
+                break
 
-        candles.sort(key=lambda x: x["ts"])
-        cls._candle_cache[cache_key] = candles
-        return candles
+            raw = data.get("data", [])
+            if not raw:
+                break
+
+            batch = _parse_rows(raw)
+            for c in batch:
+                collected[c["ts"]] = c
+
+            if len(batch) < 200:
+                break                               # exchange has no more history
+
+            # Oldest timestamp in this batch → next page goes earlier
+            oldest_ts = min(c["ts"] for c in batch)
+            end_time  = oldest_ts - 1
+
+            if len(collected) >= limit:
+                break
+
+            time.sleep(0.15)                        # pagination rate-limit courtesy
+
+        result = sorted(collected.values(), key=lambda x: x["ts"])
+        result = result[-limit:]                    # keep most recent `limit` candles
+        cls._candle_cache[cache_key] = result
+        return result
 
     @classmethod
     def clear_cache(cls) -> None:
@@ -877,7 +927,25 @@ def send_telegram(msg: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 #  🖨️  OUTPUT FORMATTING
 # ══════════════════════════════════════════════════════════════════════════════
-def build_terminal_table(results: list, caution: bool) -> str:
+def build_approaching_table(approaching: list) -> str:
+    """Tabel coin yang mendekati zona support (dalam approaching_pct% di atas zone_top)."""
+    if not approaching:
+        return ""
+    lines = [
+        "",
+        "  📍 APPROACHING ZONES  (harga dalam 3% di atas zone_top — pantau untuk entry)",
+        "  " + "─" * 80,
+        f"  {'#':>2}  {'Coin':<14} {'Price':>12} {'ZoneTop':>11} {'ZoneBot':>11} {'Dist%':>7}  Vol24h(M)",
+        "  " + "─" * 80,
+    ]
+    for i, a in enumerate(approaching[:10], 1):
+        raw = a["symbol"].replace("USDT", "")
+        lines.append(
+            f"  {i:>2}  {raw:<14} {a['price']:>12.6f} {a['zone_top']:>11.6f} "
+            f"{a['zone_bot']:>11.6f} {a['dist_pct']:>6.2f}%  ${a['vol_24h_m']:.1f}M"
+        )
+    lines.append("  " + "─" * 80)
+    return "\n".join(lines)
     """Tabel terminal untuk top-N sinyal."""
     mode_str = "⚠️  CAUTION (threshold=80)" if caution else "✅ NORMAL (threshold=65)"
     now_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -980,7 +1048,8 @@ def run_scan() -> None:
     log.info(f"Candidates: {len(candidates)} | Skip: {dict(skip_stats)}")
 
     # ── 4. Score each candidate ─────────────────────────────────────────────
-    results = []
+    results         = []
+    all_approaching = []   # coins mendekat zona tapi belum TESTING
     BitgetClient.clear_cache()
 
     for idx, (sym, ticker) in enumerate(candidates):
@@ -1013,18 +1082,54 @@ def run_scan() -> None:
                 cfg["atr_period"],
             )
             if not sup_zones:
-                log.debug(f"  {sym}: tidak ada support zone")
+                log.debug(f"  {sym}: tidak ada support zone dari {len(candles_1h)} candle")
                 skip_stats["no_zones"] += 1
                 continue
 
-            # ── Cari zone yang sedang TESTING ─────────────────────────────────
-            testing_zones = [
-                z for z in sup_zones
-                if get_zone_state(z, current_low, current_high) == "TESTING"
-                   and z["break_count"] < cfg["max_break_count"]
-            ]
+            # ── Cari zone TESTING (cek 2 candle terakhir) ────────────────────
+            # Harga mungkin masuk zona di candle sebelumnya dan belum keluar
+            testing_zones = []
+            for z in sup_zones:
+                if z["break_count"] >= cfg["max_break_count"]:
+                    continue
+                for lookback_i in (1, 2):          # cek candle[-1] dan candle[-2]
+                    if lookback_i >= len(candles_1h):
+                        continue
+                    c = candles_1h[-lookback_i]
+                    if get_zone_state(z, c["low"], c["high"]) == "TESTING":
+                        testing_zones.append(z)
+                        break
+
+            # ── APPROACHING: zone dalam 3% di atas harga (pre-alert) ─────────
+            approaching_zones = []
+            for z in sup_zones:
+                if z["break_count"] >= cfg["max_break_count"]:
+                    continue
+                if z not in testing_zones:
+                    dist_pct = (z["zone_top"] - current_close) / current_close * 100
+                    if 0 < dist_pct <= cfg.get("approaching_pct", 3.0):
+                        approaching_zones.append((z, round(dist_pct, 2)))
+
             if not testing_zones:
-                log.debug(f"  {sym}: tidak ada TESTING zone")
+                n_broken = sum(1 for z in sup_zones
+                               if get_zone_state(z, current_low, current_high) == "BROKEN")
+                n_valid  = sum(1 for z in sup_zones
+                               if get_zone_state(z, current_low, current_high) == "VALID")
+                approach_str = (f" | approaching={len(approaching_zones)}" if approaching_zones else "")
+                log.debug(
+                    f"  {sym}: {len(sup_zones)} zones — "
+                    f"broken={n_broken} valid={n_valid}{approach_str}"
+                )
+                if approaching_zones:
+                    skip_stats["approaching"] = skip_stats.get("approaching", 0) + 1
+                    all_approaching.append({
+                        "symbol":   sym,
+                        "price":    current_close,
+                        "zone_top": approaching_zones[0][0]["zone_top"],
+                        "zone_bot": approaching_zones[0][0]["zone_bottom"],
+                        "dist_pct": approaching_zones[0][1],
+                        "vol_24h_m": round(vol_24h / 1_000_000, 2),
+                    })
                 skip_stats["no_testing"] += 1
                 continue
 
@@ -1139,11 +1244,18 @@ def run_scan() -> None:
     top = results[:cfg["top_n"]]
 
     elapsed = round(time.time() - start_ts, 1)
-    log.info(f"\nTotal sinyal: {len(results)} | Ditampilkan: {len(top)} | Waktu: {elapsed}s")
+    log.info(
+        f"\nTotal sinyal: {len(results)} | Approaching: {len(all_approaching)} "
+        f"| Ditampilkan: {len(top)} | Waktu: {elapsed}s"
+    )
     log.info(f"Skip stats: {dict(skip_stats)}")
 
     # ── Terminal table ────────────────────────────────────────────────────────
     print(build_terminal_table(top, caution))
+
+    # ── Approaching zones (pre-alert, no Telegram) ────────────────────────────
+    approaching_sorted = sorted(all_approaching, key=lambda x: x["dist_pct"])
+    print(build_approaching_table(approaching_sorted))
 
     if not top:
         log.info("Tidak ada sinyal bounce saat ini.")
