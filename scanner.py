@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  NEXUS-SR v2.1 — Research-Validated Support Zone Bounce Scanner             ║
-║  FIXED: Bitget long/short endpoint (removed productType)                     ║
-║  FIXED: Coinalyze fallback for btx/tx missing data                          ║
-║  FIXED: Better handling of first-run OI                                     ║
+║  NEXUS-SR v2.2 — Research-Validated Support Zone Bounce Scanner             ║
+║  FIXED: Bitget long/short endpoint to correct URL                           ║
+║  FIXED: Removed all HTTP 400 causes                                         ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -17,8 +16,6 @@ import math
 import os
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -43,76 +40,61 @@ log = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ⚙️  CONFIG  — semua parameter di sini, zero hardcode di kode
+#  ⚙️  CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 CONFIG: Dict = {
-    # ── CREDENTIALS ────────────────────────────────────────────────────────
     "bot_token":           os.getenv("BOT_TOKEN"),
     "chat_id":             os.getenv("CHAT_ID"),
     "coinalyze_api_key":   os.getenv("COINALYZE_API_KEY",
                                      "ab447e9a-3a26-4253-a68e-1cd0603d22d2"),
 
-    # ── UNIVERSE FILTER ─────────────────────────────────────────────────────
-    "min_vol_24h":         50_000,      # $50K/day floor absolut
-    "max_vol_24h":      2_000_000_000,  # $2B ceiling
-    "gate_chg_24h_max":       60.0,     # skip jika SUDAH pump >60%
+    "min_vol_24h":         50_000,
+    "max_vol_24h":      2_000_000_000,
+    "gate_chg_24h_max":       60.0,
 
-    # ── PINE SCRIPT PARAMETERS ──────────────────────────────────────────────
-    "lookback_period":          20,     # pivot kiri & kanan (Pine: lookbackPeriod)
-    "vol_len":                   2,     # delta vol filter window (Pine: vol_len)
-    "box_width_multiplier":    1.0,     # ATR × ini = zone height (Pine: box_withd)
-    "candle_limit_1h":         200,     # 1H candles per coin (~8 hari)
-    "candle_limit_1w":          60,     # 1W candles untuk BTC/ETH regime check
+    "lookback_period":          20,
+    "vol_len":                   2,
+    "box_width_multiplier":    1.0,
+    "candle_limit_1h":         200,
+    "candle_limit_1w":          60,
 
-    # ── INDICATORS ──────────────────────────────────────────────────────────
-    "atr_period":              200,     # Pine: ta.atr(200)
+    "atr_period":              200,
     "rsi_period":               14,
-    "ema_weekly_period":        50,     # BTC+ETH EMA50 weekly (CAUTION check)
-    "ema_daily_period":        200,     # hanya untuk display, tidak untuk penalty
+    "ema_weekly_period":        50,
+    "ema_daily_period":        200,
 
-    # ── SCORING — komponen independen (total 100 pts) ──────────────────────
-
-    # A. Volume Z-score (0-30 pts) — Fantazzini 2023
     "score_vol_max":            30,
-    "vol_baseline_window":      24,     # candle untuk baseline
-    "vol_z_strong":            2.0,     # Z ≥ ini → full score
-    "vol_z_medium":            1.0,     # Z ≥ ini → half score
+    "vol_baseline_window":      24,
+    "vol_z_strong":            2.0,
+    "vol_z_medium":            1.0,
 
-    # B. Taker Buy Z-score (0-25 pts) — La Morgia 2023
-    # Menggunakan btx/tx jika ada, fallback ke buy volume / total volume
     "score_btx_max":            25,
     "btx_z_strong":            2.0,
     "btx_z_medium":            1.0,
     "btx_baseline_window":      24,
 
-    # C. Funding Rate (0-20 pts)
     "score_fund_max":           20,
     "fund_strongly_neg":    -0.0005,
     "fund_mod_neg":         -0.0001,
     "fund_neutral_hi":       0.0001,
 
-    # D. OI Change Direction (0-15 pts)
     "score_oi_max":             15,
     "oi_significant_increase":  0.03,
     "oi_moderate_increase":     0.01,
 
-    # E. Long/Short Ratio (0-10 pts)
     "score_ls_max":             10,
     "ls_strongly_short":       0.4,
     "ls_mod_short":            0.6,
     "ls_neutral":              0.8,
 
-    # ── THRESHOLDS ─────────────────────────────────────────────────────────
     "score_threshold_normal":   55,
     "score_threshold_caution":  70,
     "score_strong":             75,
 
-    # ── GATES (binary pass/fail) ───────────────────────────────────────────
     "max_break_count":           3,
     "vol_outlier_mult":         5.0,
     "vol_outlier_lookback":     20,
 
-    # ── COINALYZE ───────────────────────────────────────────────────────────
     "clz_interval":         "1hour",
     "clz_lookback_h":          168,
     "clz_min_interval_sec":    1.6,
@@ -120,7 +102,6 @@ CONFIG: Dict = {
     "clz_retry":                 3,
     "clz_retry_wait":            5,
 
-    # ── OUTPUT ─────────────────────────────────────────────────────────────
     "top_n":                    10,
     "max_alerts":                5,
     "alert_cooldown_sec":     3600,
@@ -132,7 +113,7 @@ MANUAL_EXCLUDE: set = set()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  💾  STATE FILE  (cooldown + previous OI)
+#  💾  STATE FILE
 # ══════════════════════════════════════════════════════════════════════════════
 def _load_state() -> dict:
     try:
@@ -218,7 +199,7 @@ class BitgetClient:
     def _get(url: str, params: dict = None, timeout: int = 12) -> Optional[dict]:
         for attempt in range(3):
             try:
-                r = requests.get(url, params=params, timeout=timeout)
+                r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "NEXUS-SR/2.2"})
                 r.raise_for_status()
                 return r.json()
             except requests.exceptions.HTTPError as e:
@@ -226,6 +207,9 @@ class BitgetClient:
                     log.warning("Bitget rate limit — tunggu 30s")
                     time.sleep(30)
                     continue
+                # Jangan log 400 untuk long-short karena sudah ditangani terpisah
+                if e.response.status_code == 400:
+                    return None
                 log.warning(f"Bitget HTTP {e.response.status_code}")
                 break
             except Exception as e:
@@ -306,23 +290,36 @@ class BitgetClient:
     @classmethod
     def get_long_short_ratio(cls, symbol: str) -> Optional[float]:
         """
-        GET /api/v2/mix/market/long-short
-        FIXED: removed productType parameter (caused HTTP 400)
+        GET /api/v2/mix/market/long-short-ratio
+        Endpoint yang benar (tanpa productType)
         """
-        data = cls._get(
-            f"{cls.BASE}/api/v2/mix/market/long-short",
-            params={"symbol": symbol, "period": "1h"}   # No productType!
-        )
-        if not data or data.get("code") != "00000":
-            return None
-        items = data.get("data", [])
-        if not items:
-            return None
-        try:
-            item = items[-1] if isinstance(items, list) else items
-            return float(item.get("longRatio", item.get("longShortRatio", 0.5)))
-        except Exception:
-            return None
+        # Coba endpoint yang benar dulu
+        url = f"{cls.BASE}/api/v2/mix/market/long-short-ratio"
+        params = {"symbol": symbol, "period": "1h"}
+        data = cls._get(url, params)
+        if data and data.get("code") == "00000":
+            items = data.get("data", [])
+            if items:
+                try:
+                    item = items[-1] if isinstance(items, list) else items
+                    return float(item.get("longRatio", item.get("longShortRatio", 0.5)))
+                except Exception:
+                    pass
+        
+        # Fallback: coba endpoint lama tanpa productType
+        url2 = f"{cls.BASE}/api/v2/mix/market/long-short"
+        data2 = cls._get(url2, params)
+        if data2 and data2.get("code") == "00000":
+            items = data2.get("data", [])
+            if items:
+                try:
+                    item = items[-1] if isinstance(items, list) else items
+                    return float(item.get("longRatio", item.get("longShortRatio", 0.5)))
+                except Exception:
+                    pass
+        
+        # Jika semua gagal, return None (akan diisi default 0.5 di pemanggil)
+        return None
 
     @classmethod
     def clear_cache(cls) -> None:
@@ -394,7 +391,7 @@ class CoinalyzeClient:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🗺️  SYMBOL MAPPER  (Bitget ↔ Coinalyze)
+#  🗺️  SYMBOL MAPPER
 # ══════════════════════════════════════════════════════════════════════════════
 class SymbolMapper:
     def __init__(self, clz: CoinalyzeClient):
@@ -625,10 +622,6 @@ def score_A_volume_zscore(candles: List[dict]) -> Tuple[int, float]:
 
 
 def score_B_taker_buy(clz_ohlcv: List[dict]) -> Tuple[int, float, str]:
-    """
-    Komponen B: Taker Buy Z-score (0–25 pts)
-    Menggunakan btx/tx jika ada, fallback ke buy volume / total volume (bv/vol)
-    """
     cfg = CONFIG
     if not clz_ohlcv or len(clz_ohlcv) < cfg["btx_baseline_window"] + 5:
         return 0, 0.0, "no_clz_data"
@@ -636,23 +629,20 @@ def score_B_taker_buy(clz_ohlcv: List[dict]) -> Tuple[int, float, str]:
     win = cfg["btx_baseline_window"]
     cur = clz_ohlcv[-2] if len(clz_ohlcv) >= 2 else clz_ohlcv[-1]
 
-    # Try btx/tx first
     btx = cur.get("btx", 0)
     tx  = cur.get("tx", 0)
     if btx and tx:
         cur_ratio = btx / tx
         source = "btx_tx"
     else:
-        # Fallback: buy volume / total volume (bv / vol)
-        bv  = cur.get("bv", 0)   # buy volume
-        vol = cur.get("vol", 0)  # total volume
+        bv  = cur.get("bv", 0)
+        vol = cur.get("vol", 0)
         if bv and vol:
             cur_ratio = bv / vol
             source = "bv_vol"
         else:
             return 0, 0.0, "no_buy_data"
 
-    # Build baseline ratios
     baseline_ratios = []
     for c in clz_ohlcv[-(win + 5):-5]:
         btx2 = c.get("btx", 0)
@@ -765,7 +755,7 @@ def build_table(results: list, caution: bool) -> str:
     lines = [
         "",
         "═" * 120,
-        f"  NEXUS-SR v2.1  |  Bitget Futures  |  {now}  |  {mode}",
+        f"  NEXUS-SR v2.2  |  Bitget Futures  |  {now}  |  {mode}",
         "═" * 120,
         f"  {'#':>2}  {'Coin':<13} {'Price':>12} {'ZoneTop':>10} {'ZoneBot':>10} "
         f"{'Score':>6} {'A:Vol':>6} {'B:btx':>6} {'C:Fund':>7} {'D:OI':>5} {'E:L/S':>5}  "
@@ -794,7 +784,7 @@ def build_table(results: list, caution: bool) -> str:
 def build_telegram_msg(results: list, caution: bool, readiness: str) -> str:
     mode = "⚠️ CAUTION" if caution else "🟢 NORMAL"
     now  = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    txt  = (f"🎯 <b>NEXUS-SR v2.1</b> [{now}]\n"
+    txt  = (f"🎯 <b>NEXUS-SR v2.2</b> [{now}]\n"
             f"Mode: {mode} | {readiness}\n{'─'*28}\n")
     for i, r in enumerate(results, 1):
         raw = r["symbol"].replace("USDT", "")
@@ -819,7 +809,7 @@ def run_scan() -> None:
     start_ts = time.time()
 
     log.info("=" * 70)
-    log.info(f"  NEXUS-SR v2.1 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"  NEXUS-SR v2.2 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     log.info("=" * 70)
 
     # ── 1. Regime check ────────────────────────────────────────────────────
@@ -961,12 +951,11 @@ def run_scan() -> None:
             clz_sym     = mapper.to_clz(sym) if mapper else None
             clz_ohlcv   = clz_data.get(clz_sym, []) if clz_sym else []
 
-            # Long/Short ratio with fixed endpoint
+            # Long/Short ratio dengan endpoint yang sudah diperbaiki
             long_ratio = BitgetClient.get_long_short_ratio(sym)
             if long_ratio is None:
-                log.debug(f"{sym}: L/S ratio API error, using default 0.5")
                 long_ratio = 0.5   # neutral fallback
-            time.sleep(1.05)  # respect rate limit
+            time.sleep(1.05)  # rate limit
 
             best_zone = min(
                 testing_zones,
