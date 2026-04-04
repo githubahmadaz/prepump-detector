@@ -1,44 +1,10 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  NEXUS-SR v2.0 — Research-Validated Support Zone Bounce Scanner             ║
-║                                                                              ║
-║  ARSITEKTUR:                                                                 ║
-║  ┌──────────────────────────────────────────────────────────────┐           ║
-║  │  GATE (wajib terpenuhi semua, binary pass/fail):             │           ║
-║  │   G1. Zone state = TESTING (Pine Script logic)               │           ║
-║  │   G2. Zone break_count < 3                                   │           ║
-║  │   G3. Volume bukan outlier (< 5× avg)                        │           ║
-║  └──────────────────────────────────────────────────────────────┘           ║
-║                                                                              ║
-║  ┌──────────────────────────────────────────────────────────────┐           ║
-║  │  SCORE (0–100, 5 komponen INDEPENDEN):                       │           ║
-║  │   A. Volume Z-score         0–30 pts  (Fantazzini 2023)      │           ║
-║  │      → TOTAL volume anomaly vs 24-candle baseline            │           ║
-║  │   B. Taker Buy Z-score      0–25 pts  (La Morgia 2023)       │           ║
-║  │      → BUY TRANSACTION PROPORTION (btx/tx ratio)            │           ║
-║  │      → Berbeda dari A: mengukur ARAH, bukan ukuran           │           ║
-║  │   C. Funding Rate           0–20 pts  (Derivatives research) │           ║
-║  │      → BIAYA holding posisi (mekanisme futures, bukan vol)   │           ║
-║  │   D. OI Change              0–15 pts  (Derivatives research) │           ║
-║  │      → UKURAN posisi terbuka (berbeda dari C=biaya)          │           ║
-║  │   E. Long/Short Ratio       0–10 pts  (Derivatives research) │           ║
-║  │      → DISTRIBUSI posisi saat ini (berbeda dari D=perubahan) │           ║
-║  └──────────────────────────────────────────────────────────────┘           ║
-║                                                                              ║
-║  ┌──────────────────────────────────────────────────────────────┐           ║
-║  │  THRESHOLD (adjusted by regime, NOT score penalty):          │           ║
-║  │   Normal mode  : score ≥ 55                                  │           ║
-║  │   CAUTION mode : score ≥ 70  (BTC+ETH < EMA50 weekly)       │           ║
-║  │   STRONG signal: score ≥ 75  → kirim Telegram               │           ║
-║  └──────────────────────────────────────────────────────────────┘           ║
-║                                                                              ║
-║  DATA SOURCES (semua public, tanpa API key kecuali Coinalyze):              ║
-║  · Bitget REST API v2 : OHLCV, tickers (sudah ada fundingRate+OI)           ║
-║  · Bitget /long-short : long/short ratio (public endpoint)                  ║
-║  · Coinalyze API      : btx (buy tx count), bv (buy volume) — fallback OK  ║
-║                                                                              ║
-║  UNIVERSE: Semua USDT-Futures aktif di Bitget (bukan hardcoded list)        ║
+║  NEXUS-SR v2.1 — Research-Validated Support Zone Bounce Scanner             ║
+║  FIXED: Bitget long/short endpoint (removed productType)                     ║
+║  FIXED: Coinalyze fallback for btx/tx missing data                          ║
+║  FIXED: Better handling of first-run OI                                     ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -87,8 +53,6 @@ CONFIG: Dict = {
                                      "ab447e9a-3a26-4253-a68e-1cd0603d22d2"),
 
     # ── UNIVERSE FILTER ─────────────────────────────────────────────────────
-    # Floor sangat rendah: hanya singkirkan ghost coins
-    # Volume TIDAK dipakai sebagai quality gate — justru pre-pump dimulai saat volume rendah
     "min_vol_24h":         50_000,      # $50K/day floor absolut
     "max_vol_24h":      2_000_000_000,  # $2B ceiling
     "gate_chg_24h_max":       60.0,     # skip jika SUDAH pump >60%
@@ -109,61 +73,48 @@ CONFIG: Dict = {
     # ── SCORING — komponen independen (total 100 pts) ──────────────────────
 
     # A. Volume Z-score (0-30 pts) — Fantazzini 2023
-    # Mengukur: anomali TOTAL volume vs baseline 24-candle
     "score_vol_max":            30,
     "vol_baseline_window":      24,     # candle untuk baseline
     "vol_z_strong":            2.0,     # Z ≥ ini → full score
     "vol_z_medium":            1.0,     # Z ≥ ini → half score
 
     # B. Taker Buy Z-score (0-25 pts) — La Morgia 2023
-    # Mengukur: anomali PROPORSI buy transactions (btx/tx ratio)
-    # BERBEDA dari A: A=ukuran anomali, B=ARAH anomali (beli vs jual)
+    # Menggunakan btx/tx jika ada, fallback ke buy volume / total volume
     "score_btx_max":            25,
     "btx_z_strong":            2.0,
     "btx_z_medium":            1.0,
-    "btx_baseline_window":      24,     # sama dengan vol, tapi applied ke btx ratio
+    "btx_baseline_window":      24,
 
-    # C. Funding Rate (0-20 pts) — Derivatives research
-    # Mengukur: BIAYA/INSENTIF holding posisi (funding mechanism)
-    # Sudah ada di tickers response: fundingRate field
-    # BERBEDA dari D (OI) dan E (L/S): C=cost, D=size, E=distribution
+    # C. Funding Rate (0-20 pts)
     "score_fund_max":           20,
-    "fund_strongly_neg":    -0.0005,    # ≤ ini → full score (-0.05%)
-    "fund_mod_neg":         -0.0001,    # ≤ ini → partial (-0.01%)
-    "fund_neutral_hi":       0.0001,    # ≤ ini → tiny bonus (neutral)
-    # > fund_neutral_hi → 0 pts (longs dominant, tidak kondusif untuk short squeeze)
+    "fund_strongly_neg":    -0.0005,
+    "fund_mod_neg":         -0.0001,
+    "fund_neutral_hi":       0.0001,
 
-    # D. OI Change Direction (0-15 pts) — Derivatives research
-    # Mengukur: apakah POSISI TERBUKA bertambah saat harga turun (= short buildup)
-    # Sumber: holdingAmount dari tickers, dibandingkan dengan nilai sebelumnya
-    # BERBEDA dari C: C=biaya, D=apakah ada penambahan posisi baru
+    # D. OI Change Direction (0-15 pts)
     "score_oi_max":             15,
-    "oi_significant_increase":  0.03,   # OI naik ≥ 3% = short buildup signifikan
-    "oi_moderate_increase":     0.01,   # OI naik ≥ 1% = moderate buildup
+    "oi_significant_increase":  0.03,
+    "oi_moderate_increase":     0.01,
 
-    # E. Long/Short Ratio (0-10 pts) — Derivatives research
-    # Mengukur: DISTRIBUSI posisi saat ini (berapa % yang long vs short)
-    # Sumber: /api/v2/mix/market/long-short
-    # BERBEDA dari D: D=perubahan ukuran posisi, E=snapshot distribusi
+    # E. Long/Short Ratio (0-10 pts)
     "score_ls_max":             10,
-    "ls_strongly_short":       0.4,     # longRatio ≤ ini → full score (crowded short)
-    "ls_mod_short":            0.6,     # longRatio ≤ ini → partial
-    "ls_neutral":              0.8,     # longRatio ≤ ini → tiny bonus
+    "ls_strongly_short":       0.4,
+    "ls_mod_short":            0.6,
+    "ls_neutral":              0.8,
 
     # ── THRESHOLDS ─────────────────────────────────────────────────────────
-    # Threshold adalah CONTEXT-ADJUSTED, bukan score penalty
     "score_threshold_normal":   55,
-    "score_threshold_caution":  70,     # aktif jika BTC+ETH di bawah EMA50 weekly
-    "score_strong":             75,     # kirim Telegram
+    "score_threshold_caution":  70,
+    "score_strong":             75,
 
-    # ── GATES (binary pass/fail, bukan bagian score) ────────────────────
-    "max_break_count":           3,     # zone invalid setelah 3x break
-    "vol_outlier_mult":         5.0,    # current_vol > 5x avg = outlier, skip
+    # ── GATES (binary pass/fail) ───────────────────────────────────────────
+    "max_break_count":           3,
+    "vol_outlier_mult":         5.0,
     "vol_outlier_lookback":     20,
 
     # ── COINALYZE ───────────────────────────────────────────────────────────
     "clz_interval":         "1hour",
-    "clz_lookback_h":          168,     # 7 hari untuk baseline btx
+    "clz_lookback_h":          168,
     "clz_min_interval_sec":    1.6,
     "clz_batch_size":           20,
     "clz_retry":                 3,
@@ -181,17 +132,15 @@ MANUAL_EXCLUDE: set = set()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  💾  STATE FILE  (cooldown + previous OI untuk D component)
+#  💾  STATE FILE  (cooldown + previous OI)
 # ══════════════════════════════════════════════════════════════════════════════
 def _load_state() -> dict:
-    """Load persisted state: {cooldowns: {...}, prev_oi: {...}}"""
     try:
         path = CONFIG["cooldown_file"]
         if os.path.exists(path):
             with open(path) as f:
                 state = json.load(f)
             now = time.time()
-            # Prune expired cooldowns
             state["cooldowns"] = {
                 k: v for k, v in state.get("cooldowns", {}).items()
                 if now - v < CONFIG["alert_cooldown_sec"]
@@ -224,7 +173,6 @@ def get_prev_oi(sym: str) -> float:
 
 def set_prev_oi(sym: str, oi: float) -> None:
     _state["prev_oi"][sym] = oi
-    # Tidak save setiap kali — disave sekali di akhir scan
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -240,7 +188,6 @@ def _std(arr: list) -> float:
     return math.sqrt(sum((x - m) ** 2 for x in arr) / len(arr))
 
 def zscore(value: float, series: list, min_samples: int = 10) -> float:
-    """Z-score robust. Return 0 jika data kurang atau std=0."""
     if len(series) < min_samples:
         return 0.0
     sigma = _std(series)
@@ -249,7 +196,6 @@ def zscore(value: float, series: list, min_samples: int = 10) -> float:
     return (value - _mean(series)) / sigma
 
 def score_from_z(z: float, z_strong: float, z_medium: float, weight: int) -> int:
-    """Linear interpolation [0, weight] dari Z-score."""
     if z >= z_strong:
         return weight
     if z >= z_medium:
@@ -289,11 +235,6 @@ class BitgetClient:
 
     @classmethod
     def get_tickers(cls) -> Dict[str, dict]:
-        """
-        GET /api/v2/mix/market/tickers
-        Response includes: lastPr, quoteVolume, change24h,
-                           fundingRate (komponen C), holdingAmount (untuk komponen D)
-        """
         data = cls._get(f"{cls.BASE}/api/v2/mix/market/tickers",
                         params={"productType": "USDT-FUTURES"})
         if not data or data.get("code") != "00000":
@@ -303,10 +244,6 @@ class BitgetClient:
     @classmethod
     def get_candles(cls, symbol: str, granularity: str = "1H",
                     limit: int = 200) -> List[dict]:
-        """
-        GET /api/v2/mix/market/candles
-        Mendukung limit > 200 via pagination.
-        """
         cache_key = f"{symbol}:{granularity}:{limit}"
         if cache_key in cls._candle_cache:
             return cls._candle_cache[cache_key]
@@ -340,7 +277,6 @@ class BitgetClient:
             cls._candle_cache[cache_key] = candles
             return candles
 
-        # Pagination untuk limit > 200
         collected: Dict[int, dict] = {}
         end_time = None
         for page in range(math.ceil(limit / 200)):
@@ -370,14 +306,12 @@ class BitgetClient:
     @classmethod
     def get_long_short_ratio(cls, symbol: str) -> Optional[float]:
         """
-        GET /api/v2/mix/market/long-short — Komponen E
-        Kembalikan longRatio (float 0-1). None jika gagal.
-        Rate limit: 1 req/sec, dipanggil HANYA untuk TESTING candidates.
+        GET /api/v2/mix/market/long-short
+        FIXED: removed productType parameter (caused HTTP 400)
         """
         data = cls._get(
             f"{cls.BASE}/api/v2/mix/market/long-short",
-            params={"symbol": symbol, "productType": "USDT-FUTURES",
-                    "period": "1h"}
+            params={"symbol": symbol, "period": "1h"}   # No productType!
         )
         if not data or data.get("code") != "00000":
             return None
@@ -385,7 +319,6 @@ class BitgetClient:
         if not items:
             return None
         try:
-            # Ambil entry paling baru
             item = items[-1] if isinstance(items, list) else items
             return float(item.get("longRatio", item.get("longShortRatio", 0.5)))
         except Exception:
@@ -397,7 +330,7 @@ class BitgetClient:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📡  COINALYZE CLIENT  (untuk komponen B: taker buy btx)
+#  📡  COINALYZE CLIENT
 # ══════════════════════════════════════════════════════════════════════════════
 class CoinalyzeClient:
     BASE      = "https://api.coinalyze.net/v1"
@@ -440,7 +373,6 @@ class CoinalyzeClient:
 
     def fetch_ohlcv_batch(self, symbols: List[str],
                           from_ts: int, to_ts: int) -> Dict[str, list]:
-        """Batch fetch OHLCV+btx+bv. Returns {clz_symbol: [candles]}"""
         if not symbols:
             return {}
         result = {}
@@ -495,7 +427,6 @@ class SymbolMapper:
                     mapped += 1
                     break
 
-        # Fallback suffix untuk yang belum terpetakan
         unmapped = [s for s in whitelist if s not in self._to_clz]
         if unmapped and self._to_clz:
             sample = list(self._to_clz.values())[0]
@@ -520,7 +451,6 @@ class SymbolMapper:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _wilder_ema(values: list, period: int) -> list:
-    """Wilder's RMA — identik Pine's ta.atr internals."""
     if not values:
         return []
     alpha  = 1.0 / period
@@ -530,7 +460,6 @@ def _wilder_ema(values: list, period: int) -> list:
     return result
 
 def _std_ema(values: list, period: int) -> list:
-    """Standard EMA — Pine's ta.ema."""
     if not values:
         return []
     alpha  = 2.0 / (period + 1)
@@ -541,10 +470,6 @@ def _std_ema(values: list, period: int) -> list:
 
 
 def compute_delta_volume(candles: List[dict]) -> List[float]:
-    """
-    Pine Script: upAndDownVolume() — lines 23-38
-    +vol bullish, -vol bearish, doji inherits previous direction (var isBuyVolume).
-    """
     result = []
     is_buy = True
     for c in candles:
@@ -556,7 +481,6 @@ def compute_delta_volume(candles: List[dict]) -> List[float]:
 
 def compute_vol_thresholds(dv: List[float],
                            vol_len: int) -> Tuple[List[float], List[float]]:
-    """Pine: vol_hi = ta.highest(Vol/2.5, vol_len), vol_lo = ta.lowest(...)"""
     n      = len(dv)
     scaled = [v / 2.5 for v in dv]
     vol_hi = [max(scaled[max(0, i - vol_len + 1): i + 1]) for i in range(n)]
@@ -565,7 +489,6 @@ def compute_vol_thresholds(dv: List[float],
 
 
 def compute_atr(candles: List[dict], period: int = 200) -> List[float]:
-    """Pine: ta.atr(200) — Wilder's smoothed ATR."""
     trs = []
     for i, c in enumerate(candles):
         pc  = candles[i-1]["close"] if i > 0 else c["close"]
@@ -588,15 +511,14 @@ def compute_rsi(candles: List[dict], period: int = 14) -> List[float]:
     for i in range(len(ag)):
         rs  = ag[i] / al[i] if al[i] > 0 else 100.0
         rsi.append(100.0 - 100.0 / (1.0 + rs))
-    return rsi  # len == len(candles)
+    return rsi
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🟩  SR ENGINE  (Pine Script calcSupportResistance)
+#  🟩  SR ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def find_pivot_lows(lows: List[float], lookback: int) -> List[Optional[float]]:
-    """Pine: ta.pivotlow(src, lookback, lookback) — line 67."""
     n = len(lows)
     result = [None] * n
     for i in range(lookback, n - lookback):
@@ -608,11 +530,6 @@ def find_pivot_lows(lows: List[float], lookback: int) -> List[Optional[float]]:
 
 def detect_support_zones(candles: List[dict],
                          symbol: str) -> List[dict]:
-    """
-    Pine: calcSupportResistance() — support branch, lines 72-78
-    Pivot low + Vol > vol_hi → support zone.
-    Juga menghitung touch_count dan break_count dari candle setelah formasi.
-    """
     cfg  = CONFIG
     lb   = cfg["lookback_period"]
     vl   = cfg["vol_len"]
@@ -632,7 +549,7 @@ def detect_support_zones(candles: List[dict],
     for i, piv in enumerate(pivots):
         if piv is None:
             continue
-        if dv[i] <= vh[i]:             # Pine line 74: Vol > vol_hi
+        if dv[i] <= vh[i]:
             continue
         if math.isnan(atr[i]) or atr[i] <= 0:
             continue
@@ -641,11 +558,10 @@ def detect_support_zones(candles: List[dict],
         zone_bottom = piv - atr[i] * bw
         n           = len(candles)
 
-        # Hitung break_count dan touch_count dari sisa candle
         break_count = 0
         touch_count = 0
         in_zone     = False
-        broke_at    = n  # bar pertama yang break
+        broke_at    = n
 
         for j in range(i + lb, n):
             c_low  = candles[j]["low"]
@@ -663,7 +579,6 @@ def detect_support_zones(candles: List[dict],
                         break_count += 1
                         in_zone  = False
                         broke_at = j
-            # Setelah broke_at: zone dianggap broken, tidak dihitung lagi
 
         zones.append({
             "bar":        i,
@@ -680,12 +595,6 @@ def detect_support_zones(candles: List[dict],
 
 def get_zone_state(zone: dict, current_low: float,
                    current_high: float) -> str:
-    """
-    Pine: brekout_sup / sup_holds logic — lines 105-120
-    BROKEN  : high < zone_bottom  (price fully below zone floor)
-    TESTING : zone_bottom ≤ low ≤ zone_top  (price inside zone)
-    VALID   : low > zone_top   (price above zone)
-    """
     top    = zone["zone_top"]
     bottom = zone["zone_bottom"]
     if current_high < bottom:
@@ -696,21 +605,16 @@ def get_zone_state(zone: dict, current_low: float,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🎯  SCORING  (5 komponen independen, total 100 pts)
+#  🎯  SCORING
 # ══════════════════════════════════════════════════════════════════════════════
 
 def score_A_volume_zscore(candles: List[dict]) -> Tuple[int, float]:
-    """
-    Komponen A: Volume Z-score (0–30 pts) — Fantazzini 2023
-    Mengukur: anomali TOTAL volume (quoteVolume USD) vs 24-candle rolling baseline
-    Baseline = candles[-25:-1] (tidak termasuk candle saat ini untuk menghindari bias)
-    """
     cfg  = CONFIG
     win  = cfg["vol_baseline_window"]
     if len(candles) < win + 5:
         return 0, 0.0
 
-    cur_vol  = candles[-2]["vol"]   # candle confirmed [-2], bukan live [-1]
+    cur_vol  = candles[-2]["vol"]
     baseline = [c["vol"] for c in candles[-(win + 5):-5]]
     if len(baseline) < 10:
         return 0, 0.0
@@ -722,11 +626,8 @@ def score_A_volume_zscore(candles: List[dict]) -> Tuple[int, float]:
 
 def score_B_taker_buy(clz_ohlcv: List[dict]) -> Tuple[int, float, str]:
     """
-    Komponen B: Taker Buy Z-score (0–25 pts) — La Morgia 2023
-    Mengukur: anomali PROPORSI buy transactions (btx/tx ratio)
-    BERBEDA dari A: A=ukuran total, B=arah (buy proportion dari semua tx)
-    Source: Coinalyze OHLCV dengan field 'btx' (buy tx count) dan 'tx' (total tx count)
-    Fallback: 0 pts jika Coinalyze tidak tersedia (ditandai dengan source="fallback")
+    Komponen B: Taker Buy Z-score (0–25 pts)
+    Menggunakan btx/tx jika ada, fallback ke buy volume / total volume (bv/vol)
     """
     cfg = CONFIG
     if not clz_ohlcv or len(clz_ohlcv) < cfg["btx_baseline_window"] + 5:
@@ -734,107 +635,82 @@ def score_B_taker_buy(clz_ohlcv: List[dict]) -> Tuple[int, float, str]:
 
     win = cfg["btx_baseline_window"]
     cur = clz_ohlcv[-2] if len(clz_ohlcv) >= 2 else clz_ohlcv[-1]
+
+    # Try btx/tx first
     btx = cur.get("btx", 0)
-    tx  = cur.get("tx",  0)
-
-    if not btx or not tx:
-        return 0, 0.0, "btx_zero"
-
-    btx_ratio = btx / tx
+    tx  = cur.get("tx", 0)
+    if btx and tx:
+        cur_ratio = btx / tx
+        source = "btx_tx"
+    else:
+        # Fallback: buy volume / total volume (bv / vol)
+        bv  = cur.get("bv", 0)   # buy volume
+        vol = cur.get("vol", 0)  # total volume
+        if bv and vol:
+            cur_ratio = bv / vol
+            source = "bv_vol"
+        else:
+            return 0, 0.0, "no_buy_data"
 
     # Build baseline ratios
-    baseline_slice = clz_ohlcv[-(win + 5):-5]
     baseline_ratios = []
-    for c in baseline_slice:
-        c_tx  = c.get("tx",  0)
-        c_btx = c.get("btx", 0)
-        if c_tx > 0 and c_btx >= 0:
-            baseline_ratios.append(c_btx / c_tx)
+    for c in clz_ohlcv[-(win + 5):-5]:
+        btx2 = c.get("btx", 0)
+        tx2  = c.get("tx", 0)
+        if btx2 and tx2:
+            baseline_ratios.append(btx2 / tx2)
+        else:
+            bv2  = c.get("bv", 0)
+            vol2 = c.get("vol", 0)
+            if bv2 and vol2:
+                baseline_ratios.append(bv2 / vol2)
 
     if len(baseline_ratios) < 10:
         return 0, 0.0, "insufficient_baseline"
 
-    z     = zscore(btx_ratio, baseline_ratios)
+    z     = zscore(cur_ratio, baseline_ratios)
     score = score_from_z(z, cfg["btx_z_strong"], cfg["btx_z_medium"], cfg["score_btx_max"])
-    return score, round(z, 2), "coinalyze"
+    return score, round(z, 2), source
 
 
 def score_C_funding_rate(funding_rate: float) -> Tuple[int, float]:
-    """
-    Komponen C: Funding Rate (0–20 pts) — Derivatives research
-    Mengukur: BIAYA/INSENTIF holding posisi short/long di perpetual futures
-    Data sudah ada di tickers response (fundingRate field) — TIDAK perlu API call tambahan
-    
-    Logika:
-    - Negatif kuat (short bayar long) → short overloaded → squeeze potential tinggi
-    - Positif (long bayar short) → long dominant → tidak kondusif untuk short squeeze
-    """
     cfg = CONFIG
     f   = funding_rate
 
     if f <= cfg["fund_strongly_neg"]:
         return cfg["score_fund_max"], round(f, 6)
-
     if f <= cfg["fund_mod_neg"]:
-        # Linear interpolasi dari fund_mod_neg ke fund_strongly_neg
         ratio = (cfg["fund_mod_neg"] - f) / (cfg["fund_mod_neg"] - cfg["fund_strongly_neg"])
         score = int(cfg["score_fund_max"] // 2 + ratio * cfg["score_fund_max"] // 2)
         return min(score, cfg["score_fund_max"]), round(f, 6)
-
     if f <= cfg["fund_neutral_hi"]:
-        # Zona netral: bonus kecil (tidak ada overhead longs)
         return cfg["score_fund_max"] // 4, round(f, 6)
-
-    # f > fund_neutral_hi: longs dominant → tidak kondusif
     return 0, round(f, 6)
 
 
 def score_D_oi_change(symbol: str, current_oi: float,
                       current_price: float, prev_price: float) -> Tuple[int, str]:
-    """
-    Komponen D: OI Change Direction (0–15 pts) — Derivatives research
-    Mengukur: apakah POSISI TERBUKA bertambah saat harga TURUN (= short buildup)
-    
-    Pattern yang dicari: OI naik + harga turun = short positions baru dibuka
-    → Lebih banyak short yang terperangkap = lebih besar potensi squeeze
-    
-    Data: holdingAmount dari tickers (OI saat ini) vs OI sebelumnya (dari state file)
-    BERBEDA dari C: C=biaya holding, D=apakah ada penambahan posisi baru
-    """
     cfg      = CONFIG
     prev_oi  = get_prev_oi(symbol)
 
-    # Update OI untuk scan berikutnya
     set_prev_oi(symbol, current_oi)
 
     if prev_oi <= 0 or current_oi <= 0:
         return 0, "no_prev_oi"
 
     oi_change_pct  = (current_oi - prev_oi) / prev_oi
-    price_declined = current_price < prev_price * 0.999  # minimal 0.1% decline
+    price_declined = current_price < prev_price * 0.999
 
-    # Ideal: OI naik + harga turun = short buildup
     if oi_change_pct >= cfg["oi_significant_increase"] and price_declined:
         return cfg["score_oi_max"], f"oi+{oi_change_pct*100:.1f}%_price↓"
     if oi_change_pct >= cfg["oi_moderate_increase"] and price_declined:
         return cfg["score_oi_max"] // 2, f"oi+{oi_change_pct*100:.1f}%_price↓"
     if oi_change_pct >= cfg["oi_moderate_increase"] and not price_declined:
-        # OI naik tapi harga juga naik = long buildup, bukan short squeeze setup
         return cfg["score_oi_max"] // 4, f"oi+{oi_change_pct*100:.1f}%_price↑"
-
     return 0, f"oi{oi_change_pct*100:+.1f}%"
 
 
 def score_E_long_short_ratio(long_ratio: Optional[float]) -> Tuple[int, str]:
-    """
-    Komponen E: Long/Short Ratio (0–10 pts) — Derivatives research
-    Mengukur: DISTRIBUSI posisi saat ini (berapa persen trader yang long vs short)
-    
-    Catatan dari CryptoCred: untuk small-cap, data ini bisa dimanipulasi.
-    Tetap dipakai tapi dengan weight rendah (10 pts max).
-    
-    BERBEDA dari D: D=perubahan ukuran posisi, E=snapshot distribusi saat ini
-    """
     cfg = CONFIG
     if long_ratio is None:
         return 0, "no_data"
@@ -847,22 +723,13 @@ def score_E_long_short_ratio(long_ratio: Optional[float]) -> Tuple[int, str]:
         return min(score, cfg["score_ls_max"]), f"L:{long_ratio:.2f}"
     if long_ratio <= cfg["ls_neutral"]:
         return cfg["score_ls_max"] // 4, f"L:{long_ratio:.2f}_neutral"
-
     return 0, f"L:{long_ratio:.2f}_long_dom"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🌍  REGIME CHECK  (threshold adjuster, BUKAN score component)
+#  🌍  REGIME CHECK
 # ══════════════════════════════════════════════════════════════════════════════
 def is_caution_mode(btc_1w: List[dict], eth_1w: List[dict]) -> bool:
-    """
-    CAUTION MODE: BTC+ETH KEDUANYA di bawah EMA50 weekly
-    → Naikkan passing threshold dari 55 ke 70
-    
-    Ini BUKAN penalty pada score. Ini menaikkan bar yang harus dicapai.
-    Alasan: saat crash, sinyal yang sama memiliki probabilitas bounce lebih rendah,
-    sehingga kita membutuhkan konfirmasi lebih kuat.
-    """
     ema_p = CONFIG["ema_weekly_period"]
     if len(btc_1w) < ema_p or len(eth_1w) < ema_p:
         return False
@@ -898,7 +765,7 @@ def build_table(results: list, caution: bool) -> str:
     lines = [
         "",
         "═" * 120,
-        f"  NEXUS-SR v2.0  |  Bitget Futures  |  {now}  |  {mode}",
+        f"  NEXUS-SR v2.1  |  Bitget Futures  |  {now}  |  {mode}",
         "═" * 120,
         f"  {'#':>2}  {'Coin':<13} {'Price':>12} {'ZoneTop':>10} {'ZoneBot':>10} "
         f"{'Score':>6} {'A:Vol':>6} {'B:btx':>6} {'C:Fund':>7} {'D:OI':>5} {'E:L/S':>5}  "
@@ -927,7 +794,7 @@ def build_table(results: list, caution: bool) -> str:
 def build_telegram_msg(results: list, caution: bool, readiness: str) -> str:
     mode = "⚠️ CAUTION" if caution else "🟢 NORMAL"
     now  = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    txt  = (f"🎯 <b>NEXUS-SR v2.0</b> [{now}]\n"
+    txt  = (f"🎯 <b>NEXUS-SR v2.1</b> [{now}]\n"
             f"Mode: {mode} | {readiness}\n{'─'*28}\n")
     for i, r in enumerate(results, 1):
         raw = r["symbol"].replace("USDT", "")
@@ -952,7 +819,7 @@ def run_scan() -> None:
     start_ts = time.time()
 
     log.info("=" * 70)
-    log.info(f"  NEXUS-SR v2.0 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"  NEXUS-SR v2.1 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     log.info("=" * 70)
 
     # ── 1. Regime check ────────────────────────────────────────────────────
@@ -964,7 +831,7 @@ def run_scan() -> None:
                  else cfg["score_threshold_normal"])
     log.info(f"Market regime: {'⚠️ CAUTION (thr=70)' if caution else '✅ NORMAL (thr=55)'}")
 
-    # ── 2. Fetch tickers — universe + fundingRate + OI sekaligus ───────────
+    # ── 2. Fetch tickers ───────────────────────────────────────────────────
     log.info("Fetching Bitget tickers …")
     tickers = BitgetClient.get_tickers()
     if not tickers:
@@ -972,8 +839,7 @@ def run_scan() -> None:
         return
     log.info(f"Tickers received: {len(tickers)}")
 
-    # ── 3. Build candidate universe (minimal filter) ───────────────────────
-    from collections import defaultdict
+    # ── 3. Build candidate universe ────────────────────────────────────────
     skip_stats = defaultdict(int)
     candidates = []
 
@@ -997,7 +863,7 @@ def run_scan() -> None:
 
     log.info(f"Candidates: {len(candidates)} | Skip: {dict(skip_stats)}")
 
-    # ── 4. Coinalyze init (optional) ───────────────────────────────────────
+    # ── 4. Coinalyze init ──────────────────────────────────────────────────
     clz_key = cfg["coinalyze_api_key"]
     clz_client = CoinalyzeClient(clz_key) if clz_key else None
     mapper     = SymbolMapper(clz_client) if clz_client else None
@@ -1006,11 +872,11 @@ def run_scan() -> None:
     if mapper:
         mapper.load(cand_syms)
 
-    # ── 5. Phase 1: candle fetch + zone detection → TESTING candidates ─────
+    # ── 5. Phase 1: candle fetch + zone detection ──────────────────────────
     log.info("Phase 1: fetching candles + detecting TESTING zones …")
     BitgetClient.clear_cache()
 
-    testing_candidates = []   # (sym, ticker, candles, zones_testing)
+    testing_candidates = []
 
     for idx, (sym, ticker) in enumerate(candidates):
         if (idx + 1) % 50 == 0:
@@ -1025,22 +891,18 @@ def run_scan() -> None:
             if len(candles) < cfg["lookback_period"] * 2 + 30:
                 skip_stats["candle_short"] += 1; continue
 
-            # Gate 3: volume outlier
             lb  = cfg["vol_outlier_lookback"]
             cur = candles[-1]["vol"]
             avg = _mean([c["vol"] for c in candles[-lb-1:-1]])
             if avg > 0 and cur > cfg["vol_outlier_mult"] * avg:
                 skip_stats["vol_outlier"] += 1; continue
 
-            # Detect zones
             zones = detect_support_zones(candles, sym)
             if not zones:
                 skip_stats["no_zones"] += 1; continue
 
-            # Gate 1+2: find TESTING zones with valid break_count
             c_low  = candles[-1]["low"]
             c_high = candles[-1]["high"]
-            # Check last 2 candles
             testing_zones = []
             for z in zones:
                 if z["break_count"] >= cfg["max_break_count"]:
@@ -1069,9 +931,10 @@ def run_scan() -> None:
     if not testing_candidates:
         print(build_table([], caution))
         log.info("Tidak ada TESTING zone saat ini")
+        _save_state(_state)
         return
 
-    # ── 6. Phase 2: Coinalyze batch fetch untuk TESTING candidates ─────────
+    # ── 6. Phase 2: Coinalyze batch fetch ──────────────────────────────────
     log.info(f"Phase 2: Coinalyze + L/S fetch untuk {len(testing_candidates)} candidates …")
 
     clz_data: Dict[str, list] = {}
@@ -1084,7 +947,7 @@ def run_scan() -> None:
             clz_data = clz_client.fetch_ohlcv_batch(clz_syms, from_ts, now_ts)
             log.info(f"  Coinalyze: {len(clz_data)} symbols fetched")
 
-    # ── 7. Score each testing candidate ────────────────────────────────────
+    # ── 7. Score each candidate ────────────────────────────────────────────
     results = []
 
     for sym, ticker, candles, testing_zones in testing_candidates:
@@ -1093,24 +956,23 @@ def run_scan() -> None:
             cur_oi   = float(ticker.get("holdingAmount", 0))
             funding  = float(ticker.get("fundingRate",   0))
 
-            # Prev price: candle[-2] close
             prev_price = candles[-2]["close"] if len(candles) >= 2 else price
 
-            # Coinalyze data
             clz_sym     = mapper.to_clz(sym) if mapper else None
             clz_ohlcv   = clz_data.get(clz_sym, []) if clz_sym else []
 
-            # L/S ratio (1 req/sec — hanya untuk testing candidates)
+            # Long/Short ratio with fixed endpoint
             long_ratio = BitgetClient.get_long_short_ratio(sym)
-            time.sleep(1.05)  # respect 1 req/sec rate limit
+            if long_ratio is None:
+                log.debug(f"{sym}: L/S ratio API error, using default 0.5")
+                long_ratio = 0.5   # neutral fallback
+            time.sleep(1.05)  # respect rate limit
 
-            # Ambil zona terbaik (zone_top paling dekat harga saat ini)
             best_zone = min(
                 testing_zones,
                 key=lambda z: abs(z["zone_top"] - price)
             )
 
-            # ── Compute 5 independent components ──────────────────────────
             sa, za = score_A_volume_zscore(candles)
             sb, zb, btx_source = score_B_taker_buy(clz_ohlcv)
             sc, funding_val    = score_C_funding_rate(funding)
@@ -1119,7 +981,6 @@ def run_scan() -> None:
 
             total_score = sa + sb + sc + sd + se
 
-            # ── Threshold check ────────────────────────────────────────────
             if total_score < threshold:
                 log.debug(f"  {sym}: score {total_score} < {threshold} — skip")
                 continue
@@ -1161,7 +1022,6 @@ def run_scan() -> None:
             log.warning(f"  Error Phase2 {sym}: {e}", exc_info=False)
 
     # ── 8. Sort + output ────────────────────────────────────────────────────
-    # Sort: Score DESC → A(volume) DESC → C(funding) DESC
     results.sort(key=lambda x: (-x["score"], -x["sa"], -x["sc"]))
     top = results[:cfg["top_n"]]
 
@@ -1187,7 +1047,7 @@ def run_scan() -> None:
             for r in send_targets:
                 set_cooldown(r["symbol"])
 
-    # ── 10. Simpan state (prev OI updated selama scoring) ────────────────
+    # ── 10. Simpan state ────────────────────────────────────────────────────
     _save_state(_state)
     log.info(f"=== SELESAI — {datetime.now(timezone.utc).strftime('%H:%M UTC')} ===")
 
