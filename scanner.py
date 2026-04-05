@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  NEXUS-SR v3.0 — Empirically Validated Support Zone Bounce Scanner           ║
+║  NEXUS-SR v3.1 — Empirically Validated Support Zone Bounce Scanner           ║
 ║                                                                              ║
 ║  BASIS DATA EMPIRIS:                                                         ║
 ║  · Dataset 1: 5.214 TESTING events dari 400+ coins (unbiased, crash market) ║
@@ -44,7 +44,7 @@
 ║                                                                              ║
 ║  REGIME FIX:                                                                 ║
 ║    Sebelumnya: EMA50 weekly dengan 60 candles → warmup bias → salah         ║
-║    Sekarang  : EMA200 daily dengan 210 candles → warmup stabil              ║
+║    Sekarang  : EMA200 daily dengan 300 candles → warmup stabil              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -75,7 +75,7 @@ _root.setLevel(logging.INFO)
 _ch   = logging.StreamHandler()
 _ch.setFormatter(_fmt)
 _root.addHandler(_ch)
-_fh   = _lh.RotatingFileHandler("/tmp/nexus_sr_v3.log", maxBytes=10 * 1024**2, backupCount=2)
+_fh   = _lh.RotatingFileHandler("/tmp/nexus_sr_v31.log", maxBytes=10 * 1024**2, backupCount=2)
 _fh.setFormatter(_fmt)
 _root.addHandler(_fh)
 log = logging.getLogger(__name__)
@@ -100,14 +100,29 @@ CONFIG: Dict = {
     "vol_len":                2,   # Pine: vol_len
     "box_width_multiplier": 1.0,   # Pine: box_withd
     "candle_limit_1h":      200,   # 1H candles (~8 hari)
-    "candle_limit_1d":      210,   # 1D candles untuk EMA200 regime check
+    "candle_limit_1d":      300,   # FIX: 300 bukan 210 — EMA200 butuh margin warmup
+                                   # 300 candles 1D = ~10 bulan data, EMA200 stabil
+                                   # di candle ke-201 dst (99 candles margin)
 
     # ── ZONE GATE ──────────────────────────────────────────────────────────
     "atr_period":           200,   # Pine: ta.atr(200)
     "max_break_count":        3,
     "vol_outlier_mult":     5.0,   # vol > 5× avg = outlier → skip
-    "vol_outlier_lookback":  20,
+    "vol_outlier_lookback":  20,   # FIX: dipakai di candles[-2], bukan candles[-1]
     "max_zone_width_pct":    8.0,  # zone width max 8% dari harga — filter low-liquidity
+
+    # ── PUMP REJECTION GATE ────────────────────────────────────────────────
+    # Dari audit: 4USDT lolos sebagai STRONG karena volume spike 10.66×
+    # padahal bear_streak=0 → ini bukan bounce setup, tapi pump event
+    # Pattern: vol_ratio tinggi + tidak ada tekanan jual = pump SEDANG terjadi
+    # Sinyal yang benar: ada tekanan jual (bear streak) LALU volume spike
+    "pump_reject_vol_ratio":  5.0,  # vol_ratio > ini = potensi pump
+    "pump_reject_bear_min":   1,    # bear_streak harus >= ini jika vol tinggi
+
+    # ── MINIMUM COMPONENT SCORE ────────────────────────────────────────────
+    # Volume harus mengkonfirmasi sinyal — tidak cukup hanya volatility
+    # Dari audit: 龙虾USDT lolos dengan B=8, tidak ada konfirmasi volume
+    "min_score_B":           10,    # require B ≥ 10 (dari 30 max)
 
     # ── VOLATILITY GATE (G4 + G5) — dari data empiris ──────────────────────
     # BBW threshold: top quintile dari large dataset = 0.078
@@ -172,7 +187,7 @@ CONFIG: Dict = {
     "top_n":                   10,
     "max_alerts":               5,
     "alert_cooldown_sec":    3600,
-    "cooldown_file": "/tmp/nexus_sr_v3_state.json",
+    "cooldown_file": "/tmp/nexus_sr_v31_state.json",
     "sleep_between_coins":    0.2,
 }
 
@@ -499,6 +514,159 @@ def compute_bear_streak(candles: List[dict]) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  📐  ENTRY / SL / TP  (per-coin, bukan fixed %)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def find_resistance_levels(candles: List[dict], entry: float,
+                           atr: float, lookback: int = 10) -> List[float]:
+    """
+    Cari pivot highs di atas entry price — kandidat TP resistance.
+    Lookback lebih kecil (10) dari zone detection (20) karena
+    resistance tidak harus sekuat support.
+
+    Juga tambahkan swing high dari 100 candle terakhir jika relevan.
+    """
+    highs = [c["high"] for c in candles]
+    n     = len(highs)
+    found: set = set()
+
+    for i in range(lookback, n - lookback):
+        val = highs[i]
+        if val < entry * 1.003:          # minimal 0.3% di atas entry
+            continue
+        if (val >= max(highs[max(0, i - lookback): i]) and
+                val >= max(highs[i + 1: i + lookback + 1])):
+            found.add(round(val, 10))
+
+    # Recent swing high (last 100 candles) sebagai kandidat tambahan
+    window = min(100, n)
+    recent_max = max(highs[-window:])
+    if recent_max > entry * 1.01:        # minimal 1% di atas entry
+        found.add(round(recent_max, 10))
+
+    # Hanya yang benar-benar di atas entry
+    return sorted(r for r in found if r > entry * 1.002)
+
+
+def compute_trade_setup(
+    candles:  List[dict],
+    zone:     dict,
+    atr_arr:  List[float],
+    bbw:      float,
+    price:    float,
+) -> dict:
+    """
+    Hitung Entry, SL, TP per coin berdasarkan kondisi masing-masing.
+
+    ── ENTRY ─────────────────────────────────────────────────────────────────
+    · LIMIT di zone_top  → jika harga masih di atas zone_top
+    · MARKET di harga saat ini → jika sudah di dalam zone
+
+    ── SL ────────────────────────────────────────────────────────────────────
+    · zone_bottom − 1.0×ATR
+    · Rasionale: zone_bottom = pivot_low − ATR_formasi.
+      Turun 1 ATR lagi dari sana = struktur zone benar-benar rusak.
+      Lebih akurat dari fixed % karena mempertimbangkan volatility coin.
+
+    ── TP (per-coin, 3 metode) ───────────────────────────────────────────────
+    Metode 1 — ATR Projection (basis volatility regime dari BBW):
+      BBW ≥ 0.150  → 5.0×ATR   (sangat volatile, potensi move besar)
+      BBW ≥ 0.078  → 3.5×ATR   (volatile)
+      BBW ≥ 0.050  → 2.5×ATR   (medium-high, minimum gate)
+
+    Metode 2 — Resistance Level (pivot high terdekat di atas entry):
+      Dipakai jika R:R ≥ 2.0 dari SL yang sudah dihitung.
+      Jika resistance terlalu dekat (R:R < 2.0), gunakan ATR projection.
+
+    Metode 3 — Minimum R:R floor = 2.0:1
+      TP tidak pernah kurang dari entry + 2.0 × risk.
+
+    Final TP = nilai tertinggi yang masih logis:
+      Jika resistance ada DAN lebih dekat dari ATR target DAN R:R ≥ 2.0:
+        → gunakan resistance (lebih konservatif, lebih mungkin tercapai)
+      Else:
+        → ATR projection (lebih agresif)
+      Kemudian enforce min R:R 2.0:1.
+    """
+    atr = atr_arr[-1] if atr_arr else price * 0.02
+
+    # ── ENTRY ──────────────────────────────────────────────────────────────
+    zone_top = zone["zone_top"]
+    zone_bot = zone["zone_bottom"]
+
+    if price <= zone_top:
+        entry      = price       # sudah dalam zone → masuk market
+        entry_type = "MARKET"
+    else:
+        entry      = zone_top    # di atas zone → limit di zone_top
+        entry_type = "LIMIT"
+
+    # ── SL ─────────────────────────────────────────────────────────────────
+    sl = zone_bot - atr * 1.0
+    sl = max(sl, price * 0.0001)   # tidak boleh negatif/nol
+
+    risk = entry - sl
+    if risk <= 0:
+        risk = atr                 # fallback: risk = 1 ATR
+
+    # ── RESISTANCE ─────────────────────────────────────────────────────────
+    res_levels = find_resistance_levels(candles, entry, atr)
+
+    # ── TP METODE 1: ATR Projection ─────────────────────────────────────────
+    if   bbw >= 0.150: atr_mult, regime_label = 5.0, "volatile"
+    elif bbw >= 0.078: atr_mult, regime_label = 3.5, "high"
+    else:              atr_mult, regime_label = 2.5, "medium"
+
+    tp_atr = entry + atr * atr_mult
+
+    # ── TP METODE 2: Resistance level ──────────────────────────────────────
+    tp_res    = None
+    res_label = ""
+    for res in res_levels:
+        rr_res = (res - entry) / risk
+        if rr_res >= 2.0:          # hanya pakai jika R:R ≥ 2.0
+            tp_res    = res
+            res_label = f"R:R{rr_res:.1f}"
+            break
+
+    # ── TP METODE 3: Floor R:R = 2.0 ───────────────────────────────────────
+    tp_floor = entry + risk * 2.0
+
+    # ── FINAL TP SELECTION ──────────────────────────────────────────────────
+    if tp_res is not None and tp_res < tp_atr:
+        # Resistance lebih dekat dari ATR target
+        # Gunakan resistance (lebih konservatif tapi lebih realistis)
+        tp        = tp_res
+        tp_method = f"Resist {res_label}"
+    else:
+        # Pakai ATR projection
+        tp        = tp_atr
+        extra     = f"+Res@{tp_res:.5f}" if tp_res else ""
+        tp_method = f"ATR×{atr_mult:.1f}({regime_label}){extra}"
+
+    # Pastikan minimum R:R = 2.0
+    if tp < tp_floor:
+        tp        = tp_floor
+        tp_method = "MinRR2.0"
+
+    # ── METRICS ────────────────────────────────────────────────────────────
+    risk_pct   = (entry - sl) / entry * 100    if entry > 0 else 0
+    reward_pct = (tp    - entry) / entry * 100 if entry > 0 else 0
+    rr         = reward_pct / risk_pct         if risk_pct > 0 else 0
+
+    return {
+        "entry":      round(entry, 8),
+        "entry_type": entry_type,
+        "sl":         round(sl, 8),
+        "tp":         round(tp, 8),
+        "tp_method":  tp_method,
+        "risk_pct":   round(risk_pct, 2),
+        "reward_pct": round(reward_pct, 2),
+        "rr":         round(rr, 2),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  🟩  ZONE DETECTION  (Pine Script identical)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -746,29 +914,33 @@ def build_table(results: list, caution: bool) -> str:
     now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         "",
-        "═" * 125,
-        f"  NEXUS-SR v3.0  |  Bitget Futures  |  {now}  |  {mode}",
-        "═" * 125,
-        f"  {'#':>2}  {'Coin':<13} {'Price':>12} {'ZoneTop':>10} {'ZoneBot':>10} "
-        f"{'Score':>6}  {'A:Vlt':>5} {'B:Vol':>5} {'C:Mom':>5}  "
-        f"{'BBW':>6} {'ATR%':>6} {'VComp':>6} {'VZ4h':>5} {'Bear':>4}  Strength",
-        "─" * 125,
+        "═" * 150,
+        f"  NEXUS-SR v3.1  |  Bitget Futures  |  {now}  |  {mode}",
+        "═" * 150,
+        f"  {'#':>2}  {'Coin':<13} {'Price':>12}  "
+        f"{'Score':>5}  {'A':>3} {'B':>3} {'C':>3}  "
+        f"{'BBW':>6} {'ATR%':>5}  "
+        f"{'Entry':>12} {'Type':>5}  "
+        f"{'SL':>12} {'Risk%':>5}  "
+        f"{'TP':>12} {'Rwd%':>5}  {'R:R':>4}  TP-Method",
+        "─" * 150,
     ]
     for i, r in enumerate(results, 1):
         raw = r["symbol"].replace("USDT", "")
         lines.append(
-            f"  {i:>2}  {raw:<13} {r['price']:>12.6f} {r['zone_top']:>10.5f} "
-            f"{r['zone_bot']:>10.5f} {r['score']:>6.1f}  "
-            f"{r['sa']:>5} {r['sb']:>5} {r['sc']:>5}  "
-            f"{r['bbw']:>6.4f} {r['atr_pct']:>5.2f}% "
-            f"{r['vol_comp']:>5.2f}x {r['vol_z4h']:>5.2f} "
-            f"{r['bear_streak']:>4}  {r['strength']}"
+            f"  {i:>2}  {raw:<13} {r['price']:>12.6f}  "
+            f"{r['score']:>5.1f}  {r['sa']:>3} {r['sb']:>3} {r['sc']:>3}  "
+            f"{r['bbw']:>6.4f} {r['atr_pct']:>4.1f}%  "
+            f"{r['entry']:>12.6f} {r['entry_type']:>5}  "
+            f"{r['sl']:>12.6f} {r['risk_pct']:>4.1f}%  "
+            f"{r['tp']:>12.6f} {r['reward_pct']:>4.1f}%  {r['rr']:>4.1f}  "
+            f"{r['tp_method']:<28}  {r['strength']}"
         )
     lines += [
-        "─" * 125,
+        "─" * 150,
         "  A=Volatility(0-50) B=Volume(0-30) C=Momentum(0-20) | "
-        "BBW≥0.050+ATR≥1.20% gate required",
-        "═" * 125,
+        "Pump gate: vol>5x+bear=0 reject | MinB=10",
+        "═" * 150,
     ]
     return "\n".join(lines)
 
@@ -804,24 +976,30 @@ def build_telegram_msg(results: list, caution: bool,
     mode = "⚠️ CAUTION" if caution else "🟢 NORMAL"
     now  = datetime.now(timezone.utc).strftime("%H:%M UTC")
     txt  = (
-        f"🎯 <b>NEXUS-SR v3.0</b> [{now}]\n"
+        f"🎯 <b>NEXUS-SR v3.1</b> [{now}]\n"
         f"Mode: {mode} | {len(results)}/{n_tested} signals | Universe: {n_candidates}\n"
         f"{'─'*28}\n"
     )
     for i, r in enumerate(results, 1):
         raw = r["symbol"].replace("USDT", "")
+        # Emoji kekuatan R:R
+        rr_emoji = "🔥" if r["rr"] >= 3 else "✅" if r["rr"] >= 2 else "⚠️"
         txt += (
-            f"{i}. <b>{raw}</b>\n"
-            f"   Price: <code>{r['price']:.6f}</code> | "
-            f"Zone: <code>{r['zone_bot']:.5f}–{r['zone_top']:.5f}</code>\n"
-            f"   🎯 Target +15%: <code>{r['target']:.5f}</code>\n"
-            f"   Score: <b>{r['score']:.0f}</b>/100 ({r['strength']}) | "
-            f"BBW:{r['bbw']:.4f} ATR:{r['atr_pct']:.2f}% "
-            f"VC:{r['vol_comp']:.2f}x Bear:{r['bear_streak']}\n"
-            f"   A(Vlt):{r['sa']} B(Vol):{r['sb']} C(Mom):{r['sc']}\n\n"
+            f"{i}. <b>{raw}</b>  [{r['strength']}]  Score:<b>{r['score']:.0f}</b>\n"
+            f"   Zone: <code>{r['zone_bot']:.5f} – {r['zone_top']:.5f}</code>\n"
+            f"   📥 Entry ({r['entry_type']}): <code>{r['entry']:.6f}</code>\n"
+            f"   🛑 SL: <code>{r['sl']:.6f}</code> "
+            f"(<b>-{r['risk_pct']:.1f}%</b>)\n"
+            f"   🎯 TP: <code>{r['tp']:.6f}</code> "
+            f"(<b>+{r['reward_pct']:.1f}%</b>) "
+            f"{rr_emoji} R:R <b>{r['rr']:.2f}</b>\n"
+            f"   📐 <i>{r['tp_method']}</i>\n"
+            f"   BBW:{r['bbw']:.4f} ATR:{r['atr_pct']:.1f}% "
+            f"VC:{r['vol_comp']:.2f}x Bear:{r['bear_streak']}\n\n"
         )
     txt += (
-        "📊 <i>Basis data: 5.214 events empiris\n"
+        "📊 <i>Basis: 5.214 events empiris | "
+        "TP per-coin: ATR×regime atau resistance\n"
         "⚠️ Paper mode — verifikasi sebelum live trade.</i>"
     )
     return txt
@@ -835,7 +1013,7 @@ def run_scan() -> None:
     start_ts = time.time()
 
     log.info("=" * 70)
-    log.info(f"  NEXUS-SR v3.0 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"  NEXUS-SR v3.1 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     log.info("=" * 70)
 
     # ── 1. Regime check (FIX: EMA200 daily) ───────────────────────────────
@@ -902,9 +1080,11 @@ def run_scan() -> None:
                 skip_stats["candle_short"] += 1; continue
 
             # ── Zone Gate G3: volume outlier ──────────────────────────────
+            # FIX: gunakan candles[-2] (confirmed bar), bukan candles[-1] (live)
+            # Candle live volume bisa undercount jika jam baru dimulai
             lb  = cfg["vol_outlier_lookback"]
-            cur = candles[-1]["vol"]
-            avg = _mean([c["vol"] for c in candles[-lb-1:-1]])
+            cur = candles[-2]["vol"]                           # ← FIX: [-2] bukan [-1]
+            avg = _mean([c["vol"] for c in candles[-lb-2:-2]]) # ← baseline sebelum bar itu
             if avg > 0 and cur > cfg["vol_outlier_mult"] * avg:
                 skip_stats["vol_outlier"] += 1; continue
 
@@ -1027,6 +1207,30 @@ def run_scan() -> None:
 
             total = sa + sb + sc
 
+            # ── Pump rejection gate ───────────────────────────────────────
+            # Pattern: volume spike BESAR + tidak ada bear streak = pump event
+            # Bounce legitimate: ada tekanan jual (bear streak) LALU volume masuk
+            # Referensi audit: 4USDT vol_ratio=10.66x, bear=0 → pump, bukan bounce
+            is_pump = (vol_ratio > cfg["pump_reject_vol_ratio"] and
+                       bear_streak < cfg["pump_reject_bear_min"])
+            if is_pump:
+                log.info(
+                    f"  {sym}: PUMP REJECTED — "
+                    f"vol_ratio={vol_ratio:.2f}x bear={bear_streak} "
+                    f"(pattern: spike without prior selling = pump event)"
+                )
+                continue
+
+            # ── Minimum B score gate ──────────────────────────────────────
+            # Volume harus mengkonfirmasi sinyal — volatility saja tidak cukup
+            # Referensi audit: 龙虾USDT lolos dengan B=8, hanya dari volatility
+            if sb < cfg["min_score_B"]:
+                log.info(
+                    f"  {sym}: B={sb} < min {cfg['min_score_B']} — "
+                    f"no volume confirmation, skip"
+                )
+                continue
+
             log.info(
                 f"  {sym}: score={total} (thr={threshold}) | "
                 f"A={sa}(BBW={bbw:.4f},ATR={atr_pct:.2f}%) "
@@ -1043,15 +1247,41 @@ def run_scan() -> None:
                         "MODERATE" if total >= cfg["score_threshold_normal"] else
                         "WEAK")
 
+            # ── Trade setup (Entry / SL / TP per-coin) ───────────────────
+            trade = compute_trade_setup(
+                candles  = candles,
+                zone     = best_zone,
+                atr_arr  = d["atr_arr"],
+                bbw      = bbw,
+                price    = price,
+            )
+
+            log.info(
+                f"    ✅ {sym} lolos! strength={strength} | "
+                f"Entry={trade['entry_type']}@{trade['entry']:.5f} "
+                f"SL={trade['sl']:.5f}(-{trade['risk_pct']:.1f}%) "
+                f"TP={trade['tp']:.5f}(+{trade['reward_pct']:.1f}%) "
+                f"R:R={trade['rr']:.2f} [{trade['tp_method']}]"
+            )
+
             results.append({
                 "symbol":       sym,
                 "price":        round(price, 8),
                 "zone_top":     round(best_zone["zone_top"], 8),
                 "zone_bot":     round(best_zone["zone_bottom"], 8),
-                "target":       round(price * 1.15, 8),
-                "stop":         round(best_zone["zone_bottom"] * 0.99, 8),
+                # Trade setup
+                "entry":        trade["entry"],
+                "entry_type":   trade["entry_type"],
+                "sl":           trade["sl"],
+                "tp":           trade["tp"],
+                "tp_method":    trade["tp_method"],
+                "risk_pct":     trade["risk_pct"],
+                "reward_pct":   trade["reward_pct"],
+                "rr":           trade["rr"],
+                # Score
                 "score":        round(total, 1),
                 "sa":           sa, "sb": sb, "sc": sc,
+                # Indicators
                 "bbw":          round(bbw, 4),
                 "atr_pct":      round(atr_pct, 2),
                 "vol_comp":     round(vol_comp, 3),
@@ -1065,7 +1295,6 @@ def run_scan() -> None:
                 "caution":      caution,
                 "vol_24h_m":    round(d["vol_24h"] / 1_000_000, 1),
             })
-            log.info(f"    ✅ {sym} lolos! strength={strength}")
 
         except Exception as e:
             log.warning(f"  Error Phase2 {sym}: {e}")
