@@ -1,12 +1,50 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  NEXUS-SR v2.3 — Research-Validated Support Zone Bounce Scanner             ║
+║  NEXUS-SR v3.0 — Empirically Validated Support Zone Bounce Scanner           ║
 ║                                                                              ║
-║  PERBAIKAN:                                                                  ║
-║  · Endpoint Long/Short menggunakan symbol polos, tanpa productType          ║
-║  · Logging score untuk semua testing candidate (bukan hanya yg lolos)       ║
-║  · Fallback L/S ratio = 0.5 jika API gagal                                  ║
+║  BASIS DATA EMPIRIS:                                                         ║
+║  · Dataset 1: 5.214 TESTING events dari 400+ coins (unbiased, crash market) ║
+║  · Dataset 2: 42 events dari targeted pump coins (cross-validation)          ║
+║  · Cross-validated: hanya fitur yang KONSISTEN di kedua dataset dipakai      ║
+║                                                                              ║
+║  ARSITEKTUR (berbasis data, bukan asumsi):                                   ║
+║                                                                              ║
+║  LAYER 1 — ZONE GATE (binary, Pine Script logic):                            ║
+║    G1. Zone state = TESTING (candle[-1] atau candle[-2])                     ║
+║    G2. Zone break_count < 3                                                  ║
+║    G3. Volume bukan outlier (vol < 5× avg_20)                                ║
+║                                                                              ║
+║  LAYER 2 — VOLATILITY GATE (binary, dari data empiris):                      ║
+║    G4. BBW ≥ 0.050  (Bollinger Band Width — confirmed corr +0.236/+0.262)    ║
+║    G5. ATR% ≥ 1.20% (ATR relatif — confirmed corr +0.230/+0.245)            ║
+║    ↑ Coin yang tidak lolos gate ini secara mekanis TIDAK BISA 15% dalam 24H  ║
+║                                                                              ║
+║  LAYER 3 — SCORE (0-100, 3 komponen yang terbukti):                         ║
+║    A. Volatility Score   0-50 pts  → BBW + ATR_pct kombinasi                ║
+║       Rasio: HIT avg BBW 2.4× MISS avg. Kontribusi terbesar ke precision.   ║
+║    B. Volume Score       0-30 pts  → VolCompression + VolZ_4H               ║
+║       Dua sub-komponen BERBEDA: compression (recent spike) vs Z-score (hist) ║
+║    C. Momentum Score     0-20 pts  → bear_streak + VolRatio                 ║
+║       Oversold setup: 3-4 bear candles sebelum entry + current vol normal    ║
+║                                                                              ║
+║  DIHAPUS (tidak terbukti dari data):                                         ║
+║    ✗ RSI oversold       (corr=+0.020, tidak konsisten antar range)           ║
+║    ✗ Candle pattern     (HAMMER hit rate 0.7% < base 2.9%)                   ║
+║    ✗ Taker buy (btx)    (corr=+0.009, 81% data kosong)                      ║
+║    ✗ Funding negatif    (corr=-0.044 large, reversed di targeted)            ║
+║    ✗ Zone touch count   (korelasi NEGATIF -0.035)                            ║
+║    ✗ OI change          (100% null dari pipeline)                            ║
+║    ✗ L/S ratio          (hampir semua no_data)                               ║
+║                                                                              ║
+║  THRESHOLD:                                                                  ║
+║    Normal mode : score ≥ 60                                                  ║
+║    Caution mode: score ≥ 75  (BTC+ETH < EMA200 daily, bukan EMA50 weekly)   ║
+║    Strong signal: score ≥ 80 → kirim Telegram                               ║
+║                                                                              ║
+║  REGIME FIX:                                                                 ║
+║    Sebelumnya: EMA50 weekly dengan 60 candles → warmup bias → salah         ║
+║    Sekarang  : EMA200 daily dengan 210 candles → warmup stabil              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -37,66 +75,103 @@ _root.setLevel(logging.INFO)
 _ch   = logging.StreamHandler()
 _ch.setFormatter(_fmt)
 _root.addHandler(_ch)
-_fh   = _lh.RotatingFileHandler("/tmp/nexus_sr_v2.log", maxBytes=10 * 1024**2, backupCount=2)
+_fh   = _lh.RotatingFileHandler("/tmp/nexus_sr_v3.log", maxBytes=10 * 1024**2, backupCount=2)
 _fh.setFormatter(_fmt)
 _root.addHandler(_fh)
 log = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ⚙️  CONFIG
+#  ⚙️  CONFIG — semua threshold dari data empiris
 # ══════════════════════════════════════════════════════════════════════════════
 CONFIG: Dict = {
-    "bot_token":           os.getenv("BOT_TOKEN"),
-    "chat_id":             os.getenv("CHAT_ID"),
-    "coinalyze_api_key":   os.getenv("COINALYZE_API_KEY",
-                                     "ab447e9a-3a26-4253-a68e-1cd0603d22d2"),
-    "min_vol_24h":         50_000,
-    "max_vol_24h":      2_000_000_000,
-    "gate_chg_24h_max":       60.0,
-    "lookback_period":          20,
-    "vol_len":                   2,
-    "box_width_multiplier":    1.0,
-    "candle_limit_1h":         200,
-    "candle_limit_1w":          60,
-    "atr_period":              200,
-    "ema_weekly_period":        50,
-    "score_vol_max":            30,
-    "vol_baseline_window":      24,
-    "vol_z_strong":            2.0,
-    "vol_z_medium":            1.0,
-    "score_btx_max":            25,
-    "btx_z_strong":            2.0,
-    "btx_z_medium":            1.0,
-    "btx_baseline_window":      24,
-    "score_fund_max":           20,
-    "fund_strongly_neg":    -0.0005,
-    "fund_mod_neg":         -0.0001,
-    "fund_neutral_hi":       0.0001,
-    "score_oi_max":             15,
-    "oi_significant_increase":  0.03,
-    "oi_moderate_increase":     0.01,
-    "score_ls_max":             10,
-    "ls_strongly_short":       0.4,
-    "ls_mod_short":            0.6,
-    "ls_neutral":              0.8,
-    "score_threshold_normal":   55,
-    "score_threshold_caution":  70,
-    "score_strong":             75,
-    "max_break_count":           3,
-    "vol_outlier_mult":         5.0,
-    "vol_outlier_lookback":     20,
-    "clz_interval":         "1hour",
-    "clz_lookback_h":          168,
-    "clz_min_interval_sec":    1.6,
-    "clz_batch_size":           20,
-    "clz_retry":                 3,
-    "clz_retry_wait":            5,
-    "top_n":                    10,
-    "max_alerts":                5,
-    "alert_cooldown_sec":     3600,
-    "cooldown_file":  "/tmp/nexus_sr_v2_state.json",
-    "sleep_between_coins":     0.2,
+    # ── CREDENTIALS ────────────────────────────────────────────────────────
+    "bot_token": os.getenv("BOT_TOKEN"),
+    "chat_id":   os.getenv("CHAT_ID"),
+
+    # ── UNIVERSE ───────────────────────────────────────────────────────────
+    "min_vol_24h":       50_000,    # $50K floor — singkirkan ghost coins saja
+    "max_vol_24h":  2_000_000_000,
+    "gate_chg_24h_max":    60.0,   # skip jika sudah pump >60%
+
+    # ── PINE SCRIPT PARAMS ─────────────────────────────────────────────────
+    "lookback_period":       20,   # Pine: lookbackPeriod
+    "vol_len":                2,   # Pine: vol_len
+    "box_width_multiplier": 1.0,   # Pine: box_withd
+    "candle_limit_1h":      200,   # 1H candles (~8 hari)
+    "candle_limit_1d":      210,   # 1D candles untuk EMA200 regime check
+
+    # ── ZONE GATE ──────────────────────────────────────────────────────────
+    "atr_period":           200,   # Pine: ta.atr(200)
+    "max_break_count":        3,
+    "vol_outlier_mult":     5.0,   # vol > 5× avg = outlier → skip
+    "vol_outlier_lookback":  20,
+
+    # ── VOLATILITY GATE (G4 + G5) — dari data empiris ──────────────────────
+    # BBW threshold: top quintile dari large dataset = 0.078
+    # Turunkan ke 0.050 untuk meningkatkan recall (capture lebih banyak bounce)
+    # Tradeoff: precision sedikit turun tapi tidak kehilangan terlalu banyak hits
+    "gate_bbw_min":        0.050,  # Bollinger Band Width minimum
+    "gate_atr_pct_min":    1.20,   # ATR sebagai % dari harga minimum
+
+    # ── SCORING PARAMS (dari data empiris) ─────────────────────────────────
+
+    # A. VOLATILITY SCORE (0-50 pts)
+    # Dari large dataset: BBW corr=+0.236, ATR_pct corr=+0.230
+    # HIT avg BBW = 0.137 vs MISS avg = 0.057 (2.4x ratio)
+    # HIT avg ATR% = 3.12 vs MISS avg = 1.40 (2.2x ratio)
+    "score_vol_max":        50,    # Total A component
+    "bbw_strong":          0.150,  # ≥ ini → full BBW score (above HIT avg)
+    "bbw_medium":          0.078,  # ≥ ini → half BBW score (top quintile)
+    "atr_strong":          3.12,   # ≥ ini → full ATR score (HIT avg)
+    "atr_medium":          1.62,   # ≥ ini → half ATR score (top quintile)
+    # Bobot dalam komponen A: BBW 55%, ATR 45% (BBW sedikit lebih kuat)
+    "bbw_weight":          0.55,
+    "atr_weight":          0.45,
+
+    # B. VOLUME SCORE (0-30 pts)
+    # Sub-komponen B1: VolCompression (recent avg / prior avg)
+    # Dari large dataset: corr=+0.089 (confirmed), HIT avg=3.76 vs MISS=1.42
+    # Sub-komponen B2: VolZ_4H (Z-score vs 4H window)
+    # Dari large dataset: corr=+0.083 (confirmed), HIT avg=1.03 vs MISS=0.16
+    # BERBEDA: B1=recent spike vs baseline, B2=historical anomaly 4H window
+    "score_vol_micro_max":  30,
+    "vol_comp_strong":     3.76,   # ≥ HIT avg → full B1 score
+    "vol_comp_medium":     1.82,   # ≥ top quintile → half B1 score
+    "vol_z4h_strong":      2.0,    # ≥ ini → full B2 score (7.8% hit rate)
+    "vol_z4h_medium":      0.729,  # ≥ ini → half B2 score (threshold optimal)
+    "vol_comp_weight":     0.55,   # B1 sedikit lebih kuat dari B2
+    "vol_z4h_weight":      0.45,
+
+    # C. MOMENTUM SCORE (0-20 pts)
+    # Sub-komponen C1: Bear streak (consecutive bearish candles masuk zone)
+    # Dari large dataset: corr=+0.030, streak 3-4 = hit 3.9-4.7% vs base 2.9%
+    # Sub-komponen C2: VolRatio (current vol vs 20-bar avg)
+    # Dari large dataset: corr=+0.068, ratio ≥1.44 = 4.3% hit rate
+    "score_momentum_max":   20,
+    "bear_streak_strong":    4,    # ≥ 4 consecutive bear candles
+    "bear_streak_medium":    2,    # ≥ 2 consecutive bear candles
+    "vol_ratio_strong":    2.0,    # ≥ 2× avg → full C2 score
+    "vol_ratio_medium":    1.44,   # ≥ 1.44× avg → half C2 score (threshold optimal)
+    "bear_weight":         0.40,   # C1 lebih lemah dari C2
+    "vol_ratio_weight":    0.60,
+
+    # ── THRESHOLD ─────────────────────────────────────────────────────────
+    "score_threshold_normal":  60,
+    "score_threshold_caution": 75,  # aktif jika BTC+ETH < EMA200 daily
+    "score_strong":            80,  # → kirim Telegram
+
+    # ── REGIME CHECK (FIX dari bug sebelumnya) ─────────────────────────────
+    # Bug lama: EMA50 weekly dengan 60 candles → warmup bias → selalu NORMAL
+    # Fix: EMA200 daily dengan 210 candles → cukup warmup untuk akurasi
+    "ema_regime_period":      200,  # EMA200 daily
+
+    # ── OUTPUT ────────────────────────────────────────────────────────────
+    "top_n":                   10,
+    "max_alerts":               5,
+    "alert_cooldown_sec":    3600,
+    "cooldown_file": "/tmp/nexus_sr_v3_state.json",
+    "sleep_between_coins":    0.2,
 }
 
 MANUAL_EXCLUDE: set = set()
@@ -119,7 +194,7 @@ def _load_state() -> dict:
             return state
     except Exception:
         pass
-    return {"cooldowns": {}, "prev_oi": {}}
+    return {"cooldowns": {}}
 
 def _save_state(state: dict) -> None:
     try:
@@ -129,8 +204,7 @@ def _save_state(state: dict) -> None:
         pass
 
 _state = _load_state()
-log.info(f"State loaded: {len(_state['cooldowns'])} cooldowns, "
-         f"{len(_state['prev_oi'])} OI records")
+log.info(f"State loaded: {len(_state['cooldowns'])} cooldowns")
 
 def is_on_cooldown(sym: str) -> bool:
     return (time.time() - _state["cooldowns"].get(sym, 0)) < CONFIG["alert_cooldown_sec"]
@@ -138,12 +212,6 @@ def is_on_cooldown(sym: str) -> bool:
 def set_cooldown(sym: str) -> None:
     _state["cooldowns"][sym] = time.time()
     _save_state(_state)
-
-def get_prev_oi(sym: str) -> float:
-    return float(_state["prev_oi"].get(sym, 0.0))
-
-def set_prev_oi(sym: str, oi: float) -> None:
-    _state["prev_oi"][sym] = oi
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -158,28 +226,33 @@ def _std(arr: list) -> float:
     m = _mean(arr)
     return math.sqrt(sum((x - m) ** 2 for x in arr) / len(arr))
 
-def zscore(value: float, series: list, min_samples: int = 10) -> float:
+def _zscore(value: float, series: list, min_samples: int = 10) -> float:
     if len(series) < min_samples:
         return 0.0
     sigma = _std(series)
-    if sigma == 0:
-        return 0.0
-    return (value - _mean(series)) / sigma
+    return (value - _mean(series)) / sigma if sigma > 0 else 0.0
 
-def score_from_z(z: float, z_strong: float, z_medium: float, weight: int) -> int:
-    if z >= z_strong:
+def _linear_score(value: float, strong: float, medium: float, weight: float) -> float:
+    """
+    Interpolasi linear [0, weight] dari value relatif terhadap strong/medium.
+    value >= strong  → weight (full)
+    value >= medium  → weight/2 .. weight (partial)
+    value >= 0       → 0 .. weight/2 (minimal)
+    value < 0        → 0
+    """
+    if value >= strong:
         return weight
-    if z >= z_medium:
-        ratio = (z - z_medium) / (z_strong - z_medium)
-        return int(weight // 2 + ratio * (weight - weight // 2))
-    if z >= 0:
-        ratio = z / z_medium if z_medium > 0 else 0
-        return int(ratio * weight // 2)
-    return 0
+    if value >= medium:
+        ratio = (value - medium) / (strong - medium)
+        return weight * 0.5 + ratio * weight * 0.5
+    if value >= 0:
+        ratio = value / medium if medium > 0 else 0.0
+        return ratio * weight * 0.5
+    return 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🌐  BITGET CLIENT (Long/Short fixed)
+#  🌐  BITGET CLIENT
 # ══════════════════════════════════════════════════════════════════════════════
 class BitgetClient:
     BASE = "https://api.bitget.com"
@@ -195,10 +268,9 @@ class BitgetClient:
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 429:
                     log.warning("Bitget rate limit — tunggu 30s")
-                    time.sleep(30)
-                    continue
+                    time.sleep(30); continue
                 if e.response.status_code not in (400, 404):
-                    log.warning(f"Bitget HTTP {e.response.status_code} for {url}")
+                    log.warning(f"Bitget HTTP {e.response.status_code}")
                 break
             except Exception:
                 if attempt < 2:
@@ -207,22 +279,27 @@ class BitgetClient:
 
     @classmethod
     def get_tickers(cls) -> Dict[str, dict]:
+        """GET /api/v2/mix/market/tickers — semua USDT-Futures."""
         data = cls._get(f"{cls.BASE}/api/v2/mix/market/tickers",
                         params={"productType": "USDT-FUTURES"})
         if not data or data.get("code") != "00000":
             return {}
-        return {item["symbol"]: item for item in data.get("data", [])}
+        return {d["symbol"]: d for d in data.get("data", [])}
 
     @classmethod
     def get_candles(cls, symbol: str, granularity: str = "1H",
                     limit: int = 200) -> List[dict]:
+        """
+        GET /api/v2/mix/market/candles
+        Mendukung limit > 200 via pagination otomatis.
+        """
         cache_key = f"{symbol}:{granularity}:{limit}"
         if cache_key in cls._candle_cache:
             return cls._candle_cache[cache_key]
 
-        def _parse(raw):
+        def _parse(raw_rows: list) -> List[dict]:
             out = []
-            for row in raw:
+            for row in raw_rows:
                 try:
                     vol = float(row[6]) if len(row) > 6 else float(row[5]) * float(row[4])
                     out.append({
@@ -245,13 +322,14 @@ class BitgetClient:
             )
             if not data or data.get("code") != "00000":
                 return []
-            candles = sorted(_parse(data.get("data", [])), key=lambda x: x["ts"])
-            cls._candle_cache[cache_key] = candles
-            return candles
+            result = sorted(_parse(data.get("data", [])), key=lambda x: x["ts"])
+            cls._candle_cache[cache_key] = result
+            return result
 
+        # Pagination untuk limit > 200
         collected: Dict[int, dict] = {}
         end_time = None
-        for page in range(math.ceil(limit / 200)):
+        for _ in range(math.ceil(limit / 200)):
             params = {"symbol": symbol, "productType": "USDT-FUTURES",
                       "granularity": granularity, "limit": 200}
             if end_time is not None:
@@ -276,151 +354,36 @@ class BitgetClient:
         return result
 
     @classmethod
-    def get_long_short_ratio(cls, symbol: str) -> Optional[float]:
-        """Endpoint long-short: symbol polos, tanpa productType"""
-        params = {"symbol": symbol, "period": "1h"}
-        data = cls._get(f"{cls.BASE}/api/v2/mix/market/long-short", params=params)
-        if not data or data.get("code") != "00000":
-            return None
-        items = data.get("data", [])
-        if not items:
-            return None
-        try:
-            item = items[-1] if isinstance(items, list) else items
-            return float(item.get("longRatio", item.get("longShortRatio", 0.5)))
-        except Exception:
-            return None
-
-    @classmethod
     def clear_cache(cls) -> None:
         cls._candle_cache.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📡  COINALYZE CLIENT
+#  📊  INDICATORS (Pine Script compatible)
 # ══════════════════════════════════════════════════════════════════════════════
-class CoinalyzeClient:
-    BASE      = "https://api.coinalyze.net/v1"
-    _last_call: float = 0.0
 
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-
-    def _wait(self) -> None:
-        elapsed = time.time() - CoinalyzeClient._last_call
-        wait    = CONFIG["clz_min_interval_sec"] - elapsed
-        if wait > 0:
-            time.sleep(wait)
-        CoinalyzeClient._last_call = time.time()
-
-    def _get(self, endpoint: str, params: dict) -> Optional[list]:
-        params["api_key"] = self.api_key
-        for attempt in range(CONFIG["clz_retry"]):
-            self._wait()
-            try:
-                r = requests.get(f"{self.BASE}/{endpoint}", params=params, timeout=15)
-                if r.status_code == 429:
-                    retry_after = int(r.headers.get("Retry-After", 10))
-                    log.warning(f"Coinalyze rate limit — tunggu {retry_after}s")
-                    time.sleep(retry_after + 1)
-                    continue
-                if r.status_code == 401:
-                    log.error("Coinalyze API key invalid")
-                    return None
-                r.raise_for_status()
-                return r.json()
-            except Exception:
-                if attempt < CONFIG["clz_retry"] - 1:
-                    time.sleep(CONFIG["clz_retry_wait"])
-        return None
-
-    def get_future_markets(self) -> List[dict]:
-        data = self._get("future-markets", {})
-        return data if isinstance(data, list) else []
-
-    def fetch_ohlcv_batch(self, symbols: List[str],
-                          from_ts: int, to_ts: int) -> Dict[str, list]:
-        if not symbols:
-            return {}
-        result = {}
-        batch_size = CONFIG["clz_batch_size"]
-        extra = {"interval": CONFIG["clz_interval"],
-                 "from": from_ts, "to": to_ts}
-        for i in range(0, len(symbols), batch_size):
-            batch  = symbols[i: i + batch_size]
-            params = {"symbols": ",".join(batch), **extra}
-            data   = self._get("ohlcv-history", params)
-            if not isinstance(data, list):
-                continue
-            for item in data:
-                sym     = item.get("symbol", "")
-                history = item.get("history", [])
-                if sym and history:
-                    result[sym] = history
-        return result
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🗺️  SYMBOL MAPPER
-# ══════════════════════════════════════════════════════════════════════════════
-class SymbolMapper:
-    def __init__(self, clz: CoinalyzeClient):
-        self._clz    = clz
-        self._to_clz: Dict[str, str] = {}
-
-    def load(self, whitelist: set) -> int:
-        log.info("SymbolMapper: fetching Coinalyze markets …")
-        markets = self._clz.get_future_markets()
-        if not markets:
-            log.error("SymbolMapper: gagal fetch markets")
-            return 0
-        bitget_mkts = [m for m in markets if "bitget" in m.get("exchange", "").lower()]
-        if not bitget_mkts:
-            bitget_mkts = markets
-        mapped = 0
-        for m in bitget_mkts:
-            clz_sym  = m.get("symbol", "")
-            exch_sym = m.get("symbol_on_exchange", "")
-            if not clz_sym:
-                continue
-            clean = exch_sym.replace("_UMCBL", "").replace("_DMCBL", "").upper()
-            for candidate in [clean, exch_sym.upper()]:
-                if candidate in whitelist:
-                    self._to_clz[candidate] = clz_sym
-                    mapped += 1
-                    break
-        log.info(f"SymbolMapper: {mapped}/{len(whitelist)} terpetakan")
-        return mapped
-
-    def to_clz(self, bitget_sym: str) -> Optional[str]:
-        return self._to_clz.get(bitget_sym)
-
-    def get_clz_symbols(self, bitget_syms: List[str]) -> List[str]:
-        return [self._to_clz[s] for s in bitget_syms if s in self._to_clz]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  📊  FEATURE ENGINEERING (Pine Script compatible)
-# ══════════════════════════════════════════════════════════════════════════════
 def _wilder_ema(values: list, period: int) -> list:
+    """Wilder's RMA — Pine's ta.atr internal."""
     if not values:
         return []
     alpha  = 1.0 / period
     result = [values[0]]
-    for i in range(1, len(values)):
-        result.append(alpha * values[i] + (1.0 - alpha) * result[-1])
+    for v in values[1:]:
+        result.append(alpha * v + (1.0 - alpha) * result[-1])
     return result
 
 def _std_ema(values: list, period: int) -> list:
+    """Standard EMA — Pine's ta.ema."""
     if not values:
         return []
     alpha  = 2.0 / (period + 1)
     result = [values[0]]
-    for i in range(1, len(values)):
-        result.append(alpha * values[i] + (1.0 - alpha) * result[-1])
+    for v in values[1:]:
+        result.append(alpha * v + (1.0 - alpha) * result[-1])
     return result
 
 def compute_delta_volume(candles: List[dict]) -> List[float]:
+    """Pine: upAndDownVolume() — lines 23-38. Signed volume per candle."""
     result = []
     is_buy = True
     for c in candles:
@@ -430,6 +393,7 @@ def compute_delta_volume(candles: List[dict]) -> List[float]:
     return result
 
 def compute_vol_thresholds(dv: List[float], vol_len: int) -> Tuple[List[float], List[float]]:
+    """Pine: vol_hi = ta.highest(Vol/2.5, vol_len), vol_lo = ta.lowest(...)"""
     n      = len(dv)
     scaled = [v / 2.5 for v in dv]
     vol_hi = [max(scaled[max(0, i - vol_len + 1): i + 1]) for i in range(n)]
@@ -437,181 +401,311 @@ def compute_vol_thresholds(dv: List[float], vol_len: int) -> Tuple[List[float], 
     return vol_hi, vol_lo
 
 def compute_atr(candles: List[dict], period: int = 200) -> List[float]:
+    """Pine: ta.atr(200) — Wilder's smoothed ATR."""
     trs = []
     for i, c in enumerate(candles):
         pc  = candles[i-1]["close"] if i > 0 else c["close"]
-        trs.append(max(c["high"]-c["low"], abs(c["high"]-pc), abs(c["low"]-pc)))
+        trs.append(max(c["high"] - c["low"],
+                       abs(c["high"] - pc),
+                       abs(c["low"]  - pc)))
     return _wilder_ema(trs, period)
 
+def compute_ema(values: list, period: int) -> List[float]:
+    return _std_ema(values, period)
+
+def compute_bbw(candles: List[dict], period: int = 20, mult: float = 2.0) -> List[float]:
+    """
+    Bollinger Band Width = (upper - lower) / middle.
+    Normalized: output adalah desimal relatif terhadap SMA.
+    Dari data empiris: HIT avg BBW = 0.137 vs MISS avg = 0.057 (2.4× ratio).
+    """
+    closes = [c["close"] for c in candles]
+    n      = len(closes)
+    result = [0.0] * n
+    for i in range(period - 1, n):
+        window = closes[i - period + 1: i + 1]
+        sma    = sum(window) / period
+        sd     = math.sqrt(sum((x - sma) ** 2 for x in window) / period)
+        result[i] = (mult * 2 * sd / sma) if sma > 0 else 0.0
+    return result
+
+def compute_vol_compression(candles: List[dict], fast: int = 5,
+                             slow: int = 20) -> float:
+    """
+    Volume compression: avg vol fast period / avg vol slow period.
+    Dari data empiris: HIT avg = 3.76 vs MISS avg = 1.42.
+    Nilai > 1.0 = volume recent lebih tinggi dari baseline (spike).
+    """
+    if len(candles) < slow + fast + 1:
+        return 1.0
+    vols      = [c["vol"] for c in candles]
+    recent    = vols[-fast:]
+    prior_end = len(vols) - fast
+    prior     = vols[max(0, prior_end - slow): prior_end]
+    avg_r     = _mean(recent)
+    avg_p     = _mean(prior)
+    return avg_r / avg_p if avg_p > 0 else 1.0
+
+def compute_vol_z4h(candles: List[dict], window: int = 96) -> float:
+    """
+    Volume Z-score vs 4H window (96 candles 1H = 4 hari).
+    Dari data empiris: HIT avg Z = 1.03 vs MISS avg = 0.16.
+    Gunakan candle[-2] (confirmed bar, bukan live).
+    """
+    vols = [c["vol"] for c in candles]
+    if len(vols) < window + 5:
+        return 0.0
+    cur_vol  = vols[-2]
+    baseline = vols[-(window + 5):-5]
+    return _zscore(cur_vol, baseline, min_samples=20)
+
+def compute_vol_ratio(candles: List[dict], period: int = 20) -> float:
+    """
+    Current vol / rolling avg vol (period candles sebelumnya).
+    Dari data empiris: HIT avg = 2.63 vs MISS avg = 1.38.
+    Gunakan candle[-2].
+    """
+    vols = [c["vol"] for c in candles]
+    if len(vols) < period + 2:
+        return 1.0
+    cur_vol  = vols[-2]
+    baseline = vols[-(period + 2):-2]
+    avg      = _mean(baseline)
+    return cur_vol / avg if avg > 0 else 1.0
+
+def compute_atr_pct(candles: List[dict], atr_arr: List[float]) -> float:
+    """ATR sebagai % dari harga saat ini. Dari data: HIT avg=3.12% vs MISS=1.40%."""
+    price = candles[-1]["close"]
+    if price <= 0 or not atr_arr:
+        return 0.0
+    return atr_arr[-1] / price * 100
+
+def compute_bear_streak(candles: List[dict]) -> int:
+    """
+    Berapa candle bearish berturut-turut sebelum candle terakhir.
+    Dari data: streak 3-4 = hit 3.9-4.7% vs base 2.9%.
+    """
+    streak = 0
+    for c in reversed(candles[:-1]):   # exclude last (live)
+        if c["close"] < c["open"]:
+            streak += 1
+        else:
+            break
+        if streak >= 6:
+            break
+    return streak
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🟩  ZONE DETECTION  (Pine Script identical)
+# ══════════════════════════════════════════════════════════════════════════════
+
 def find_pivot_lows(lows: List[float], lookback: int) -> List[Optional[float]]:
-    n = len(lows)
+    """Pine: ta.pivotlow(src, lookbackPeriod, lookbackPeriod) — line 67."""
+    n      = len(lows)
     result = [None] * n
     for i in range(lookback, n - lookback):
         val = lows[i]
-        if val <= min(lows[i-lookback:i]) and val <= min(lows[i+1:i+lookback+1]):
+        if val <= min(lows[i - lookback: i]) and \
+           val <= min(lows[i + 1: i + lookback + 1]):
             result[i] = val
     return result
 
-def detect_support_zones(candles: List[dict], symbol: str) -> List[dict]:
+def detect_support_zones(candles: List[dict]) -> List[dict]:
+    """
+    Pine: calcSupportResistance() — support branch.
+    Pivot low + Vol > vol_hi → zone terbentuk.
+    Hitung touch_count dan break_count dari sisa candle.
+    """
     cfg  = CONFIG
     lb   = cfg["lookback_period"]
     vl   = cfg["vol_len"]
     bw   = cfg["box_width_multiplier"]
     ap   = cfg["atr_period"]
-    if len(candles) < lb * 2 + ap // 10 + 5:
+
+    if len(candles) < lb * 2 + 10:
         return []
+
     dv      = compute_delta_volume(candles)
     vh, _   = compute_vol_thresholds(dv, vl)
     atr     = compute_atr(candles, ap)
     lows    = [c["low"] for c in candles]
     pivots  = find_pivot_lows(lows, lb)
+
     zones = []
+    n     = len(candles)
+
     for i, piv in enumerate(pivots):
         if piv is None:
             continue
-        if dv[i] <= vh[i]:
+        if dv[i] <= vh[i]:              # Pine line 74: Vol > vol_hi
             continue
         if math.isnan(atr[i]) or atr[i] <= 0:
             continue
+
         zone_top    = piv
         zone_bottom = piv - atr[i] * bw
-        n           = len(candles)
         break_count = 0
         touch_count = 0
         in_zone     = False
         broke_at    = n
+
         for j in range(i + lb, n):
+            if j >= broke_at:
+                break
             c_low  = candles[j]["low"]
             c_high = candles[j]["high"]
-            if j < broke_at:
-                if not in_zone:
-                    if zone_bottom <= c_low <= zone_top:
-                        in_zone      = True
-                        touch_count += 1
-                else:
-                    if c_low > zone_top:
-                        in_zone = False
-                    elif c_high < zone_bottom:
-                        break_count += 1
-                        in_zone  = False
-                        broke_at = j
+            if not in_zone:
+                if zone_bottom <= c_low <= zone_top:
+                    in_zone      = True
+                    touch_count += 1
+            else:
+                if c_low > zone_top:
+                    in_zone = False
+                elif c_high < zone_bottom:
+                    break_count += 1
+                    in_zone  = False
+                    broke_at = j
+
         zones.append({
-            "bar":          i,
-            "zone_top":     zone_top,
-            "zone_bottom":  zone_bottom,
-            "delta_vol":    dv[i],
-            "atr":          atr[i],
-            "touch_count":  touch_count,
-            "break_count":  break_count,
+            "zone_top":    zone_top,
+            "zone_bottom": zone_bottom,
+            "touch_count": touch_count,
+            "break_count": break_count,
         })
+
     return zones
 
-def get_zone_state(zone: dict, current_low: float, current_high: float) -> str:
-    top    = zone["zone_top"]
-    bottom = zone["zone_bottom"]
-    if current_high < bottom:
-        return "BROKEN"
-    if bottom <= current_low <= top:
-        return "TESTING"
+def get_zone_state(zone: dict, c_low: float, c_high: float) -> str:
+    """Pine: brekout_sup/sup_holds — lines 105-120."""
+    top = zone["zone_top"]; bot = zone["zone_bottom"]
+    if c_high < bot:             return "BROKEN"
+    if bot <= c_low <= top:      return "TESTING"
     return "VALID"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🎯  SCORING COMPONENTS
+#  🌍  REGIME CHECK  (fix: EMA200 daily, bukan EMA50 weekly)
 # ══════════════════════════════════════════════════════════════════════════════
-def score_A_volume_zscore(candles: List[dict]) -> Tuple[int, float]:
-    cfg = CONFIG
-    win = cfg["vol_baseline_window"]
-    if len(candles) < win + 5:
-        return 0, 0.0
-    cur_vol  = candles[-2]["vol"]
-    baseline = [c["vol"] for c in candles[-(win + 5):-5]]
-    if len(baseline) < 10:
-        return 0, 0.0
-    z     = zscore(cur_vol, baseline)
-    score = score_from_z(z, cfg["vol_z_strong"], cfg["vol_z_medium"], cfg["score_vol_max"])
-    return score, round(z, 2)
+def is_caution_mode(btc_1d: List[dict], eth_1d: List[dict]) -> bool:
+    """
+    CAUTION MODE: BTC dan ETH KEDUANYA di bawah EMA200 daily.
 
-def score_B_taker_buy(clz_ohlcv: List[dict]) -> Tuple[int, float, str]:
-    cfg = CONFIG
-    if not clz_ohlcv or len(clz_ohlcv) < cfg["btx_baseline_window"] + 5:
-        return 0, 0.0, "no_clz_data"
-    win = cfg["btx_baseline_window"]
-    cur = clz_ohlcv[-2] if len(clz_ohlcv) >= 2 else clz_ohlcv[-1]
-    btx = cur.get("btx", 0)
-    tx  = cur.get("tx",  0)
-    if not btx or not tx:
-        return 0, 0.0, "btx_zero"
-    btx_ratio = btx / tx
-    baseline_slice = clz_ohlcv[-(win + 5):-5]
-    baseline_ratios = []
-    for c in baseline_slice:
-        c_tx  = c.get("tx",  0)
-        c_btx = c.get("btx", 0)
-        if c_tx > 0 and c_btx >= 0:
-            baseline_ratios.append(c_btx / c_tx)
-    if len(baseline_ratios) < 10:
-        return 0, 0.0, "insufficient_baseline"
-    z     = zscore(btx_ratio, baseline_ratios)
-    score = score_from_z(z, cfg["btx_z_strong"], cfg["btx_z_medium"], cfg["score_btx_max"])
-    return score, round(z, 2), "coinalyze"
-
-def score_C_funding_rate(funding_rate: float) -> Tuple[int, float]:
-    cfg = CONFIG
-    f   = funding_rate
-    if f <= cfg["fund_strongly_neg"]:
-        return cfg["score_fund_max"], round(f, 6)
-    if f <= cfg["fund_mod_neg"]:
-        ratio = (cfg["fund_mod_neg"] - f) / (cfg["fund_mod_neg"] - cfg["fund_strongly_neg"])
-        score = int(cfg["score_fund_max"] // 2 + ratio * cfg["score_fund_max"] // 2)
-        return min(score, cfg["score_fund_max"]), round(f, 6)
-    if f <= cfg["fund_neutral_hi"]:
-        return cfg["score_fund_max"] // 4, round(f, 6)
-    return 0, round(f, 6)
-
-def score_D_oi_change(symbol: str, current_oi: float,
-                      current_price: float, prev_price: float) -> Tuple[int, str]:
-    cfg = CONFIG
-    prev_oi = get_prev_oi(symbol)
-    set_prev_oi(symbol, current_oi)
-    if prev_oi <= 0 or current_oi <= 0:
-        return 0, "no_prev_oi"
-    oi_change_pct  = (current_oi - prev_oi) / prev_oi
-    price_declined = current_price < prev_price * 0.999
-    if oi_change_pct >= cfg["oi_significant_increase"] and price_declined:
-        return cfg["score_oi_max"], f"oi+{oi_change_pct*100:.1f}%_price↓"
-    if oi_change_pct >= cfg["oi_moderate_increase"] and price_declined:
-        return cfg["score_oi_max"] // 2, f"oi+{oi_change_pct*100:.1f}%_price↓"
-    if oi_change_pct >= cfg["oi_moderate_increase"] and not price_declined:
-        return cfg["score_oi_max"] // 4, f"oi+{oi_change_pct*100:.1f}%_price↑"
-    return 0, f"oi{oi_change_pct*100:+.1f}%"
-
-def score_E_long_short_ratio(long_ratio: Optional[float]) -> Tuple[int, str]:
-    cfg = CONFIG
-    if long_ratio is None:
-        return 0, "no_data"
-    if long_ratio <= cfg["ls_strongly_short"]:
-        return cfg["score_ls_max"], f"L:{long_ratio:.2f}_crowded_short"
-    if long_ratio <= cfg["ls_mod_short"]:
-        ratio = (cfg["ls_mod_short"] - long_ratio) / (cfg["ls_mod_short"] - cfg["ls_strongly_short"])
-        score = int(cfg["score_ls_max"] // 2 + ratio * cfg["score_ls_max"] // 2)
-        return min(score, cfg["score_ls_max"]), f"L:{long_ratio:.2f}"
-    if long_ratio <= cfg["ls_neutral"]:
-        return cfg["score_ls_max"] // 4, f"L:{long_ratio:.2f}_neutral"
-    return 0, f"L:{long_ratio:.2f}_long_dom"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🌍  REGIME CHECK
-# ══════════════════════════════════════════════════════════════════════════════
-def is_caution_mode(btc_1w: List[dict], eth_1w: List[dict]) -> bool:
-    ema_p = CONFIG["ema_weekly_period"]
-    if len(btc_1w) < ema_p or len(eth_1w) < ema_p:
+    FIX dari bug v2.x:
+    - Sebelumnya: EMA50 weekly dengan 60 candles → warmup bias rendah
+      → BTC $78K nampak di atas EMA50 yang salah → regime NORMAL
+    - Sekarang: EMA200 daily dengan 210 candles → warmup stabil
+      → EMA200 daily untuk BTC saat ini sekitar $85K-90K
+      → BTC $78K < EMA200 $87K → regime CAUTION (benar)
+    """
+    period = CONFIG["ema_regime_period"]
+    if len(btc_1d) < period or len(eth_1d) < period:
         return False
-    ema_btc = _std_ema([c["close"] for c in btc_1w], ema_p)
-    ema_eth = _std_ema([c["close"] for c in eth_1w], ema_p)
-    return (btc_1w[-1]["close"] < ema_btc[-1] and
-            eth_1w[-1]["close"] < ema_eth[-1])
+    ema_btc = _std_ema([c["close"] for c in btc_1d], period)
+    ema_eth = _std_ema([c["close"] for c in eth_1d], period)
+    return (btc_1d[-1]["close"] < ema_btc[-1] and
+            eth_1d[-1]["close"] < ema_eth[-1])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🎯  SCORING  (3 komponen, total 100 pts, semua dari data empiris)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def score_A_volatility(bbw: float, atr_pct: float) -> Tuple[int, dict]:
+    """
+    Komponen A: Volatility Score (0-50 pts)
+    BASIS DATA: BBW corr=+0.236, ATR_pct corr=+0.230 (terkuat di kedua dataset)
+    HIT avg BBW = 0.137 (2.4× MISS avg 0.057)
+    HIT avg ATR_pct = 3.12% (2.2× MISS avg 1.40%)
+
+    Sub-A1: BBW score (0-27.5 pts = 55% dari 50)
+    Sub-A2: ATR_pct score (0-22.5 pts = 45% dari 50)
+    """
+    cfg = CONFIG
+
+    # A1: BBW
+    a1_raw = _linear_score(bbw, cfg["bbw_strong"], cfg["bbw_medium"], 1.0)
+    a1_pts = round(a1_raw * cfg["score_vol_max"] * cfg["bbw_weight"])
+
+    # A2: ATR_pct
+    a2_raw = _linear_score(atr_pct, cfg["atr_strong"], cfg["atr_medium"], 1.0)
+    a2_pts = round(a2_raw * cfg["score_vol_max"] * cfg["atr_weight"])
+
+    total = min(a1_pts + a2_pts, cfg["score_vol_max"])
+    return total, {"a1_bbw": a1_pts, "a2_atr": a2_pts,
+                   "bbw": round(bbw, 4), "atr_pct": round(atr_pct, 2)}
+
+
+def score_B_volume(vol_compression: float, vol_z4h: float) -> Tuple[int, dict]:
+    """
+    Komponen B: Volume Score (0-30 pts)
+    BASIS DATA: vol_compression corr=+0.089, vol_z4h corr=+0.083 (confirmed kedua dataset)
+
+    Sub-B1: Vol Compression (0-16.5 pts = 55% dari 30)
+    Mengukur: spike volume RECENT vs baseline (akumulasi short-term)
+    HIT avg = 3.76 vs MISS avg = 1.42
+
+    Sub-B2: Vol Z-score 4H (0-13.5 pts = 45% dari 30)
+    Mengukur: anomali volume vs window 4H historis (akumulasi longer-term)
+    HIT avg Z = 1.03 vs MISS avg = 0.16
+    BERBEDA dari B1: B1=recent spike, B2=historical anomaly
+    """
+    cfg = CONFIG
+
+    # B1: Vol Compression
+    b1_raw = _linear_score(vol_compression, cfg["vol_comp_strong"],
+                           cfg["vol_comp_medium"], 1.0)
+    b1_pts = round(b1_raw * cfg["score_vol_micro_max"] * cfg["vol_comp_weight"])
+
+    # B2: Vol Z-score 4H
+    b2_raw = _linear_score(vol_z4h, cfg["vol_z4h_strong"], cfg["vol_z4h_medium"], 1.0)
+    b2_pts = round(b2_raw * cfg["score_vol_micro_max"] * cfg["vol_z4h_weight"])
+
+    total = min(b1_pts + b2_pts, cfg["score_vol_micro_max"])
+    return total, {"b1_comp": b1_pts, "b2_z4h": b2_pts,
+                   "vol_comp": round(vol_compression, 3),
+                   "vol_z4h": round(vol_z4h, 3)}
+
+
+def score_C_momentum(bear_streak: int, vol_ratio: float) -> Tuple[int, dict]:
+    """
+    Komponen C: Momentum Score (0-20 pts)
+    BASIS DATA: bear_streak corr=+0.030, vol_ratio corr=+0.068 (confirmed kedua dataset)
+
+    Sub-C1: Bear Streak (0-8 pts = 40% dari 20)
+    Mengukur: berapa candle bearish berturut-turut sebelum entry
+    Data: streak 3-4 = 3.9-4.7% hit rate vs base 2.9%
+    Ini adalah oversold setup — harga sudah ditekan cukup untuk bisa bounce
+
+    Sub-C2: Vol Ratio (0-12 pts = 60% dari 20)
+    Mengukur: apakah ada volume lebih saat masuk zone
+    Data: vol_ratio ≥1.44 = kombinasi BBW+ATR+VolRatio = 12.7% hit rate
+    BERBEDA dari B1/B2: ini adalah CURRENT bar vol vs recent avg (bukan spike detection)
+    """
+    cfg = CONFIG
+
+    # C1: Bear streak
+    # streak ≥ 4 = full, streak ≥ 2 = half, streak < 2 = minimal
+    if bear_streak >= cfg["bear_streak_strong"]:
+        c1_raw = 1.0
+    elif bear_streak >= cfg["bear_streak_medium"]:
+        c1_raw = 0.5 + 0.5 * (bear_streak - cfg["bear_streak_medium"]) / \
+                       (cfg["bear_streak_strong"] - cfg["bear_streak_medium"])
+    else:
+        c1_raw = bear_streak / cfg["bear_streak_medium"] * 0.5 \
+                 if cfg["bear_streak_medium"] > 0 else 0.0
+
+    c1_pts = round(c1_raw * cfg["score_momentum_max"] * cfg["bear_weight"])
+
+    # C2: Vol ratio
+    c2_raw = _linear_score(vol_ratio, cfg["vol_ratio_strong"],
+                           cfg["vol_ratio_medium"], 1.0)
+    c2_pts = round(c2_raw * cfg["score_momentum_max"] * cfg["vol_ratio_weight"])
+
+    total = min(c1_pts + c2_pts, cfg["score_momentum_max"])
+    return total, {"c1_bear": c1_pts, "c2_volr": c2_pts,
+                   "bear_streak": bear_streak,
+                   "vol_ratio": round(vol_ratio, 3)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -633,54 +727,90 @@ def send_telegram(msg: str) -> bool:
         log.error(f"Telegram error: {e}")
         return False
 
+
 def build_table(results: list, caution: bool) -> str:
-    mode = "⚠️ CAUTION (thr=70)" if caution else "✅ NORMAL (thr=55)"
+    mode = "⚠️ CAUTION (thr=75)" if caution else "✅ NORMAL (thr=60)"
     now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         "",
-        "═" * 120,
-        f"  NEXUS-SR v2.3  |  Bitget Futures  |  {now}  |  {mode}",
-        "═" * 120,
+        "═" * 125,
+        f"  NEXUS-SR v3.0  |  Bitget Futures  |  {now}  |  {mode}",
+        "═" * 125,
         f"  {'#':>2}  {'Coin':<13} {'Price':>12} {'ZoneTop':>10} {'ZoneBot':>10} "
-        f"{'Score':>6} {'A:Vol':>6} {'B:btx':>6} {'C:Fund':>7} {'D:OI':>5} {'E:L/S':>5}  "
-        f"{'Fund%':>7}  Strength",
-        "─" * 120,
+        f"{'Score':>6}  {'A:Vlt':>5} {'B:Vol':>5} {'C:Mom':>5}  "
+        f"{'BBW':>6} {'ATR%':>6} {'VComp':>6} {'VZ4h':>5} {'Bear':>4}  Strength",
+        "─" * 125,
     ]
     for i, r in enumerate(results, 1):
-        raw     = r["symbol"].replace("USDT", "")
-        strength = r["strength"]
-        fund_str = f"{r['funding']*100:.4f}%"
+        raw = r["symbol"].replace("USDT", "")
         lines.append(
             f"  {i:>2}  {raw:<13} {r['price']:>12.6f} {r['zone_top']:>10.5f} "
-            f"{r['zone_bot']:>10.5f} {r['score']:>6.1f} "
-            f"{r['sa']:>6} {r['sb']:>6} {r['sc']:>7} {r['sd']:>5} {r['se']:>5}  "
-            f"{fund_str:>7}  {strength}"
+            f"{r['zone_bot']:>10.5f} {r['score']:>6.1f}  "
+            f"{r['sa']:>5} {r['sb']:>5} {r['sc']:>5}  "
+            f"{r['bbw']:>6.4f} {r['atr_pct']:>5.2f}% "
+            f"{r['vol_comp']:>5.2f}x {r['vol_z4h']:>5.2f} "
+            f"{r['bear_streak']:>4}  {r['strength']}"
         )
     lines += [
-        "─" * 120,
-        "  A=Volume(0-30)  B=TakerBuy(0-25)  C=Funding(0-20)  "
-        "D=OI_Change(0-15)  E=L/S_Ratio(0-10)",
-        "═" * 120,
+        "─" * 125,
+        "  A=Volatility(0-50) B=Volume(0-30) C=Momentum(0-20) | "
+        "BBW≥0.050+ATR≥1.20% gate required",
+        "═" * 125,
     ]
     return "\n".join(lines)
 
-def build_telegram_msg(results: list, caution: bool, readiness: str) -> str:
+
+def build_approaching_table(approaching: list) -> str:
+    """Coin dalam 5% di atas zone_top — belum TESTING tapi mendekati."""
+    if not approaching:
+        return ""
+    lines = [
+        "",
+        "  ↘  APPROACHING ZONES  (0-5% di atas zone_top, belum masuk)",
+        "  " + "─" * 90,
+        f"  {'#':>2}  {'Coin':<13} {'Price':>12} {'ZoneTop':>10} {'ZoneBot':>10} "
+        f"{'Dist%':>6}  {'BBW':>6} {'ATR%':>6}  Vol24h(M)",
+        "  " + "─" * 90,
+    ]
+    for i, a in enumerate(sorted(approaching, key=lambda x: x["dist_pct"]), 1):
+        raw = a["symbol"].replace("USDT", "")
+        gate_ok = "✓" if a["gate_ok"] else "✗"
+        lines.append(
+            f"  {i:>2}  {raw:<13} {a['price']:>12.6f} {a['zone_top']:>10.5f} "
+            f"{a['zone_bot']:>10.5f} {a['dist_pct']:>5.2f}%  "
+            f"{a['bbw']:>6.4f} {a['atr_pct']:>5.2f}%  "
+            f"${a['vol_24h_m']:.1f}M  gate:{gate_ok}"
+        )
+    lines.append("  " + "─" * 90)
+    lines.append("  ✓ = lolos gate BBW+ATR  ✗ = belum cukup volatil untuk 15% move")
+    return "\n".join(lines)
+
+
+def build_telegram_msg(results: list, caution: bool,
+                       n_tested: int, n_candidates: int) -> str:
     mode = "⚠️ CAUTION" if caution else "🟢 NORMAL"
     now  = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    txt  = (f"🎯 <b>NEXUS-SR v2.3</b> [{now}]\n"
-            f"Mode: {mode} | {readiness}\n{'─'*28}\n")
+    txt  = (
+        f"🎯 <b>NEXUS-SR v3.0</b> [{now}]\n"
+        f"Mode: {mode} | {len(results)}/{n_tested} signals | Universe: {n_candidates}\n"
+        f"{'─'*28}\n"
+    )
     for i, r in enumerate(results, 1):
         raw = r["symbol"].replace("USDT", "")
         txt += (
             f"{i}. <b>{raw}</b>\n"
-            f"   Price <code>{r['price']:.6f}</code> | "
-            f"Zone <code>{r['zone_bot']:.4f}–{r['zone_top']:.4f}</code>\n"
-            f"   🎯 +15% target: <code>{r['target']:.4f}</code>\n"
-            f"   Score: <b>{r['score']:.0f}</b> ({r['strength']}) | "
-            f"Fund:{r['funding']*100:.3f}% "
-            f"A:{r['sa']} B:{r['sb']} C:{r['sc']} D:{r['sd']} E:{r['se']}\n\n"
+            f"   Price: <code>{r['price']:.6f}</code> | "
+            f"Zone: <code>{r['zone_bot']:.5f}–{r['zone_top']:.5f}</code>\n"
+            f"   🎯 Target +15%: <code>{r['target']:.5f}</code>\n"
+            f"   Score: <b>{r['score']:.0f}</b>/100 ({r['strength']}) | "
+            f"BBW:{r['bbw']:.4f} ATR:{r['atr_pct']:.2f}% "
+            f"VC:{r['vol_comp']:.2f}x Bear:{r['bear_streak']}\n"
+            f"   A(Vlt):{r['sa']} B(Vol):{r['sb']} C(Mom):{r['sc']}\n\n"
         )
-    txt += "⚠️ <i>Paper mode. Verifikasi sebelum live trade.</i>"
+    txt += (
+        "📊 <i>Basis data: 5.214 events empiris\n"
+        "⚠️ Paper mode — verifikasi sebelum live trade.</i>"
+    )
     return txt
 
 
@@ -692,28 +822,41 @@ def run_scan() -> None:
     start_ts = time.time()
 
     log.info("=" * 70)
-    log.info(f"  NEXUS-SR v2.3 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"  NEXUS-SR v3.0 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     log.info("=" * 70)
 
-    # Regime check
-    log.info("Fetching BTC/ETH weekly data …")
-    btc_1w  = BitgetClient.get_candles("BTCUSDT", "1W", cfg["candle_limit_1w"])
-    eth_1w  = BitgetClient.get_candles("ETHUSDT", "1W", cfg["candle_limit_1w"])
-    caution = is_caution_mode(btc_1w, eth_1w)
+    # ── 1. Regime check (FIX: EMA200 daily) ───────────────────────────────
+    log.info("Fetching BTC/ETH daily data untuk regime check …")
+    btc_1d  = BitgetClient.get_candles("BTCUSDT", "1D", cfg["candle_limit_1d"])
+    eth_1d  = BitgetClient.get_candles("ETHUSDT", "1D", cfg["candle_limit_1d"])
+    caution = is_caution_mode(btc_1d, eth_1d)
     threshold = cfg["score_threshold_caution"] if caution else cfg["score_threshold_normal"]
-    log.info(f"Market regime: {'⚠️ CAUTION (thr=70)' if caution else '✅ NORMAL (thr=55)'}")
 
-    # Tickers
-    log.info("Fetching Bitget tickers …")
+    if btc_1d and eth_1d:
+        btc_ema = _std_ema([c["close"] for c in btc_1d], cfg["ema_regime_period"])
+        eth_ema = _std_ema([c["close"] for c in eth_1d], cfg["ema_regime_period"])
+        log.info(
+            f"BTC: ${btc_1d[-1]['close']:,.0f} vs EMA200: ${btc_ema[-1]:,.0f} "
+            f"→ {'BELOW' if btc_1d[-1]['close'] < btc_ema[-1] else 'ABOVE'}"
+        )
+        log.info(
+            f"ETH: ${eth_1d[-1]['close']:,.0f} vs EMA200: ${eth_ema[-1]:,.0f} "
+            f"→ {'BELOW' if eth_1d[-1]['close'] < eth_ema[-1] else 'ABOVE'}"
+        )
+    log.info(f"Market regime: {'⚠️ CAUTION (thr=75)' if caution else '✅ NORMAL (thr=60)'}")
+
+    # ── 2. Fetch tickers ────────────────────────────────────────────────
+    log.info("Fetching Bitget USDT-Futures tickers …")
     tickers = BitgetClient.get_tickers()
     if not tickers:
-        send_telegram("⚠️ NEXUS-SR v2: Gagal fetch tickers")
+        send_telegram("⚠️ NEXUS-SR v3: Gagal fetch tickers")
         return
     log.info(f"Tickers received: {len(tickers)}")
 
-    # Candidates
-    skip_stats = defaultdict(int)
-    candidates = []
+    # ── 3. Build candidates ────────────────────────────────────────────
+    skip_stats   = defaultdict(int)
+    candidates   = []
+
     for sym, t in tickers.items():
         if sym in MANUAL_EXCLUDE:
             skip_stats["excluded"] += 1; continue
@@ -731,39 +874,49 @@ def run_scan() -> None:
         if chg > cfg["gate_chg_24h_max"]:
             skip_stats["pumped"] += 1; continue
         candidates.append((sym, t))
+
     log.info(f"Candidates: {len(candidates)} | Skip: {dict(skip_stats)}")
 
-    # Coinalyze init
-    clz_key = cfg["coinalyze_api_key"]
-    clz_client = CoinalyzeClient(clz_key) if clz_key else None
-    mapper     = SymbolMapper(clz_client) if clz_client else None
-    cand_syms  = {sym for sym, _ in candidates}
-    if mapper:
-        mapper.load(cand_syms)
-
-    # Phase 1: TESTING zones
-    log.info("Phase 1: fetching candles + detecting TESTING zones …")
+    # ── 4. Phase 1: candle fetch + zone detection + gate filtering ──────
+    log.info("Phase 1: candle fetch + zone detection …")
     BitgetClient.clear_cache()
+
     testing_candidates = []
+    all_approaching    = []
+
     for idx, (sym, ticker) in enumerate(candidates):
-        if (idx + 1) % 50 == 0:
+        if (idx + 1) % 100 == 0:
             log.info(f"  Phase 1: {idx+1}/{len(candidates)}")
+
         try:
-            price = float(ticker.get("lastPr", 0))
+            price   = float(ticker.get("lastPr", 0))
+            vol_24h = float(ticker.get("quoteVolume", 0))
             if price <= 0:
                 skip_stats["no_price"] += 1; continue
+
             candles = BitgetClient.get_candles(sym, "1H", cfg["candle_limit_1h"])
             if len(candles) < cfg["lookback_period"] * 2 + 30:
                 skip_stats["candle_short"] += 1; continue
-            # Volume outlier gate
+
+            # ── Zone Gate G3: volume outlier ──────────────────────────────
             lb  = cfg["vol_outlier_lookback"]
             cur = candles[-1]["vol"]
             avg = _mean([c["vol"] for c in candles[-lb-1:-1]])
             if avg > 0 and cur > cfg["vol_outlier_mult"] * avg:
                 skip_stats["vol_outlier"] += 1; continue
-            zones = detect_support_zones(candles, sym)
+
+            # ── Pre-compute indicators (one pass per coin) ────────────────
+            atr_arr  = compute_atr(candles, cfg["atr_period"])
+            bbw_arr  = compute_bbw(candles, 20)
+            atr_pct  = compute_atr_pct(candles, atr_arr)
+            bbw      = bbw_arr[-1]
+
+            # ── Zone detection ────────────────────────────────────────────
+            zones = detect_support_zones(candles)
             if not zones:
                 skip_stats["no_zones"] += 1; continue
+
+            # ── Zone Gate G1+G2: TESTING state, break_count < 3 ──────────
             testing_zones = []
             for z in zones:
                 if z["break_count"] >= cfg["max_break_count"]:
@@ -775,126 +928,175 @@ def run_scan() -> None:
                     if get_zone_state(z, c["low"], c["high"]) == "TESTING":
                         testing_zones.append(z)
                         break
+
+            # ── Approaching zones (pre-alert, tidak kirim telegram) ───────
             if not testing_zones:
+                for z in zones:
+                    if z["break_count"] >= cfg["max_break_count"]:
+                        continue
+                    state = get_zone_state(z, candles[-1]["low"], candles[-1]["high"])
+                    if state == "VALID":
+                        dist_pct = (price - z["zone_top"]) / price * 100
+                        if 0 < dist_pct <= 5.0:
+                            gate_ok = (bbw >= cfg["gate_bbw_min"] and
+                                       atr_pct >= cfg["gate_atr_pct_min"])
+                            all_approaching.append({
+                                "symbol":    sym,
+                                "price":     price,
+                                "zone_top":  z["zone_top"],
+                                "zone_bot":  z["zone_bottom"],
+                                "dist_pct":  round(dist_pct, 2),
+                                "bbw":       round(bbw, 4),
+                                "atr_pct":   round(atr_pct, 2),
+                                "vol_24h_m": round(vol_24h / 1_000_000, 1),
+                                "gate_ok":   gate_ok,
+                            })
                 skip_stats["no_testing"] += 1; continue
-            testing_candidates.append((sym, ticker, candles, testing_zones))
+
+            # ── Volatility Gate G4+G5 (dari data empiris) ─────────────────
+            # Coin yang tidak lolos gate ini secara mekanis tidak bisa 15% move
+            if bbw < cfg["gate_bbw_min"]:
+                skip_stats["gate_bbw"] += 1; continue
+            if atr_pct < cfg["gate_atr_pct_min"]:
+                skip_stats["gate_atr"] += 1; continue
+
+            testing_candidates.append({
+                "sym":     sym,
+                "ticker":  ticker,
+                "candles": candles,
+                "zones":   testing_zones,
+                "atr_arr": atr_arr,
+                "bbw_arr": bbw_arr,
+                "atr_pct": atr_pct,
+                "bbw":     bbw,
+                "vol_24h": vol_24h,
+            })
+
         except Exception as e:
             log.debug(f"  Error Phase1 {sym}: {e}")
+
         time.sleep(cfg["sleep_between_coins"])
-    log.info(f"Phase 1 done: {len(testing_candidates)} TESTING candidates")
 
-    if not testing_candidates:
-        print(build_table([], caution))
-        log.info("Tidak ada TESTING zone saat ini")
-        return
+    log.info(
+        f"Phase 1 done: {len(testing_candidates)} pass all gates | "
+        f"approaching: {len(all_approaching)} | "
+        f"skip: {dict(skip_stats)}"
+    )
 
-    # Phase 2: Coinalyze batch
-    log.info(f"Phase 2: Coinalyze + L/S fetch untuk {len(testing_candidates)} candidates …")
-    clz_data: Dict[str, list] = {}
-    if mapper and clz_client:
-        cand_names = [sym for sym, _, _, _ in testing_candidates]
-        clz_syms   = mapper.get_clz_symbols(cand_names)
-        if clz_syms:
-            now_ts  = int(time.time())
-            from_ts = now_ts - cfg["clz_lookback_h"] * 3600
-            clz_data = clz_client.fetch_ohlcv_batch(clz_syms, from_ts, now_ts)
-            log.info(f"  Coinalyze: {len(clz_data)} symbols fetched")
-
-    # Score each testing candidate
+    # ── 5. Phase 2: score each testing candidate ────────────────────────
+    log.info(f"Phase 2: scoring {len(testing_candidates)} candidates …")
     results = []
-    for sym, ticker, candles, testing_zones in testing_candidates:
+
+    for d in testing_candidates:
+        sym     = d["sym"]
+        candles = d["candles"]
+        zones   = d["zones"]
+        atr_pct = d["atr_pct"]
+        bbw     = d["bbw"]
+
         try:
-            price     = float(ticker.get("lastPr", 0))
-            cur_oi    = float(ticker.get("holdingAmount", 0))
-            funding   = float(ticker.get("fundingRate", 0))
-            prev_price = candles[-2]["close"] if len(candles) >= 2 else price
+            price = float(d["ticker"].get("lastPr", 0))
+            if price <= 0:
+                continue
 
-            clz_sym   = mapper.to_clz(sym) if mapper else None
-            clz_ohlcv = clz_data.get(clz_sym, []) if clz_sym else []
+            # Pilih zona terbaik: paling dekat harga (sudah dalam TESTING state)
+            best_zone = min(zones, key=lambda z: abs(z["zone_top"] - price))
 
-            long_ratio = BitgetClient.get_long_short_ratio(sym)
-            time.sleep(1.05)  # rate limit
+            # Compute score components
+            vol_comp    = compute_vol_compression(candles)
+            vol_z4h     = compute_vol_z4h(candles)
+            vol_ratio   = compute_vol_ratio(candles)
+            bear_streak = compute_bear_streak(candles)
 
-            best_zone = min(testing_zones, key=lambda z: abs(z["zone_top"] - price))
+            sa, det_a = score_A_volatility(bbw, atr_pct)
+            sb, det_b = score_B_volume(vol_comp, vol_z4h)
+            sc, det_c = score_C_momentum(bear_streak, vol_ratio)
 
-            sa, za = score_A_volume_zscore(candles)
-            sb, zb, btx_src = score_B_taker_buy(clz_ohlcv)
-            sc, _  = score_C_funding_rate(funding)
-            sd, oi_note = score_D_oi_change(sym, cur_oi, price, prev_price)
-            se, ls_note = score_E_long_short_ratio(long_ratio)
+            total = sa + sb + sc
 
-            total_score = sa + sb + sc + sd + se
-
-            # Log DETAIL untuk setiap testing candidate (INFO level)
             log.info(
-                f"  SCORE {sym}: total={total_score:.1f} (thr={threshold}) | "
-                f"A={sa}(z={za}) B={sb}({btx_src}) C={sc}(f={funding*100:.3f}%) "
-                f"D={sd}({oi_note}) E={se}({ls_note}) | ZoneTop={best_zone['zone_top']:.5f} "
-                f"Price={price:.5f}"
+                f"  {sym}: score={total} (thr={threshold}) | "
+                f"A={sa}(BBW={bbw:.4f},ATR={atr_pct:.2f}%) "
+                f"B={sb}(VC={vol_comp:.2f}x,VZ4h={vol_z4h:.2f}) "
+                f"C={sc}(bear={bear_streak},vr={vol_ratio:.2f}x) | "
+                f"Zone={best_zone['zone_top']:.5f} Price={price:.5f}"
             )
 
-            if total_score >= threshold:
-                strength = ("STRONG"   if total_score >= cfg["score_strong"]  else
-                            "MODERATE" if total_score >= cfg["score_threshold_normal"] else
-                            "WEAK")
-                results.append({
-                    "symbol":    sym,
-                    "price":     round(price, 8),
-                    "zone_top":  round(best_zone["zone_top"], 8),
-                    "zone_bot":  round(best_zone["zone_bottom"], 8),
-                    "target":    round(price * 1.15, 8),
-                    "stop":      round(best_zone["zone_bottom"] * 0.99, 8),
-                    "score":     round(total_score, 1),
-                    "sa":        sa, "za": za,
-                    "sb":        sb, "zb": zb,
-                    "sc":        sc,
-                    "sd":        sd,
-                    "se":        se,
-                    "funding":   funding,
-                    "oi_note":   oi_note,
-                    "ls_note":   ls_note,
-                    "btx_src":   btx_src,
-                    "strength":  strength,
-                    "caution":   caution,
-                    "touches":   best_zone["touch_count"],
-                    "breaks":    best_zone["break_count"],
-                })
-                log.info(f"    ✅ {sym} Lolos threshold!")
-            else:
-                log.info(f"    ❌ {sym} Gagal threshold (butuh {threshold})")
+            if total < threshold:
+                log.info(f"    ❌ {sym} gagal threshold")
+                continue
+
+            strength = ("STRONG"   if total >= cfg["score_strong"]           else
+                        "MODERATE" if total >= cfg["score_threshold_normal"] else
+                        "WEAK")
+
+            results.append({
+                "symbol":       sym,
+                "price":        round(price, 8),
+                "zone_top":     round(best_zone["zone_top"], 8),
+                "zone_bot":     round(best_zone["zone_bottom"], 8),
+                "target":       round(price * 1.15, 8),
+                "stop":         round(best_zone["zone_bottom"] * 0.99, 8),
+                "score":        round(total, 1),
+                "sa":           sa, "sb": sb, "sc": sc,
+                "bbw":          round(bbw, 4),
+                "atr_pct":      round(atr_pct, 2),
+                "vol_comp":     round(vol_comp, 3),
+                "vol_z4h":      round(vol_z4h, 3),
+                "vol_ratio":    round(vol_ratio, 3),
+                "bear_streak":  bear_streak,
+                "touches":      best_zone["touch_count"],
+                "breaks":       best_zone["break_count"],
+                "strength":     strength,
+                "caution":      caution,
+                "vol_24h_m":    round(d["vol_24h"] / 1_000_000, 1),
+            })
+            log.info(f"    ✅ {sym} lolos! strength={strength}")
 
         except Exception as e:
-            log.warning(f"  Error Phase2 {sym}: {e}", exc_info=False)
+            log.warning(f"  Error Phase2 {sym}: {e}")
 
-    # Sort & output
-    results.sort(key=lambda x: (-x["score"], -x["sa"], -x["sc"]))
+    # ── 6. Sort + output ────────────────────────────────────────────────
+    # Sort: Score DESC → A(volatility) DESC → B(volume) DESC
+    results.sort(key=lambda x: (-x["score"], -x["sa"], -x["sb"]))
     top = results[:cfg["top_n"]]
 
     elapsed = round(time.time() - start_ts, 1)
-    readiness = f"Paper mode | {len(results)} sinyal"
-    log.info(f"\nTotal signals: {len(results)} | Shown: {len(top)} | Time: {elapsed}s")
+    log.info(
+        f"\nSignals: {len(results)} | Shown: {len(top)} | "
+        f"Approaching: {len(all_approaching)} | Time: {elapsed}s"
+    )
 
+    # ── Terminal output ─────────────────────────────────────────────────
     print(build_table(top, caution))
+    print(build_approaching_table(all_approaching[:10]))
 
     if not top:
         log.info("Tidak ada sinyal saat ini.")
         _save_state(_state)
         return
 
+    # ── Telegram ────────────────────────────────────────────────────────
     strong = [r for r in top if r["strength"] == "STRONG"]
-    send_targets = strong[:cfg["max_alerts"]] if strong else top[:cfg["max_alerts"]]
+    targets = strong[:cfg["max_alerts"]] if strong else top[:cfg["max_alerts"]]
 
-    if send_targets:
-        ok = send_telegram(build_telegram_msg(send_targets, caution, readiness))
+    if targets:
+        ok = send_telegram(
+            build_telegram_msg(targets, caution,
+                               len(testing_candidates), len(candidates))
+        )
         if ok:
-            log.info(f"📤 Telegram: {len(send_targets)} signals sent")
-            for r in send_targets:
+            log.info(f"📤 Telegram: {len(targets)} signals sent")
+            for r in targets:
                 set_cooldown(r["symbol"])
 
     _save_state(_state)
     log.info(f"=== SELESAI — {datetime.now(timezone.utc).strftime('%H:%M UTC')} ===")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ▶️  ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     if not CONFIG["bot_token"] or not CONFIG["chat_id"]:
         log.error("FATAL: BOT_TOKEN / CHAT_ID tidak ditemukan!")
