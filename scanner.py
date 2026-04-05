@@ -91,6 +91,7 @@ CONFIG: Dict = {
 
     # ── UNIVERSE ───────────────────────────────────────────────────────────
     "min_vol_24h":       50_000,    # $50K floor — singkirkan ghost coins saja
+    "min_vol_signal":   500_000,    # $500K minimum untuk sinyal yang dikirim ke Telegram
     "max_vol_24h":  2_000_000_000,
     "gate_chg_24h_max":    60.0,   # skip jika sudah pump >60%
 
@@ -106,6 +107,7 @@ CONFIG: Dict = {
     "max_break_count":        3,
     "vol_outlier_mult":     5.0,   # vol > 5× avg = outlier → skip
     "vol_outlier_lookback":  20,
+    "max_zone_width_pct":    8.0,  # zone width max 8% dari harga — filter low-liquidity
 
     # ── VOLATILITY GATE (G4 + G5) — dari data empiris ──────────────────────
     # BBW threshold: top quintile dari large dataset = 0.078
@@ -587,24 +589,35 @@ def get_zone_state(zone: dict, c_low: float, c_high: float) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  🌍  REGIME CHECK  (fix: EMA200 daily, bukan EMA50 weekly)
 # ══════════════════════════════════════════════════════════════════════════════
-def is_caution_mode(btc_1d: List[dict], eth_1d: List[dict]) -> bool:
+def is_caution_mode(btc_1d: List[dict], eth_1d: List[dict]) -> Tuple[bool, dict]:
     """
     CAUTION MODE: BTC dan ETH KEDUANYA di bawah EMA200 daily.
 
-    FIX dari bug v2.x:
-    - Sebelumnya: EMA50 weekly dengan 60 candles → warmup bias rendah
-      → BTC $78K nampak di atas EMA50 yang salah → regime NORMAL
-    - Sekarang: EMA200 daily dengan 210 candles → warmup stabil
-      → EMA200 daily untuk BTC saat ini sekitar $85K-90K
-      → BTC $78K < EMA200 $87K → regime CAUTION (benar)
+    Dual method untuk robustness:
+    - Method 1: EMA200 jika data >= 200 bars
+    - Method 2: SMA50 fallback jika data < 200 tapi >= 50
+    Returns (is_caution, debug_dict) agar caller bisa log detail.
     """
-    period = CONFIG["ema_regime_period"]
-    if len(btc_1d) < period or len(eth_1d) < period:
-        return False
-    ema_btc = _std_ema([c["close"] for c in btc_1d], period)
-    ema_eth = _std_ema([c["close"] for c in eth_1d], period)
-    return (btc_1d[-1]["close"] < ema_btc[-1] and
-            eth_1d[-1]["close"] < ema_eth[-1])
+    def _check(candles: List[dict], name: str) -> Tuple[bool, str]:
+        if not candles:
+            return False, f"{name}: no data"
+        closes = [c["close"] for c in candles]
+        price  = closes[-1]
+        n      = len(closes)
+        if n >= 200:
+            ema = _std_ema(closes, 200)
+            below = price < ema[-1]
+            return below, f"{name} ${price:,.0f} vs EMA200 ${ema[-1]:,.0f} ({'BELOW' if below else 'ABOVE'})"
+        elif n >= 50:
+            sma = sum(closes[-50:]) / 50
+            below = price < sma
+            return below, f"{name} ${price:,.0f} vs SMA50 ${sma:,.0f} fallback n={n} ({'BELOW' if below else 'ABOVE'})"
+        return False, f"{name}: n={n} insufficient"
+
+    btc_below, btc_msg = _check(btc_1d, "BTC")
+    eth_below, eth_msg = _check(eth_1d, "ETH")
+    caution = btc_below and eth_below
+    return caution, {"btc": btc_msg, "eth": eth_msg, "caution": caution}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -829,20 +842,10 @@ def run_scan() -> None:
     log.info("Fetching BTC/ETH daily data untuk regime check …")
     btc_1d  = BitgetClient.get_candles("BTCUSDT", "1D", cfg["candle_limit_1d"])
     eth_1d  = BitgetClient.get_candles("ETHUSDT", "1D", cfg["candle_limit_1d"])
-    caution = is_caution_mode(btc_1d, eth_1d)
+    caution, regime_debug = is_caution_mode(btc_1d, eth_1d)
     threshold = cfg["score_threshold_caution"] if caution else cfg["score_threshold_normal"]
-
-    if btc_1d and eth_1d:
-        btc_ema = _std_ema([c["close"] for c in btc_1d], cfg["ema_regime_period"])
-        eth_ema = _std_ema([c["close"] for c in eth_1d], cfg["ema_regime_period"])
-        log.info(
-            f"BTC: ${btc_1d[-1]['close']:,.0f} vs EMA200: ${btc_ema[-1]:,.0f} "
-            f"→ {'BELOW' if btc_1d[-1]['close'] < btc_ema[-1] else 'ABOVE'}"
-        )
-        log.info(
-            f"ETH: ${eth_1d[-1]['close']:,.0f} vs EMA200: ${eth_ema[-1]:,.0f} "
-            f"→ {'BELOW' if eth_1d[-1]['close'] < eth_ema[-1] else 'ABOVE'}"
-        )
+    log.info(f"  {regime_debug['btc']}")
+    log.info(f"  {regime_debug['eth']}")
     log.info(f"Market regime: {'⚠️ CAUTION (thr=75)' if caution else '✅ NORMAL (thr=60)'}")
 
     # ── 2. Fetch tickers ────────────────────────────────────────────────
@@ -1002,6 +1005,16 @@ def run_scan() -> None:
             # Pilih zona terbaik: paling dekat harga (sudah dalam TESTING state)
             best_zone = min(zones, key=lambda z: abs(z["zone_top"] - price))
 
+            # ── Zone width guard: filter low-liquidity coins ──────────────
+            zone_width_pct = (best_zone["zone_top"] - best_zone["zone_bottom"]) \
+                             / price * 100 if price > 0 else 999
+            if zone_width_pct > cfg["max_zone_width_pct"]:
+                log.info(
+                    f"  {sym}: zone width {zone_width_pct:.1f}% > "
+                    f"{cfg['max_zone_width_pct']}% → low liquidity, skip"
+                )
+                continue
+
             # Compute score components
             vol_comp    = compute_vol_compression(candles)
             vol_z4h     = compute_vol_z4h(candles)
@@ -1045,6 +1058,7 @@ def run_scan() -> None:
                 "vol_z4h":      round(vol_z4h, 3),
                 "vol_ratio":    round(vol_ratio, 3),
                 "bear_streak":  bear_streak,
+                "zone_width_pct": round(zone_width_pct, 1),
                 "touches":      best_zone["touch_count"],
                 "breaks":       best_zone["break_count"],
                 "strength":     strength,
@@ -1077,8 +1091,11 @@ def run_scan() -> None:
         return
 
     # ── Telegram ────────────────────────────────────────────────────────
-    strong = [r for r in top if r["strength"] == "STRONG"]
-    targets = strong[:cfg["max_alerts"]] if strong else top[:cfg["max_alerts"]]
+    strong  = [r for r in top if r["strength"] == "STRONG"]
+    # Filter Telegram: hanya coin dengan vol ≥ min_vol_signal (kurangi noise low-cap)
+    tg_pool = [r for r in (strong if strong else top)
+               if r["vol_24h_m"] * 1_000_000 >= cfg["min_vol_signal"]]
+    targets = tg_pool[:cfg["max_alerts"]] if tg_pool else []
 
     if targets:
         ok = send_telegram(
