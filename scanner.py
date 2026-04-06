@@ -564,7 +564,7 @@ def simulate(all_features: List[RawFeatures], cfg: dict) -> List[SignalRecord]:
 
         for feat in feats_sorted:
             # Cooldown: skip jika sinyal terakhir dalam COOLDOWN_HOURS
-            hours_since_last = (feat.ts - last_signal_ts) / 3600
+            hours_since_last = (feat.ts - last_signal_ts) / 3_600_000
             if last_signal_ts > 0 and hours_since_last < COOLDOWN_HOURS:
                 continue
 
@@ -614,7 +614,7 @@ def count_true_pump_events(all_features: List[RawFeatures]) -> int:
                 continue
             is_pump = feat.max_hi_24h >= feat.close_price * (1 + PUMP_THRESHOLD_PCT / 100)
             # Cooldown 24h: jangan hitung pump yang sama dua kali
-            hours_since = (feat.ts - last_pump_ts) / 3600
+            hours_since = (feat.ts - last_pump_ts) / 3_600_000
             if is_pump and (last_pump_ts == 0 or hours_since >= 24):
                 total_events += 1
                 last_pump_ts = feat.ts
@@ -918,6 +918,84 @@ def main():
 
     # Write baseline signals CSV
     write_signals_csv(baseline_signals, "/tmp/baseline_signals.csv")
+
+    # ── Step 4b: Feature correlation analysis ─────────────────────────────────
+    log.info("\n🔬 Step 4b: Feature-outcome correlation analysis...")
+    log.info("  (Apakah setiap fitur Tier 3 berkorelasi dengan pump ≥15% dalam 24h?)")
+
+    labels = []
+    feat_matrix = {
+        "bb_w_inv":      [],  # squeeze kuat = nilai tinggi
+        "range_pct_inv": [],  # stability tinggi = nilai tinggi
+        "dry_ratio_inv": [],  # dry-up kuat = nilai tinggi
+        "vol_ratio":     [],  # accumulation vol ratio
+        "atr_ratio_inv": [],  # volatility quiet = nilai tinggi
+        "rs_1h":         [],  # relative strength vs BTC
+        "chg_24h":       [],  # price context
+    }
+    for feat in all_features:
+        if feat.close_price <= 0:
+            continue
+        pump_24h = int(feat.max_hi_24h >= feat.close_price * (1 + PUMP_THRESHOLD_PCT / 100))
+        labels.append(pump_24h)
+        feat_matrix["bb_w_inv"].append(1.0 / max(feat.bb_w, 0.001))
+        feat_matrix["range_pct_inv"].append(1.0 / max(feat.range_pct, 0.01))
+        feat_matrix["dry_ratio_inv"].append(1.0 / max(feat.dry_ratio, 0.01))
+        feat_matrix["vol_ratio"].append(feat.vol_ratio)
+        feat_matrix["atr_ratio_inv"].append(1.0 / max(feat.atr_ratio, 0.01))
+        feat_matrix["rs_1h"].append(feat.rs_1h)
+        feat_matrix["chg_24h"].append(feat.chg_24h)
+
+    n_total = len(labels)
+    n_pump  = sum(labels)
+    base_rate = n_pump / n_total if n_total > 0 else 0
+    log.info(f"  Candle-points: {n_total:,} | Pump24h=True: {n_pump:,} ({base_rate:.1%} base rate)")
+    log.info(f"  {'Feature':22s} | {'Corr':>6} | {'Lift@Q4':>8} | Assessment")
+    log.info(f"  {'-'*66}")
+
+    feature_results = {}
+    for fname, fvals in feat_matrix.items():
+        if len(fvals) != len(labels) or not fvals:
+            continue
+        n = len(fvals)
+        mx = _mean(fvals); my = _mean(labels)
+        num = sum((x - mx) * (y - my) for x, y in zip(fvals, labels))
+        dx  = math.sqrt(sum((x - mx) ** 2 for x in fvals))
+        dy  = math.sqrt(sum((y - my) ** 2 for y in labels))
+        corr = num / (dx * dy) if dx * dy > 0 else 0.0
+
+        sorted_pairs = sorted(zip(fvals, labels), key=lambda x: x[0], reverse=True)
+        q4_n    = max(1, n // 4)
+        q4_tp   = sum(y for _, y in sorted_pairs[:q4_n])
+        q4_rate = q4_tp / q4_n
+        lift    = q4_rate / base_rate if base_rate > 0 else 0
+
+        if abs(corr) >= 0.05 and lift >= 1.5:
+            assessment = "PREDICTIVE"
+        elif abs(corr) >= 0.03 or lift >= 1.2:
+            assessment = "WEAK"
+        else:
+            assessment = "NO_SIGNAL"
+
+        log.info(f"  {fname:22s} | {corr:+6.4f} | {lift:8.2f}x | {assessment}")
+        feature_results[fname] = {"corr": corr, "lift": lift, "assessment": assessment}
+
+    predictive = [k for k, v in feature_results.items() if v["assessment"] == "PREDICTIVE"]
+    weak       = [k for k, v in feature_results.items() if v["assessment"] == "WEAK"]
+    no_signal  = [k for k, v in feature_results.items() if v["assessment"] == "NO_SIGNAL"]
+    log.info(f"  Predictive: {predictive or ['none']}")
+    log.info(f"  Weak:       {weak or ['none']}")
+    log.info(f"  No-signal:  {no_signal or ['none']}")
+
+    log.info(f"\n  Pump rate by phase (base = {base_rate:.1%}):")
+    phase_pump: Dict[str, List[int]] = {}
+    for feat, lbl in zip(all_features, labels):
+        ph, _ = _classify_phase(feat.chg_24h)
+        phase_pump.setdefault(ph, []).append(lbl)
+    for ph, lbls in sorted(phase_pump.items()):
+        rate = _mean(lbls)
+        lift = rate / base_rate if base_rate > 0 else 0
+        log.info(f"    {ph:14s}: {rate:.1%}  lift={lift:.2f}x  n={len(lbls):,}")
 
     # ── Step 5: Grid search ───────────────────────────────────────────────────
     log.info(f"\n🔍 Step 5: Grid search...")
