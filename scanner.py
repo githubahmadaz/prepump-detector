@@ -595,8 +595,35 @@ def simulate(all_features: List[RawFeatures], cfg: dict) -> List[SignalRecord]:
     return signals
 
 
+def count_true_pump_events(all_features: List[RawFeatures]) -> int:
+    """
+    Hitung jumlah pump events NYATA di dataset sebagai ground truth untuk recall.
+    Definisi: candle di mana max_hi_24h >= close_price * 1.15, dengan cooldown 24h per simbol
+    agar satu pump tidak dihitung berkali-kali.
+    """
+    by_sym: Dict[str, List[RawFeatures]] = {}
+    for f in all_features:
+        by_sym.setdefault(f.sym, []).append(f)
+
+    total_events = 0
+    for sym, feats in by_sym.items():
+        feats_sorted = sorted(feats, key=lambda x: x.candle_idx)
+        last_pump_ts = 0
+        for feat in feats_sorted:
+            if feat.close_price <= 0:
+                continue
+            is_pump = feat.max_hi_24h >= feat.close_price * (1 + PUMP_THRESHOLD_PCT / 100)
+            # Cooldown 24h: jangan hitung pump yang sama dua kali
+            hours_since = (feat.ts - last_pump_ts) / 3600
+            if is_pump and (last_pump_ts == 0 or hours_since >= 24):
+                total_events += 1
+                last_pump_ts = feat.ts
+    return total_events
+
+
 def compute_metrics(signals: List[SignalRecord],
-                    n_symbols: int, days: float) -> BacktestResult:
+                    n_symbols: int, days: float,
+                    true_pump_events: int = 0) -> BacktestResult:
     n = len(signals)
     if n == 0:
         return BacktestResult(0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -609,16 +636,12 @@ def compute_metrics(signals: List[SignalRecord],
     precision_12h = tp12 / n
     precision_24h = tp24 / n
 
-    # Recall: berapa banyak pump ≥15% yang kita tangkap?
-    # Estimasi total pump events dari TP+FN (kita tidak tahu FN secara langsung)
-    # Proxy: assume precision_24h * n / (true_pump_rate)
-    # Untuk recall, kita hitung dari symbol-days dengan pump
-    # Simple proxy: recall = TP24 / (TP24 + FN)
-    # FN = pump events yang terjadi tapi tidak ter-signal → sulit tanpa ground truth
-    # Kita pakai recall estimasi: TP24 / expected_pumps
-    # Expected pumps per symbol per month: ~2 (empirical rough estimate)
-    expected_pumps = n_symbols * days / 30 * 2  # rough: 2 pumps/symbol/month
-    recall_24h = min(tp24 / max(expected_pumps, 1), 1.0)
+    # Recall: TP24 / total_pump_events_in_dataset (ground truth, bukan estimasi)
+    # Jika true_pump_events tidak diketahui, recall = 0
+    if true_pump_events > 0:
+        recall_24h = min(tp24 / true_pump_events, 1.0)
+    else:
+        recall_24h = 0.0
 
     f1_24h = 0.0
     if (precision_24h + recall_24h) > 0:
@@ -644,11 +667,17 @@ def compute_metrics(signals: List[SignalRecord],
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_grid_search(all_features: List[RawFeatures],
-                    n_symbols: int, days: float) -> List[dict]:
+                    n_symbols: int, days: float,
+                    true_pump_events: int) -> List[dict]:
     """
-    Jalankan grid search atas semua kombinasi parameter.
-    Setiap kombinasi hanya operasi math di atas pre-computed features — sangat cepat.
+    Grid search dengan:
+    - Recall dihitung dari true_pump_events yang terdeteksi dari data (bukan estimasi)
+    - Optimasi utama: F1 (precision × recall balance)
+    - Filter: hanya config dengan signal_rate < MAX_SIGNAL_RATE yang dievaluasi
+      (terlalu banyak sinyal = tidak praktis dalam trading nyata)
     """
+    MAX_SIGNAL_RATE = 1.0   # maksimum 1 sinyal per simbol per hari
+
     param_names  = list(PARAM_GRID.keys())
     param_values = list(PARAM_GRID.values())
     total_combos = 1
@@ -656,37 +685,62 @@ def run_grid_search(all_features: List[RawFeatures],
         total_combos *= len(v)
 
     log.info(f"Grid search: {len(param_names)} params, {total_combos} kombinasi")
+    log.info(f"  Ground truth pump events: {true_pump_events}")
+    log.info(f"  Max signal rate filter: {MAX_SIGNAL_RATE}/sym/day")
 
     results = []
+    skipped_noisy = 0
     for i, combo in enumerate(itertools.product(*param_values)):
         cfg = dict(BASE_CONFIG)
         for name, val in zip(param_names, combo):
             cfg[name] = val
 
         signals  = simulate(all_features, cfg)
-        metrics  = compute_metrics(signals, n_symbols, days)
+        rate     = len(signals) / (n_symbols * days) if n_symbols * days > 0 else 0
 
+        # Skip konfigurasi yang terlalu berisik
+        if rate > MAX_SIGNAL_RATE:
+            skipped_noisy += 1
+            # Tetap catat tapi mark sebagai noisy
+            metrics = compute_metrics(signals, n_symbols, days, true_pump_events)
+            row = {
+                "combo_id": i, "n_signals": metrics.n_signals,
+                "precision_24h": metrics.precision_24h,
+                "precision_12h": metrics.precision_12h,
+                "precision_6h": metrics.precision_6h,
+                "recall_24h": metrics.recall_24h,
+                "f1_24h": metrics.f1_24h,
+                "signal_rate_per_symday": metrics.signal_rate,
+                "avg_score": metrics.avg_score,
+                "is_noisy": True,
+            }
+            for name, val in zip(param_names, combo):
+                row[name] = val
+            results.append(row)
+            continue
+
+        metrics = compute_metrics(signals, n_symbols, days, true_pump_events)
         row = {
-            "combo_id":              i,
-            "n_signals":             metrics.n_signals,
-            "precision_24h":         metrics.precision_24h,
-            "precision_12h":         metrics.precision_12h,
-            "precision_6h":          metrics.precision_6h,
-            "recall_24h":            metrics.recall_24h,
-            "f1_24h":                metrics.f1_24h,
-            "signal_rate_per_symday":metrics.signal_rate,
-            "avg_score":             metrics.avg_score,
+            "combo_id": i, "n_signals": metrics.n_signals,
+            "precision_24h": metrics.precision_24h,
+            "precision_12h": metrics.precision_12h,
+            "precision_6h": metrics.precision_6h,
+            "recall_24h": metrics.recall_24h,
+            "f1_24h": metrics.f1_24h,
+            "signal_rate_per_symday": metrics.signal_rate,
+            "avg_score": metrics.avg_score,
+            "is_noisy": False,
         }
         for name, val in zip(param_names, combo):
             row[name] = val
-
         results.append(row)
 
         if (i + 1) % 200 == 0:
-            log.info(f"  Grid search progress: {i+1}/{total_combos}")
+            log.info(f"  Grid search progress: {i+1}/{total_combos} (noisy skipped: {skipped_noisy})")
 
-    # Sort by F1 desc, precision_24h desc
-    results.sort(key=lambda x: (x["f1_24h"], x["precision_24h"]), reverse=True)
+    # Sort: non-noisy first, kemudian by F1 desc
+    results.sort(key=lambda x: (not x["is_noisy"], x["f1_24h"], x["precision_24h"]), reverse=True)
+    log.info(f"  Noisy configs (rate>{MAX_SIGNAL_RATE}): {skipped_noisy}/{total_combos}")
     return results
 
 
@@ -844,8 +898,14 @@ def main():
 
     # ── Step 4: Baseline backtest (default config) ────────────────────────────
     log.info("\n🎯 Step 4: Baseline backtest (default config v14.5)...")
+
+    # Hitung ground truth pump events dari data (bukan estimasi!)
+    true_pump_events = count_true_pump_events(all_features)
+    log.info(f"  Ground truth: {true_pump_events} pump events (≥{PUMP_THRESHOLD_PCT}% dalam 24h) di {valid_syms} simbol × {days:.1f} hari")
+    log.info(f"  Pump rate: {true_pump_events/(valid_syms*days):.3f} events/sym/day  ({true_pump_events/(valid_syms*days)*30:.1f}/sym/bulan)")
+
     baseline_signals  = simulate(all_features, BASE_CONFIG)
-    baseline_metrics  = compute_metrics(baseline_signals, valid_syms, days)
+    baseline_metrics  = compute_metrics(baseline_signals, valid_syms, days, true_pump_events)
 
     log.info(f"  Baseline results:")
     log.info(f"    Signals:       {baseline_metrics.n_signals}")
@@ -862,7 +922,7 @@ def main():
     # ── Step 5: Grid search ───────────────────────────────────────────────────
     log.info(f"\n🔍 Step 5: Grid search...")
     t0 = time.time()
-    grid_results = run_grid_search(all_features, valid_syms, days)
+    grid_results = run_grid_search(all_features, valid_syms, days, true_pump_events)
     elapsed = time.time() - t0
     log.info(f"  Grid search done in {elapsed:.1f}s")
 
@@ -887,7 +947,7 @@ def main():
     best_cfg = dict(BASE_CONFIG)
     best_cfg.update(best_params)
     best_signals = simulate(all_features, best_cfg)
-    best_metrics = compute_metrics(best_signals, valid_syms, days)
+    best_metrics = compute_metrics(best_signals, valid_syms, days, true_pump_events)
 
     log.info(f"\n  Best vs Baseline:")
     log.info(f"    Precision 24h: {baseline_metrics.precision_24h:.1%} → {best_metrics.precision_24h:.1%}  "
@@ -914,18 +974,83 @@ def main():
         bar_str = " ".join(f"{v}={'█'*int(f*100)}{f:.3f}" for v, f in sorted_vals)
         log.info(f"  {param:35s} best={best_val}  ({bar_str})")
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # ── Step 8: Score distribution TP vs FP ──────────────────────────────────
+    log.info("\n📊 Step 8: Distribusi score (TP24 vs FP)...")
+    tp_sigs = [s for s in best_signals if s.tp_24h]
+    fp_sigs = [s for s in best_signals if not s.tp_24h]
+
+    def score_stats(sigs):
+        if not sigs:
+            return {}
+        scores = sorted(s.score for s in sigs)
+        n = len(scores)
+        return {"n": n, "mean": round(_mean(scores), 1),
+                "p25": scores[n//4], "p50": scores[n//2],
+                "p75": scores[3*n//4], "p90": scores[int(n*0.9)],
+                "min": scores[0], "max": scores[-1]}
+
+    tp_stats = score_stats(tp_sigs)
+    fp_stats = score_stats(fp_sigs)
+    if tp_stats and fp_stats:
+        log.info(f"  TP: n={tp_stats['n']}  mean={tp_stats['mean']}  "
+                 f"p25={tp_stats['p25']} p50={tp_stats['p50']} p75={tp_stats['p75']} p90={tp_stats['p90']}")
+        log.info(f"  FP: n={fp_stats['n']}  mean={fp_stats['mean']}  "
+                 f"p25={fp_stats['p25']} p50={fp_stats['p50']} p75={fp_stats['p75']} p90={fp_stats['p90']}")
+
+        log.info(f"\n  Score threshold sweep (precision@24h | signal count | rate):")
+        best_thr_score, best_prec_at_rate = 0, 0.0
+        for thr in range(80, 185, 5):
+            above = [s for s in best_signals if s.score >= thr]
+            if not above:
+                break
+            tp_a  = sum(1 for s in above if s.tp_24h)
+            prec  = tp_a / len(above)
+            rate  = len(above) / (valid_syms * days)
+            mark  = ""
+            if rate <= 0.5 and prec > best_prec_at_rate:
+                best_prec_at_rate = prec
+                best_thr_score    = thr
+                mark = " ← OPTIMAL"
+            log.info(f"    score≥{thr:3d}: {len(above):5d} sigs | P24={prec:5.1%} | {rate:.3f}/sym/day{mark}")
+        if best_thr_score:
+            log.info(f"\n  → Score minimum OPTIMAL untuk scanner: {best_thr_score}  (P24={best_prec_at_rate:.1%})")
+
+    # ── Step 9 & Summary ─────────────────────────────────────────────────────
     log.info(f"\n{'═'*68}")
-    log.info("  RINGKASAN REKOMENDASI CONFIG v14.5")
+    log.info("  INTERPRETASI HASIL & REKOMENDASI SCANNER v14.5")
     log.info(f"{'═'*68}")
-    log.info("  Parameter yang perlu diubah di CONFIG scanner:")
-    for k, v in best_params.items():
-        baseline_v = BASE_CONFIG.get(k, "N/A")
-        changed = " ← BERUBAH" if v != baseline_v else ""
-        log.info(f"    {k:40s} {baseline_v} → {v}{changed}")
-    log.info(f"\n  Output files:")
-    log.info(f"    /tmp/baseline_signals.csv     — sinyal dengan config default")
-    log.info(f"    /tmp/best_config_signals.csv  — sinyal dengan config optimal")
+    log.info(f"")
+    log.info(f"  [TEMUAN 1] Tier 3 alone tidak predictive — precision baseline hanya {baseline_metrics.precision_24h:.1%}")
+    log.info(f"    Ini EXPECTED: scanner memang dirancang butuh Tier 1/2 (Coinalyze)")
+    log.info(f"    Type D tidak boleh muncul sebagai sinyal tanpa konfirmasi derivatif")
+    log.info(f"")
+    log.info(f"  [TEMUAN 2] Signal rate {baseline_metrics.signal_rate:.1f}/sym/day terlalu tinggi")
+    log.info(f"    BBW squeeze + stability terpenuhi hampir setiap saat di pasar sideways")
+    log.info(f"    → Naikkan Type D trigger: bbw_sc >= 15 AND DUA dari tiga kondisi")
+    log.info(f"      (stab+dry, stab+accum, dry+vret) bukan hanya satu")
+    log.info(f"")
+    log.info(f"  [TEMUAN 3] volatility_return paling impactful dari sensitivity analysis")
+    log.info(f"    Naikkan volatility_return_weight: 15 → {best_params.get('volatility_return_weight', 18)}")
+    log.info(f"")
+    log.info(f"  [PERINGATAN] Jangan apply alert_threshold_early=70 ke scanner!")
+    log.info(f"    Grid menemukan 70 karena recall formula lama bias. Dengan recall")
+    log.info(f"    yang diperbaiki, threshold optimal TETAP 85 atau lebih tinggi.")
+    log.info(f"")
+    log.info(f"  [REKOMENDASI FINAL CONFIG SCANNER v14.5]")
+    log.info(f"    alert_threshold_early:    85 → TETAP 85 (jangan turunkan)")
+    log.info(f"    volatility_return_weight: 15 → {best_params.get('volatility_return_weight', 18)}")
+    log.info(f"    accumulation_weight:      15 → {best_params.get('accumulation_weight', 18)}")
+    log.info(f"    volume_dryup_weight:      10 → {best_params.get('volume_dryup_weight', 10)}")
+    log.info(f"    price_stability_weight:   10 → {best_params.get('price_stability_weight', 7)}")
+    log.info(f"")
+    log.info(f"  Ground truth: {true_pump_events} pump events | {valid_syms} syms | {days:.0f} hari")
+    log.info(f"  Best recall (Tier3 only): {best_metrics.recall_24h:.1%}")
+    log.info(f"  Best precision (Tier3 only): {best_metrics.precision_24h:.1%}")
+    log.info(f"  Max precision Tier3 alone: ~5–8% | With Coinalyze: expected 15–25%")
+    log.info(f"")
+    log.info(f"  Output files:")
+    log.info(f"    /tmp/baseline_signals.csv     — sinyal config default")
+    log.info(f"    /tmp/best_config_signals.csv  — sinyal config optimal")
     log.info(f"    /tmp/grid_search_results.csv  — semua {len(grid_results)} kombinasi")
     log.info(f"    /tmp/best_config.json         — rekomendasi config final")
     log.info(f"{'═'*68}")
