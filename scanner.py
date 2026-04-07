@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  BACKTEST + GRID SEARCH — Pre-Pump Scanner v14.5                           ║
+║  BACKTEST + GRID SEARCH — Pre-Pump Scanner v14.9                           ║
 ║                                                                              ║
 ║  METODOLOGI:                                                                 ║
 ║  1. Fetch historical Bitget candles 1H (~31 hari / 750 candles)             ║
@@ -448,15 +448,17 @@ def score_features(feat: RawFeatures, cfg: dict) -> Tuple[int, List[str]]:
     if feat.bb_tighter and bbw_sc > 0:
         bbw_sc = min(bbw_sc + 5, w_bbw + 5)
 
-    # ── Price Stability ────────────────────────────────────────────────────────
+    # ── Price Range (BUKAN stability/coiling) ─────────────────────────────────
+    # DATA: pump_med range_pct=3.45%, ranging_med=0.91%
+    # Pump terjadi saat range LEBAR, bukan sempit — reward range >= 3.0%
     w_stab = cfg["price_stability_weight"]
     rp = feat.range_pct
-    if rp < 1.5 and abs(feat.curr_chg) < 0.5:
+    if rp >= 4.0:
         stab_sc = w_stab
-    elif rp < 2.5:
-        stab_sc = int(w_stab * 0.67)
-    elif rp < 4.0:
-        stab_sc = int(w_stab * 0.33)
+    elif rp >= 3.0:
+        stab_sc = int(w_stab * 0.75)
+    elif rp >= 2.0:
+        stab_sc = int(w_stab * 0.40)
     else:
         stab_sc = 0
 
@@ -515,7 +517,10 @@ def score_features(feat: RawFeatures, cfg: dict) -> Tuple[int, List[str]]:
 
     # ── Pump Types ────────────────────────────────────────────────────────────
     # Type D: Technical Breakout
-    if bbw_sc >= (cfg["bbw_squeeze_weight"] * 0.9) and (stab_sc >= 8 or dry_sc >= 6):
+    # DATA: 63.5% pump events punya inside_compression=0 (sudah keluar compression).
+    # Syarat stab_sc dihapus karena compression (range sempit) adalah anti-pump.
+    # Cukup BBW squeeze + salah satu dari dry_sc/accum_sc sebagai konfirmasi volume.
+    if bbw_sc >= (cfg["bbw_squeeze_weight"] * 0.9) and (dry_sc >= 6 or accum_sc >= 6):
         pump_types.append("D")
     # Type F: Volatility Return
     if vret_sc >= 10:
@@ -782,7 +787,7 @@ def write_grid_csv(results: List[dict], path: str):
 def write_best_config(best_params: dict, baseline_metrics: BacktestResult,
                       best_metrics: BacktestResult, path: str):
     output = {
-        "scanner_version": "14.5",
+        "scanner_version": "14.9",
         "backtest_date":   datetime.now(timezone.utc).isoformat(),
         "backtest_period_days": round(CANDLE_LIMIT / 24, 1),
         "universe_size":   UNIVERSE_SIZE,
@@ -809,7 +814,7 @@ def write_best_config(best_params: dict, baseline_metrics: BacktestResult,
         "note": (
             "Config changes di atas hanya untuk parameter Tier 3 (Bitget candles). "
             "Parameter Tier 1/2 (Coinalyze) tidak di-backtest karena historical data tidak tersedia. "
-            "Apply perubahan ini ke CONFIG scanner v14.5 untuk parameter yang sesuai."
+            "Apply perubahan ini ke CONFIG scanner v14.9 untuk parameter yang sesuai."
         ),
     }
     with open(path, "w") as f:
@@ -823,7 +828,7 @@ def write_best_config(best_params: dict, baseline_metrics: BacktestResult,
 
 def main():
     log.info("═" * 68)
-    log.info("  BACKTEST + GRID SEARCH — Pre-Pump Scanner v14.5")
+    log.info("  BACKTEST + GRID SEARCH — Pre-Pump Scanner v14.9")
     log.info(f"  Universe: {UNIVERSE_SIZE} syms | Candles: {CANDLE_LIMIT}h | "
              f"Pump target: ≥{PUMP_THRESHOLD_PCT}%")
     log.info("═" * 68)
@@ -926,7 +931,7 @@ def main():
     labels = []
     feat_matrix = {
         "bb_w_inv":      [],  # squeeze kuat = nilai tinggi
-        "range_pct_inv": [],  # stability tinggi = nilai tinggi
+        "range_pct":     [],  # pump butuh range LEBAR (pump_med=3.45% vs ranging_med=0.91%)
         "dry_ratio_inv": [],  # dry-up kuat = nilai tinggi
         "vol_ratio":     [],  # accumulation vol ratio
         "atr_ratio_inv": [],  # volatility quiet = nilai tinggi
@@ -939,7 +944,7 @@ def main():
         pump_24h = int(feat.max_hi_24h >= feat.close_price * (1 + PUMP_THRESHOLD_PCT / 100))
         labels.append(pump_24h)
         feat_matrix["bb_w_inv"].append(1.0 / max(feat.bb_w, 0.001))
-        feat_matrix["range_pct_inv"].append(1.0 / max(feat.range_pct, 0.01))
+        feat_matrix["range_pct"].append(feat.range_pct)
         feat_matrix["dry_ratio_inv"].append(1.0 / max(feat.dry_ratio, 0.01))
         feat_matrix["vol_ratio"].append(feat.vol_ratio)
         feat_matrix["atr_ratio_inv"].append(1.0 / max(feat.atr_ratio, 0.01))
@@ -1095,7 +1100,7 @@ def main():
 
     # ── Step 9 & Summary ─────────────────────────────────────────────────────
     log.info(f"\n{'═'*68}")
-    log.info("  INTERPRETASI HASIL & REKOMENDASI SCANNER v14.5")
+    log.info("  INTERPRETASI HASIL & REKOMENDASI SCANNER v14.9")
     log.info(f"{'═'*68}")
     log.info(f"")
     log.info(f"  [TEMUAN 1] Tier 3 alone tidak predictive — precision baseline hanya {baseline_metrics.precision_24h:.1%}")
@@ -1114,7 +1119,7 @@ def main():
     log.info(f"    Grid menemukan 70 karena recall formula lama bias. Dengan recall")
     log.info(f"    yang diperbaiki, threshold optimal TETAP 85 atau lebih tinggi.")
     log.info(f"")
-    log.info(f"  [REKOMENDASI FINAL CONFIG SCANNER v14.5]")
+    log.info(f"  [REKOMENDASI FINAL CONFIG SCANNER v14.9]")
     log.info(f"    alert_threshold_early:    85 → TETAP 85 (jangan turunkan)")
     log.info(f"    volatility_return_weight: 15 → {best_params.get('volatility_return_weight', 18)}")
     log.info(f"    accumulation_weight:      15 → {best_params.get('accumulation_weight', 18)}")
