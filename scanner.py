@@ -1,50 +1,37 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  NEXUS-SR v3.1 — Empirically Validated Support Zone Bounce Scanner           ║
+║  NEXUS-SR v3.2 — Empirically Validated + Coinalyze Derivatives Data         ║
 ║                                                                              ║
-║  BASIS DATA EMPIRIS:                                                         ║
-║  · Dataset 1: 5.214 TESTING events dari 400+ coins (unbiased, crash market) ║
-║  · Dataset 2: 42 events dari targeted pump coins (cross-validation)          ║
-║  · Cross-validated: hanya fitur yang KONSISTEN di kedua dataset dipakai      ║
+║  PERUBAHAN v3.2:                                                             ║
+║  Integrasi data Coinalyze berdasarkan hasil probe lapangan (Apr 2026):       ║
+║  · Bitget TIDAK ada di Coinalyze → pakai Binance (code A) + Bybit (code 6)  ║
+║    sebagai proxy. Coin yang sama bergerak hampir identik karena arbitrase.   ║
 ║                                                                              ║
-║  ARSITEKTUR (berbasis data, bukan asumsi):                                   ║
+║  DATA BARU dari Coinalyze (semua divalidasi dari probe):                     ║
+║  · OI Change     : /open-interest-history  → Binance, field 'c' (USD)       ║
+║  · Funding Rate  : /funding-rate (current) → Binance, field 'value'         ║
+║  · Funding Hist  : /funding-rate-history   → interval 1hour (bukan 8hour!)  ║
+║  · L/S Ratio     : /long-short-ratio-history → Bybit 542 markets            ║
+║                    field l=long%, s=short%, r=ratio                          ║
+║  · Liquidations  : /liquidation-history    → Binance, l=long, s=short (USD) ║
+║  · Taker Buy     : /ohlcv-history          → Binance, btx/tx/bv 0% null     ║
 ║                                                                              ║
-║  LAYER 1 — ZONE GATE (binary, Pine Script logic):                            ║
-║    G1. Zone state = TESTING (candle[-1] atau candle[-2])                     ║
-║    G2. Zone break_count < 3                                                  ║
-║    G3. Volume bukan outlier (vol < 5× avg_20)                                ║
+║  SYMBOL FORMAT (dari probe):                                                 ║
+║  · Binance: {BASE}USDT_PERP.A  → BTCUSDT_PERP.A                            ║
+║  · Bybit  : {BASE}USDT.6       → BTCUSDT.6                                  ║
 ║                                                                              ║
-║  LAYER 2 — VOLATILITY GATE (binary, dari data empiris):                      ║
-║    G4. BBW ≥ 0.050  (Bollinger Band Width — confirmed corr +0.236/+0.262)    ║
-║    G5. ATR% ≥ 1.20% (ATR relatif — confirmed corr +0.230/+0.245)            ║
-║    ↑ Coin yang tidak lolos gate ini secara mekanis TIDAK BISA 15% dalam 24H  ║
-║                                                                              ║
-║  LAYER 3 — SCORE (0-100, 3 komponen yang terbukti):                         ║
-║    A. Volatility Score   0-50 pts  → BBW + ATR_pct kombinasi                ║
-║       Rasio: HIT avg BBW 2.4× MISS avg. Kontribusi terbesar ke precision.   ║
-║    B. Volume Score       0-30 pts  → VolCompression + VolZ_4H               ║
-║       Dua sub-komponen BERBEDA: compression (recent spike) vs Z-score (hist) ║
-║    C. Momentum Score     0-20 pts  → bear_streak + VolRatio                 ║
-║       Oversold setup: 3-4 bear candles sebelum entry + current vol normal    ║
-║                                                                              ║
-║  DIHAPUS (tidak terbukti dari data):                                         ║
-║    ✗ RSI oversold       (corr=+0.020, tidak konsisten antar range)           ║
-║    ✗ Candle pattern     (HAMMER hit rate 0.7% < base 2.9%)                   ║
-║    ✗ Taker buy (btx)    (corr=+0.009, 81% data kosong)                      ║
-║    ✗ Funding negatif    (corr=-0.044 large, reversed di targeted)            ║
-║    ✗ Zone touch count   (korelasi NEGATIF -0.035)                            ║
-║    ✗ OI change          (100% null dari pipeline)                            ║
-║    ✗ L/S ratio          (hampir semua no_data)                               ║
-║                                                                              ║
-║  THRESHOLD:                                                                  ║
-║    Normal mode : score ≥ 60                                                  ║
-║    Caution mode: score ≥ 75  (BTC+ETH < EMA200 daily, bukan EMA50 weekly)   ║
-║    Strong signal: score ≥ 80 → kirim Telegram                               ║
-║                                                                              ║
-║  REGIME FIX:                                                                 ║
-║    Sebelumnya: EMA50 weekly dengan 60 candles → warmup bias → salah         ║
-║    Sekarang  : EMA200 daily dengan 300 candles → warmup stabil              ║
+║  ARSITEKTUR SCORING (berbasis data empiris 5.214 events):                   ║
+║  LAYER 1 — ZONE GATE   : TESTING state, break<3, vol not outlier            ║
+║  LAYER 2 — VOLATILITY  : BBW ≥ 0.050, ATR% ≥ 1.20%                         ║
+║  LAYER 3 — SCORE 0-100 :                                                    ║
+║    A. Volatility   0-50 pts → BBW + ATR_pct                                 ║
+║    B. Volume       0-30 pts → VolCompression + VolZ_4H                      ║
+║    C. Momentum     0-20 pts → bear_streak + VolRatio                        ║
+║  LAYER 4 — DERIVATIVES : Coinalyze data sebagai CONTEXT INFO                ║
+║    · Ditampilkan di output dan Telegram                                      ║
+║    · Tidak masuk scoring (data cross-exchange, bukan Bitget langsung)        ║
+║    · Berfungsi sebagai filter manual / konfirmasi tambahan                   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -75,7 +62,7 @@ _root.setLevel(logging.INFO)
 _ch   = logging.StreamHandler()
 _ch.setFormatter(_fmt)
 _root.addHandler(_ch)
-_fh   = _lh.RotatingFileHandler("/tmp/nexus_sr_v31.log", maxBytes=10 * 1024**2, backupCount=2)
+_fh   = _lh.RotatingFileHandler("/tmp/nexus_sr_v32.log", maxBytes=10 * 1024**2, backupCount=2)
 _fh.setFormatter(_fmt)
 _root.addHandler(_fh)
 log = logging.getLogger(__name__)
@@ -100,9 +87,10 @@ CONFIG: Dict = {
     "vol_len":                2,   # Pine: vol_len
     "box_width_multiplier": 1.0,   # Pine: box_withd
     "candle_limit_1h":      200,   # 1H candles (~8 hari)
-    "candle_limit_1d":      300,   # FIX: 300 bukan 210 — EMA200 butuh margin warmup
-                                   # 300 candles 1D = ~10 bulan data, EMA200 stabil
-                                   # di candle ke-201 dst (99 candles margin)
+    "candle_limit_1d":      100,   # FIX: Bitget 1D candles max ~90 dalam praktik
+                                   # 100 cukup untuk SMA50 (50 candles needed)
+                                   # Regime check pakai SMA50 bukan EMA200
+                                   # (EMA200 butuh 200 candles, tapi Bitget max ~90 1D)
 
     # ── ZONE GATE ──────────────────────────────────────────────────────────
     "atr_period":           200,   # Pine: ta.atr(200)
@@ -120,9 +108,12 @@ CONFIG: Dict = {
     "pump_reject_bear_min":   1,    # bear_streak harus >= ini jika vol tinggi
 
     # ── MINIMUM COMPONENT SCORE ────────────────────────────────────────────
-    # Volume harus mengkonfirmasi sinyal — tidak cukup hanya volatility
-    # Dari audit: 龙虾USDT lolos dengan B=8, tidak ada konfirmasi volume
-    "min_score_B":           10,    # require B ≥ 10 (dari 30 max)
+    # FIX: Turunkan dari 10 ke 5 berdasarkan hasil run nyata.
+    # min_score_B=10 memblok 5/5 kandidat karena crash market membuat volume flat.
+    # Prioritas perbaikan dari backtest: naikkan threshold ke 70 (score 60-64 EV negatif),
+    # bukan block semua sinyal via min B.
+    # Score 5 = B1+B2 minimal ada sedikit konfirmasi, bukan zero sama sekali.
+    "min_score_B":            5,   # require B ≥ 5 (dari 30 max)
 
     # ── VOLATILITY GATE (G4 + G5) — dari data empiris ──────────────────────
     # BBW threshold: top quintile dari large dataset = 0.078
@@ -173,25 +164,375 @@ CONFIG: Dict = {
     "bear_weight":         0.40,   # C1 lebih lemah dari C2
     "vol_ratio_weight":    0.60,
 
-    # ── THRESHOLD ─────────────────────────────────────────────────────────
-    "score_threshold_normal":  60,
-    "score_threshold_caution": 75,  # aktif jika BTC+ETH < EMA200 daily
-    "score_strong":            80,  # → kirim Telegram
+    # ── THRESHOLD — dari backtest: score 60-64 adalah EV negatif ─────────
+    # Backtest 262 signals: score 60-64 WR=20.7% < breakeven 31.5%
+    # Naikkan dari 60 ke 70 menghapus 40% sinyal EV negatif
+    "score_threshold_normal":  70,  # FIX: dari 60 → 70 (backtest: score<70 = -EV)
+    "score_threshold_caution": 80,  # saat BTC+ETH < SMA50 daily
+    "score_strong":            85,  # → kirim Telegram
 
-    # ── REGIME CHECK (FIX dari bug sebelumnya) ─────────────────────────────
-    # Bug lama: EMA50 weekly dengan 60 candles → warmup bias → selalu NORMAL
-    # Fix: EMA200 daily dengan 210 candles → cukup warmup untuk akurasi
-    "ema_regime_period":      200,  # EMA200 daily
+    # ── REGIME CHECK ───────────────────────────────────────────────────────
+    # FIX: Bitget 1D max ~90 candles (terbukti dari run nyata n=90)
+    # SMA50 dari n=90 sudah valid dan cukup untuk deteksi trend
+    # Dual method: EMA200 jika ada (>200 candles), SMA50 jika tidak
+    "ema_regime_period":       50,  # SMA50 sebagai primary (90 candles cukup)
 
     # ── OUTPUT ────────────────────────────────────────────────────────────
     "top_n":                   10,
     "max_alerts":               5,
     "alert_cooldown_sec":    3600,
-    "cooldown_file": "/tmp/nexus_sr_v31_state.json",
+    "cooldown_file": "/tmp/nexus_sr_v32_state.json",
     "sleep_between_coins":    0.2,
 }
 
 MANUAL_EXCLUDE: set = set()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🔗  COINALYZE CONFIG (dari probe lapangan Apr 2026)
+# ══════════════════════════════════════════════════════════════════════════════
+# Bitget TIDAK ada di Coinalyze. Pakai Binance (A) + Bybit (6) sebagai proxy.
+# Coin yang sama (SOLUSDT, FETUSDT, dll.) bergerak hampir identik karena arbitrase.
+# Data derivatives ini sebagai CONTEXT INFO (tidak masuk scoring).
+CLZ = {
+    "api_key":    os.getenv("COINALYZE_API_KEY",
+                            "ab447e9a-3a26-4253-a68e-1cd0603d22d2"),
+    "base":       "https://api.coinalyze.net/v1",
+
+    # Symbol suffix dari probe: Binance=PERP.A, Bybit=.6
+    "bn_suffix":  "_PERP.A",   # BTCUSDT → BTCUSDT_PERP.A
+    "by_suffix":  ".6",        # BTCUSDT → BTCUSDT.6
+
+    # Rate limit: 40 req/menit → sleep 1.6s antar call
+    "min_interval": 1.6,
+    "batch_size":    10,       # konservatif (doc max=20, tiap sym = 1 call)
+
+    # Lookback
+    "lookback_h":    48,       # 48 jam untuk OI, L/S, liquidations
+    "funding_h":     72,       # 72 jam untuk funding rate trend
+
+    # Timeout per TESTING kandidat — Coinalyze hanya dipanggil untuk candidates
+    # yang sudah lolos gate, tidak untuk semua 470 coin
+    "timeout":       12,
+}
+
+_clz_last: float = 0.0
+
+def _clz_get(endpoint: str, params: dict) -> Optional[Any]:
+    """Coinalyze GET dengan rate limit enforcement."""
+    global _clz_last
+    elapsed = time.time() - _clz_last
+    if elapsed < CLZ["min_interval"]:
+        time.sleep(CLZ["min_interval"] - elapsed)
+    _clz_last = time.time()
+
+    p = dict(params)
+    p["api_key"] = CLZ["api_key"]
+    try:
+        r = requests.get(f"{CLZ['base']}/{endpoint}", params=p,
+                         timeout=CLZ["timeout"])
+        if r.status_code == 429:
+            retry = int(r.headers.get("Retry-After", 10)) + 1
+            log.warning(f"Coinalyze 429 — tunggu {retry}s")
+            time.sleep(retry)
+            return None
+        if r.status_code == 401:
+            log.error("Coinalyze: API key invalid")
+            return None
+        if r.status_code == 400:
+            log.debug(f"Coinalyze 400 {endpoint} params={params}")
+            return None
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.debug(f"Coinalyze error {endpoint}: {e}")
+        return None
+
+def _bn_sym(base_usdt: str) -> str:
+    """SOLUSDT → SOLUSDT_PERP.A"""
+    return base_usdt + CLZ["bn_suffix"]
+
+def _by_sym(base_usdt: str) -> str:
+    """SOLUSDT → SOLUSDT.6"""
+    # Bybit tidak selalu punya semua coin — fallback ke Binance jika gagal
+    return base_usdt.replace("USDT", "USDT") + CLZ["by_suffix"]
+
+
+class CoinalyzeData:
+    """
+    Fetch semua derivatif data untuk satu coin.
+    Dipanggil hanya untuk TESTING candidates yang lolos semua gate.
+
+    Semua nilai dalam bentuk mentah dari API, diinterpretasikan di caller.
+    """
+
+    @staticmethod
+    def fetch_ohlcv_btx(symbol_usdt: str) -> Optional[dict]:
+        """
+        OHLCV + btx/bv/tx dari Binance.
+        Probe: field t,o,h,l,c,v,bv,tx,btx — 0% null untuk Binance.
+        Return: dict dengan last_candle dan baseline (48H)
+        """
+        bn  = _bn_sym(symbol_usdt)
+        now = int(time.time())
+        data = _clz_get("ohlcv-history", {
+            "symbols":  bn,
+            "interval": "1hour",
+            "from":     now - CLZ["lookback_h"] * 3600,
+            "to":       now,
+        })
+        if not isinstance(data, list) or not data:
+            return None
+        hist = data[0].get("history", [])
+        if len(hist) < 5:
+            return None
+
+        last    = hist[-2]  # confirmed bar, bukan live
+        prev24  = hist[-26:-2] if len(hist) >= 26 else hist[:-2]
+
+        btx     = last.get("btx", 0) or 0
+        tx      = last.get("tx",  0) or 0
+        bv      = last.get("bv",  0) or 0
+        v       = last.get("v",   0) or 0
+
+        btx_ratio = btx / tx if tx > 0 else 0.0
+        bv_ratio  = bv  / v  if v  > 0 else 0.0
+
+        # Baseline btx_ratio untuk Z-score
+        baseline = []
+        for c in prev24:
+            c_tx  = c.get("tx",  0) or 0
+            c_btx = c.get("btx", 0) or 0
+            if c_tx > 0:
+                baseline.append(c_btx / c_tx)
+
+        btx_z = 0.0
+        if len(baseline) >= 5:
+            mu    = sum(baseline) / len(baseline)
+            sigma = math.sqrt(sum((x-mu)**2 for x in baseline) / len(baseline))
+            btx_z = (btx_ratio - mu) / sigma if sigma > 0 else 0.0
+
+        return {
+            "btx":       btx,
+            "tx":        tx,
+            "bv":        bv,
+            "v":         v,
+            "btx_ratio": round(btx_ratio, 4),
+            "bv_ratio":  round(bv_ratio,  4),
+            "btx_z":     round(btx_z,     3),
+            "source":    "Binance",
+        }
+
+    @staticmethod
+    def fetch_oi(symbol_usdt: str) -> Optional[dict]:
+        """
+        Open Interest history dari Binance.
+        Probe: fields t,o,h,l,c — value dalam USD (convert_to_usd=true).
+        OI change = (c[-1] - c[-2]) / c[-2] * 100
+        OI trend  = arah 4H terakhir
+        """
+        bn  = _bn_sym(symbol_usdt)
+        now = int(time.time())
+        data = _clz_get("open-interest-history", {
+            "symbols":       bn,
+            "interval":      "1hour",
+            "from":          now - CLZ["lookback_h"] * 3600,
+            "to":            now,
+            "convert_to_usd": "true",
+        })
+        if not isinstance(data, list) or not data:
+            return None
+        hist = data[0].get("history", [])
+        if len(hist) < 3:
+            return None
+
+        curr   = hist[-1].get("c", 0) or 0
+        prev1h = hist[-2].get("c", 0) or 0
+        prev4h = hist[-5].get("c", 0) if len(hist) >= 5 else prev1h
+
+        oi_chg_1h = (curr - prev1h) / prev1h * 100 if prev1h > 0 else 0.0
+        oi_chg_4h = (curr - prev4h) / prev4h * 100 if prev4h > 0 else 0.0
+
+        # OI divergence: OI naik saat harga turun = short buildup
+        # Harga tidak tersedia di sini; caller akan hitung jika butuh
+
+        return {
+            "oi_usd":     round(curr,       0),
+            "oi_chg_1h":  round(oi_chg_1h,  3),
+            "oi_chg_4h":  round(oi_chg_4h,  3),
+            "source":     "Binance",
+        }
+
+    @staticmethod
+    def fetch_funding(symbol_usdt: str) -> Optional[dict]:
+        """
+        Funding rate history dari Binance.
+        Probe: HTTP 400 saat interval=8hour. Fix: pakai interval=1hour.
+        value = per-period rate. 0.007073 = 0.7073% per 8 jam.
+        Negatif = shorts bayar longs (short squeeze fuel).
+        """
+        bn  = _bn_sym(symbol_usdt)
+        now = int(time.time())
+        data = _clz_get("funding-rate-history", {
+            "symbols":  bn,
+            "interval": "1hour",    # FIX: bukan 8hour (tidak ada di enum)
+            "from":     now - CLZ["funding_h"] * 3600,
+            "to":       now,
+        })
+        if not isinstance(data, list) or not data:
+            return None
+        hist = data[0].get("history", [])
+        # Filter hanya entry dengan nilai non-zero (funding settle per 8H,
+        # sehingga mayoritas candle 1H akan bernilai 0)
+        nonzero = [c.get("c", 0) for c in hist if (c.get("c") or 0) != 0]
+        if not nonzero:
+            return None
+
+        current = nonzero[-1]
+        trend   = nonzero[-1] - nonzero[0] if len(nonzero) >= 2 else 0.0
+        neg_pct = sum(1 for v in nonzero if v < 0) / len(nonzero) * 100
+
+        return {
+            "funding_current": round(current,  6),
+            "funding_trend":   round(trend,    6),
+            "funding_neg_pct": round(neg_pct,  1),
+            "funding_periods": len(nonzero),
+            "source":          "Binance",
+        }
+
+    @staticmethod
+    def fetch_ls_ratio(symbol_usdt: str) -> Optional[dict]:
+        """
+        Long/Short ratio dari Bybit.
+        Probe: field l=long%, s=short%, r=ratio. Bybit punya 542 USDT perps.
+        l + s = 100. Crowded short = l < 40.
+        """
+        by  = _by_sym(symbol_usdt)
+        now = int(time.time())
+        data = _clz_get("long-short-ratio-history", {
+            "symbols":  by,
+            "interval": "1hour",
+            "from":     now - CLZ["lookback_h"] * 3600,
+            "to":       now,
+        })
+        if not isinstance(data, list) or not data:
+            # Fallback: coba Binance jika Bybit tidak punya coin ini
+            bn   = _bn_sym(symbol_usdt)
+            data = _clz_get("long-short-ratio-history", {
+                "symbols":  bn,
+                "interval": "1hour",
+                "from":     now - CLZ["lookback_h"] * 3600,
+                "to":       now,
+            })
+            if not isinstance(data, list) or not data:
+                return None
+
+        hist = data[0].get("history", [])
+        if not hist:
+            return None
+
+        last     = hist[-1]
+        long_pct = last.get("l", 50.0) or 50.0
+        short_pct= last.get("s", 50.0) or 50.0
+        ratio    = last.get("r", 1.0)  or 1.0
+
+        # Trend: apakah longs makin berkurang (bearish momentum)
+        long_trend = 0.0
+        if len(hist) >= 5:
+            long_trend = last.get("l", 50) - hist[-5].get("l", 50)
+
+        return {
+            "long_pct":   round(long_pct,  2),
+            "short_pct":  round(short_pct, 2),
+            "ls_ratio":   round(ratio,     4),
+            "long_trend": round(long_trend,2),  # + = longs bertambah, - = berkurang
+            "source":     "Bybit",
+        }
+
+    @staticmethod
+    def fetch_liquidations(symbol_usdt: str) -> Optional[dict]:
+        """
+        Liquidation history dari Binance.
+        Probe: field l=long_liq, s=short_liq (USD per jam).
+        Short liq besar = forced buying → short squeeze fuel.
+        """
+        bn  = _bn_sym(symbol_usdt)
+        now = int(time.time())
+        data = _clz_get("liquidation-history", {
+            "symbols":       bn,
+            "interval":      "1hour",
+            "from":          now - CLZ["lookback_h"] * 3600,
+            "to":            now,
+            "convert_to_usd": "true",
+        })
+        if not isinstance(data, list) or not data:
+            return None
+        hist = data[0].get("history", [])
+        if not hist:
+            return None
+
+        last        = hist[-1]
+        long_liq_1h = last.get("l", 0) or 0   # long liquidations (bearish)
+        short_liq_1h= last.get("s", 0) or 0   # short liquidations (bullish)
+        long_liq_4h = sum(c.get("l", 0) or 0 for c in hist[-4:])
+        short_liq_4h= sum(c.get("s", 0) or 0 for c in hist[-4:])
+        long_liq_24h= sum(c.get("l", 0) or 0 for c in hist[-24:])
+        short_liq_24h=sum(c.get("s", 0) or 0 for c in hist[-24:])
+
+        # Dominance: short_liq / (long_liq + short_liq)
+        total_24h = long_liq_24h + short_liq_24h
+        short_dom = short_liq_24h / total_24h if total_24h > 0 else 0.5
+
+        return {
+            "short_liq_1h":  round(short_liq_1h,  0),
+            "long_liq_1h":   round(long_liq_1h,   0),
+            "short_liq_4h":  round(short_liq_4h,  0),
+            "long_liq_4h":   round(long_liq_4h,   0),
+            "short_liq_24h": round(short_liq_24h, 0),
+            "long_liq_24h":  round(long_liq_24h,  0),
+            "short_dom_24h": round(short_dom,      3),  # > 0.6 = short squeeze fuel
+            "source":        "Binance",
+        }
+
+    @classmethod
+    def fetch_all(cls, symbol_usdt: str) -> dict:
+        """
+        Fetch semua data derivatives untuk satu coin.
+        Tiap call dilindungi try/except — partial data lebih baik dari crash.
+        Return: dict kosong jika semua gagal.
+        """
+        result = {}
+
+        try:
+            d = cls.fetch_ohlcv_btx(symbol_usdt)
+            if d: result["btx"] = d
+        except Exception as e:
+            log.debug(f"  CLZ btx {symbol_usdt}: {e}")
+
+        try:
+            d = cls.fetch_oi(symbol_usdt)
+            if d: result["oi"] = d
+        except Exception as e:
+            log.debug(f"  CLZ oi {symbol_usdt}: {e}")
+
+        try:
+            d = cls.fetch_funding(symbol_usdt)
+            if d: result["funding"] = d
+        except Exception as e:
+            log.debug(f"  CLZ funding {symbol_usdt}: {e}")
+
+        try:
+            d = cls.fetch_ls_ratio(symbol_usdt)
+            if d: result["ls"] = d
+        except Exception as e:
+            log.debug(f"  CLZ ls {symbol_usdt}: {e}")
+
+        try:
+            d = cls.fetch_liquidations(symbol_usdt)
+            if d: result["liq"] = d
+        except Exception as e:
+            log.debug(f"  CLZ liq {symbol_usdt}: {e}")
+
+        return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -755,17 +1096,20 @@ def get_zone_state(zone: dict, c_low: float, c_high: float) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🌍  REGIME CHECK  (fix: EMA200 daily, bukan EMA50 weekly)
+#  🌍  REGIME CHECK  (SMA50 daily — Bitget max ~90 candles 1D dari probe)
 # ══════════════════════════════════════════════════════════════════════════════
 def is_caution_mode(btc_1d: List[dict], eth_1d: List[dict]) -> Tuple[bool, dict]:
     """
-    CAUTION MODE: BTC dan ETH KEDUANYA di bawah EMA200 daily.
+    CAUTION MODE: BTC dan ETH KEDUANYA di bawah SMA50 daily.
 
-    Dual method untuk robustness:
-    - Method 1: EMA200 jika data >= 200 bars
-    - Method 2: SMA50 fallback jika data < 200 tapi >= 50
-    Returns (is_caution, debug_dict) agar caller bisa log detail.
+    Dari probe lapangan: Bitget 1D candles max ~90 dalam praktik.
+    SMA50 dari 90 candles = 3 bulan data = valid untuk trend detection.
+    Dual method:
+    - Primary  : SMA50 jika n >= 50
+    - Fallback : EMA200 jika n >= 200 (belum pernah terjadi di Bitget 1D)
     """
+    period = CONFIG["ema_regime_period"]   # 50
+
     def _check(candles: List[dict], name: str) -> Tuple[bool, str]:
         if not candles:
             return False, f"{name}: no data"
@@ -773,14 +1117,16 @@ def is_caution_mode(btc_1d: List[dict], eth_1d: List[dict]) -> Tuple[bool, dict]
         price  = closes[-1]
         n      = len(closes)
         if n >= 200:
-            ema = _std_ema(closes, 200)
+            ema   = _std_ema(closes, 200)
             below = price < ema[-1]
-            return below, f"{name} ${price:,.0f} vs EMA200 ${ema[-1]:,.0f} ({'BELOW' if below else 'ABOVE'})"
-        elif n >= 50:
-            sma = sum(closes[-50:]) / 50
+            return below, (f"{name} ${price:,.0f} vs EMA200 ${ema[-1]:,.0f} "
+                           f"n={n} ({'BELOW' if below else 'ABOVE'})")
+        elif n >= period:
+            sma   = sum(closes[-period:]) / period
             below = price < sma
-            return below, f"{name} ${price:,.0f} vs SMA50 ${sma:,.0f} fallback n={n} ({'BELOW' if below else 'ABOVE'})"
-        return False, f"{name}: n={n} insufficient"
+            return below, (f"{name} ${price:,.0f} vs SMA{period} ${sma:,.0f} "
+                           f"n={n} ({'BELOW' if below else 'ABOVE'})")
+        return False, f"{name}: n={n} < {period}, insufficient"
 
     btc_below, btc_msg = _check(btc_1d, "BTC")
     eth_below, eth_msg = _check(eth_1d, "ETH")
@@ -910,23 +1256,35 @@ def send_telegram(msg: str) -> bool:
 
 
 def build_table(results: list, caution: bool) -> str:
-    mode = "⚠️ CAUTION (thr=75)" if caution else "✅ NORMAL (thr=60)"
+    mode = "⚠️ CAUTION (thr=80)" if caution else "✅ NORMAL (thr=70)"
     now  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         "",
-        "═" * 150,
-        f"  NEXUS-SR v3.1  |  Bitget Futures  |  {now}  |  {mode}",
-        "═" * 150,
+        "═" * 160,
+        f"  NEXUS-SR v3.2  |  Bitget Futures  |  {now}  |  {mode}",
+        "═" * 160,
         f"  {'#':>2}  {'Coin':<13} {'Price':>12}  "
         f"{'Score':>5}  {'A':>3} {'B':>3} {'C':>3}  "
         f"{'BBW':>6} {'ATR%':>5}  "
         f"{'Entry':>12} {'Type':>5}  "
         f"{'SL':>12} {'Risk%':>5}  "
-        f"{'TP':>12} {'Rwd%':>5}  {'R:R':>4}  TP-Method",
-        "─" * 150,
+        f"{'TP':>12} {'Rwd%':>5}  {'R:R':>4}  "
+        f"── Coinalyze Context ──",
+        "─" * 160,
     ]
     for i, r in enumerate(results, 1):
         raw = r["symbol"].replace("USDT", "")
+
+        # Build derivatives context string
+        deriv_parts = []
+        if r.get("btx_z")       is not None: deriv_parts.append(f"btxZ={r['btx_z']:+.2f}")
+        if r.get("oi_chg_1h")   is not None: deriv_parts.append(f"OI1h={r['oi_chg_1h']:+.2f}%")
+        if r.get("funding")      is not None: deriv_parts.append(f"fund={r['funding']:.5f}")
+        if r.get("long_pct")    is not None: deriv_parts.append(f"L%={r['long_pct']:.1f}")
+        if r.get("short_liq_4h") is not None and r["short_liq_4h"] > 0:
+            deriv_parts.append(f"sLiq4h=${r['short_liq_4h']:,.0f}")
+        deriv_str = "  ".join(deriv_parts) if deriv_parts else "(no CLZ data)"
+
         lines.append(
             f"  {i:>2}  {raw:<13} {r['price']:>12.6f}  "
             f"{r['score']:>5.1f}  {r['sa']:>3} {r['sb']:>3} {r['sc']:>3}  "
@@ -934,13 +1292,15 @@ def build_table(results: list, caution: bool) -> str:
             f"{r['entry']:>12.6f} {r['entry_type']:>5}  "
             f"{r['sl']:>12.6f} {r['risk_pct']:>4.1f}%  "
             f"{r['tp']:>12.6f} {r['reward_pct']:>4.1f}%  {r['rr']:>4.1f}  "
-            f"{r['tp_method']:<28}  {r['strength']}"
+            f"{deriv_str}  {r['strength']}"
         )
     lines += [
-        "─" * 150,
-        "  A=Volatility(0-50) B=Volume(0-30) C=Momentum(0-20) | "
-        "Pump gate: vol>5x+bear=0 reject | MinB=10",
-        "═" * 150,
+        "─" * 160,
+        "  Score: A=Volatility(0-50) B=Volume(0-30) C=Momentum(0-20)",
+        "  CLZ context: btxZ=taker_buy_zscore  OI1h=OI_change_1H  fund=funding_rate",
+        "               L%=long_position_%  sLiq4h=short_liquidations_4H",
+        "  Note: CLZ data dari Binance/Bybit (proxy). Tidak masuk scoring.",
+        "═" * 160,
     ]
     return "\n".join(lines)
 
@@ -976,30 +1336,51 @@ def build_telegram_msg(results: list, caution: bool,
     mode = "⚠️ CAUTION" if caution else "🟢 NORMAL"
     now  = datetime.now(timezone.utc).strftime("%H:%M UTC")
     txt  = (
-        f"🎯 <b>NEXUS-SR v3.1</b> [{now}]\n"
+        f"🎯 <b>NEXUS-SR v3.2</b> [{now}]\n"
         f"Mode: {mode} | {len(results)}/{n_tested} signals | Universe: {n_candidates}\n"
         f"{'─'*28}\n"
     )
     for i, r in enumerate(results, 1):
-        raw = r["symbol"].replace("USDT", "")
-        # Emoji kekuatan R:R
+        raw      = r["symbol"].replace("USDT", "")
         rr_emoji = "🔥" if r["rr"] >= 3 else "✅" if r["rr"] >= 2 else "⚠️"
+
+        # Derivatives context lines (hanya yang ada datanya)
+        deriv_lines = []
+        if r.get("funding") is not None:
+            sign = "🔴" if r["funding"] < -0.0001 else "🟡" if r["funding"] < 0 else "🟢"
+            deriv_lines.append(f"  {sign} Funding: <code>{r['funding']:.5f}</code> "
+                               f"({'neg=squeeze' if r['funding'] < 0 else 'pos=longs'})")
+        if r.get("long_pct") is not None:
+            crowded = "🐻 crowded short" if r["long_pct"] < 40 else \
+                      "🐂 crowded long" if r["long_pct"] > 65 else "⚖️ balanced"
+            deriv_lines.append(f"  L/S: Long <code>{r['long_pct']:.1f}%</code> "
+                               f"/ Short <code>{r['short_pct']:.1f}%</code>  {crowded}")
+        if r.get("oi_chg_1h") is not None:
+            oi_sign = "↑" if r["oi_chg_1h"] > 0 else "↓"
+            deriv_lines.append(f"  OI: <code>{r['oi_chg_1h']:+.2f}%</code>/1H  "
+                               f"<code>{r['oi_chg_4h']:+.2f}%</code>/4H {oi_sign}")
+        if r.get("short_liq_4h") is not None and r["short_liq_4h"] > 0:
+            deriv_lines.append(f"  Short Liq 4H: <code>${r['short_liq_4h']:,.0f}</code> "
+                               f"(squeeze fuel)")
+        if r.get("btx_z") is not None:
+            btx_label = "⚡ buy aggression" if r["btx_z"] > 1.5 else "normal"
+            deriv_lines.append(f"  BuyTx Z: <code>{r['btx_z']:+.2f}</code>  {btx_label}")
+
+        deriv_block = "\n".join(deriv_lines) if deriv_lines else \
+                      "  <i>CLZ: no derivatives data</i>"
+
         txt += (
             f"{i}. <b>{raw}</b>  [{r['strength']}]  Score:<b>{r['score']:.0f}</b>\n"
             f"   Zone: <code>{r['zone_bot']:.5f} – {r['zone_top']:.5f}</code>\n"
             f"   📥 Entry ({r['entry_type']}): <code>{r['entry']:.6f}</code>\n"
-            f"   🛑 SL: <code>{r['sl']:.6f}</code> "
-            f"(<b>-{r['risk_pct']:.1f}%</b>)\n"
-            f"   🎯 TP: <code>{r['tp']:.6f}</code> "
-            f"(<b>+{r['reward_pct']:.1f}%</b>) "
-            f"{rr_emoji} R:R <b>{r['rr']:.2f}</b>\n"
+            f"   🛑 SL: <code>{r['sl']:.6f}</code> (-{r['risk_pct']:.1f}%)\n"
+            f"   🎯 TP: <code>{r['tp']:.6f}</code> (+{r['reward_pct']:.1f}%)"
+            f"  {rr_emoji} R:R <b>{r['rr']:.2f}</b>\n"
             f"   📐 <i>{r['tp_method']}</i>\n"
-            f"   BBW:{r['bbw']:.4f} ATR:{r['atr_pct']:.1f}% "
-            f"VC:{r['vol_comp']:.2f}x Bear:{r['bear_streak']}\n\n"
+            f"{deriv_block}\n\n"
         )
     txt += (
-        "📊 <i>Basis: 5.214 events empiris | "
-        "TP per-coin: ATR×regime atau resistance\n"
+        "📊 <i>Score dari Bitget OHLCV | CLZ context dari Binance/Bybit proxy\n"
         "⚠️ Paper mode — verifikasi sebelum live trade.</i>"
     )
     return txt
@@ -1013,7 +1394,7 @@ def run_scan() -> None:
     start_ts = time.time()
 
     log.info("=" * 70)
-    log.info(f"  NEXUS-SR v3.1 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info(f"  NEXUS-SR v3.2 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     log.info("=" * 70)
 
     # ── 1. Regime check (FIX: EMA200 daily) ───────────────────────────────
@@ -1024,7 +1405,7 @@ def run_scan() -> None:
     threshold = cfg["score_threshold_caution"] if caution else cfg["score_threshold_normal"]
     log.info(f"  {regime_debug['btc']}")
     log.info(f"  {regime_debug['eth']}")
-    log.info(f"Market regime: {'⚠️ CAUTION (thr=75)' if caution else '✅ NORMAL (thr=60)'}")
+    log.info(f"Market regime: {'⚠️ CAUTION (thr=80)' if caution else '✅ NORMAL (thr=70)'}")
 
     # ── 2. Fetch tickers ────────────────────────────────────────────────
     log.info("Fetching Bitget USDT-Futures tickers …")
@@ -1166,8 +1547,8 @@ def run_scan() -> None:
         f"skip: {dict(skip_stats)}"
     )
 
-    # ── 5. Phase 2: score each testing candidate ────────────────────────
-    log.info(f"Phase 2: scoring {len(testing_candidates)} candidates …")
+    # ── 5. Phase 2: score each testing candidate + Coinalyze derivatives ──
+    log.info(f"Phase 2: scoring {len(testing_candidates)} candidates + Coinalyze …")
     results = []
 
     for d in testing_candidates:
@@ -1223,11 +1604,11 @@ def run_scan() -> None:
 
             # ── Minimum B score gate ──────────────────────────────────────
             # Volume harus mengkonfirmasi sinyal — volatility saja tidak cukup
-            # Referensi audit: 龙虾USDT lolos dengan B=8, hanya dari volatility
             if sb < cfg["min_score_B"]:
                 log.info(
                     f"  {sym}: B={sb} < min {cfg['min_score_B']} — "
-                    f"no volume confirmation, skip"
+                    f"no volume confirmation, skip "
+                    f"(A={sa} B={sb} C={sc} total={sa+sb+sc})"
                 )
                 continue
 
@@ -1264,6 +1645,25 @@ def run_scan() -> None:
                 f"R:R={trade['rr']:.2f} [{trade['tp_method']}]"
             )
 
+            # ── Coinalyze derivatives (context info, tidak masuk score) ──
+            # Hanya fetch untuk coin yang sudah lolos semua gate
+            deriv = CoinalyzeData.fetch_all(sym)
+            btx_d = deriv.get("btx", {})
+            oi_d  = deriv.get("oi",  {})
+            fund_d= deriv.get("funding", {})
+            ls_d  = deriv.get("ls",  {})
+            liq_d = deriv.get("liq", {})
+
+            # Log ringkas derivatives
+            deriv_summary = []
+            if btx_d:  deriv_summary.append(f"btx_z={btx_d.get('btx_z',0):.2f}")
+            if oi_d:   deriv_summary.append(f"oi_1h={oi_d.get('oi_chg_1h',0):+.2f}%")
+            if fund_d: deriv_summary.append(f"fund={fund_d.get('funding_current',0):.5f}")
+            if ls_d:   deriv_summary.append(f"long%={ls_d.get('long_pct',50):.1f}")
+            if liq_d:  deriv_summary.append(f"s_liq4h=${liq_d.get('short_liq_4h',0):,.0f}")
+            if deriv_summary:
+                log.info(f"      CLZ: {' | '.join(deriv_summary)}")
+
             results.append({
                 "symbol":       sym,
                 "price":        round(price, 8),
@@ -1294,6 +1694,23 @@ def run_scan() -> None:
                 "strength":     strength,
                 "caution":      caution,
                 "vol_24h_m":    round(d["vol_24h"] / 1_000_000, 1),
+                # Coinalyze derivatives (context info)
+                "btx_z":        btx_d.get("btx_z",       None),
+                "btx_ratio":    btx_d.get("btx_ratio",   None),
+                "bv_ratio":     btx_d.get("bv_ratio",    None),
+                "oi_usd":       oi_d.get("oi_usd",       None),
+                "oi_chg_1h":    oi_d.get("oi_chg_1h",   None),
+                "oi_chg_4h":    oi_d.get("oi_chg_4h",   None),
+                "funding":      fund_d.get("funding_current", None),
+                "funding_trend":fund_d.get("funding_trend",   None),
+                "long_pct":     ls_d.get("long_pct",     None),
+                "short_pct":    ls_d.get("short_pct",    None),
+                "ls_ratio":     ls_d.get("ls_ratio",     None),
+                "long_trend":   ls_d.get("long_trend",   None),
+                "short_liq_4h": liq_d.get("short_liq_4h", None),
+                "long_liq_4h":  liq_d.get("long_liq_4h",  None),
+                "short_dom_24h":liq_d.get("short_dom_24h", None),
+                "deriv_source": "Binance/Bybit proxy",
             })
 
         except Exception as e:
@@ -1348,4 +1765,3 @@ if __name__ == "__main__":
         log.error("FATAL: BOT_TOKEN / CHAT_ID tidak ditemukan!")
         exit(1)
     run_scan()
-
