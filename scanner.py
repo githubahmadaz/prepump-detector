@@ -147,7 +147,7 @@ CONFIG: Dict = {
     "XPLUSDT","XRPUSDT","XTZUSDT","XVGUSDT","YGGUSDT","YZYUSDT","ZAMAUSDT",
     "ZBTUSDT","ZECUSDT","ZENUSDT","ZEREBROUSDT","ZETAUSDT","ZILUSDT",
     "ZKUSDT","ZKCUSDT","ZKJUSDT","ZKPUSDT","ZORAUSDT","ZROUSDT",
-}
+
     ],
     
     # Phase 1: Bitget-only filter thresholds (based on feature discovery v2)
