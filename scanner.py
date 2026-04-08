@@ -73,8 +73,7 @@ log = setup_logging()
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
-CONFIG: Dict[str, Any] = {
-  CONFIG: Dict = {
+CONFIG: Dict = {
     "coinalyze_api_key":  os.getenv("COINALYZE_API_KEY", "ab447e9a-3a26-4253-a68e-1cd0603d22d2"),
     "bot_token":          os.getenv("BOT_TOKEN"),
     "chat_id":            os.getenv("CHAT_ID"),
