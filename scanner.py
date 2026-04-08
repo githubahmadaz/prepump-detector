@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.0 — TWO-PHASE ARCHITECTURE                            ║
+║  PRE-PUMP SCANNER v15.1 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
 ║                                                                              ║
-║  ARSITEKTUR:                                                                 ║
-║    PHASE 1 — Filter cepat dengan Bitget candles (ATR, range, BBW, wick,     ║
-║              support, momentum decel). Hanya coin dengan skor ≥ 60 yang     ║
-║              dilanjutkan ke phase 2.                                        ║
-║    PHASE 2 — Verifikasi mendalam dengan Coinalyze (OI, liq, funding, L/S).  ║
-║              Scoring final menggunakan semua tier (1,2,3).                  ║
-║                                                                              ║
-║  KEUNGGULAN:                                                                 ║
-║    • Hemat kuota API Coinalyze (hanya dipanggil untuk kandidat kuat)        ║
-║    • Cepat karena Bitget tanpa rate limit berarti                            ║
-║    • Akurasi tinggi karena keputusan final pakai derivatif                   ║
-║    • Berbasis data feature discovery v2 (104 pump events, 120 simbol)       ║
-║                                                                              ║
-║  THRESHOLD:                                                                  ║
-║    Phase 1 (Bitget-only): skor ≥ 60                                         ║
-║    Phase 2 (Coinalyze): total score ≥ 95 (EARLY) / 100 (CONTINUATION)       ║
-║    Bitget-only fallback: skor ≥ 75 jika tidak ada data Coinalyze            ║
+║  PERBAIKAN:                                                                  ║
+║    • Filter simbol dengan regex (min 2 huruf + USDT)                         ║
+║    • ATR-based entry, stop loss, take profit                                ║
+║    • Phase1 threshold dinaikkan ke 65                                       ║
+║    • Minimum volume 24h $300K                                               ║
+║    • Cooldown 12 jam untuk coin                                             ║
+║    • Optimasi rate limit Coinalyze (batch size 5, backoff)                  ║
+║    • Filter tambahan: EARLY dengan chg_1h < -2% ditolak                     ║
+║    • Blacklist coin illiquid / scam                                         ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -32,9 +24,10 @@ import sys
 import time
 import sqlite3
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple, Any, Set
+from typing import Dict, List, Optional, Tuple, Any
 
 import requests
 
@@ -45,7 +38,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "15.0.0-TWO-PHASE"
+VERSION = "15.1.0-PRODUCTION"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 def setup_logging() -> logging.Logger:
@@ -53,12 +46,10 @@ def setup_logging() -> logging.Logger:
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     
-    # Console handler
     ch = logging.StreamHandler()
     ch.setFormatter(formatter)
     logger.addHandler(ch)
     
-    # File handler with rotation
     fh = logging.handlers.RotatingFileHandler(
         "/tmp/scanner_v15.log", maxBytes=10 * 1024**2, backupCount=3
     )
@@ -73,85 +64,50 @@ log = setup_logging()
 # ══════════════════════════════════════════════════════════════════════════════
 #  ⚙️  CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
-CONFIG: Dict = {
-    "coinalyze_api_key":  os.getenv("COINALYZE_API_KEY", "ab447e9a-3a26-4253-a68e-1cd0603d22d2"),
-    "bot_token":          os.getenv("BOT_TOKEN"),
-    "chat_id":            os.getenv("CHAT_ID"),
-
+CONFIG: Dict[str, Any] = {
+    # API Keys
+    "coinalyze_api_key": os.getenv("COINALYZE_API_KEY", ""),
+    "bot_token": os.getenv("BOT_TOKEN", ""),
+    "chat_id": os.getenv("CHAT_ID", ""),
     
     # Whitelist (coin yang akan dipindai)
     "whitelist": [
-        "4USDT","0GUSDT","1000BONKUSDT","1000PEPEUSDT","1000RATSUSDT",
-    "1000SHIBUSDT","1000XECUSDT","1INCHUSDT","1MBABYDOGEUSDT","2ZUSDT",
-    "AAVEUSDT","ACEUSDT","ACHUSDT","ACTUSDT","ADAUSDT","AEROUSDT",
-    "AGLDUSDT","AINUSDT","AIOUSDT","AIXBTUSDT","AKTUSDT","ALCHUSDT",
-    "ALGOUSDT","ALICEUSDT","ALLOUSDT","ALTUSDT","ANIMEUSDT",
-    "ANKRUSDT","APEUSDT","APEXUSDT","API3USDT","APRUSDT","APTUSDT",
-    "ARUSDT","ARBUSDT","ARCUSDT","ARIAUSDT","ARKUSDT","ARKMUSDT",
-    "ARPAUSDT","ASTERUSDT","ATUSDT","ATHUSDT","ATOMUSDT","AUCTIONUSDT",
-    "AVAXUSDT","AVNTUSDT","AWEUSDT","AXLUSDT","AXSUSDT","AZTECUSDT",
-    "BUSDT","B2USDT","BABYUSDT","BANUSDT","BANANAUSDT",
-    "BANANAS31USDT","BANKUSDT","BARDUSDT","BATUSDT","BCHUSDT","BEATUSDT",
-    "BERAUSDT","BGBUSDT","BIGTIMEUSDT","BIOUSDT","BIRBUSDT","BLASTUSDT",
-    "BLESSUSDT","BLURUSDT","BNBUSDT","BOMEUSDT","BRETTUSDT","BREVUSDT",
-    "BROCCOLIUSDT","BSVUSDT","BTCUSDT","BULLAUSDT","C98USDT","CAKEUSDT",
-    "CCUSDT","CELOUSDT","CFXUSDT","CHILLGUYUSDT","CHZUSDT","CLUSDT",
-    "CLANKERUSDT","CLOUSDT","COAIUSDT","COMPUSDT","COOKIEUSDT",
-    "COWUSDT","CRCLUSDT","CROUSDT","CROSSUSDT","CRVUSDT","CTKUSDT",
-    "CVCUSDT","CVXUSDT","CYBERUSDT","CYSUSDT","DASHUSDT","DEEPUSDT",
-    "DENTUSDT","DEXEUSDT","DOGEUSDT","DOLOUSDT","DOODUSDT","DOTUSDT",
-    "DRIFTUSDT","DYDXUSDT","DYMUSDT","EGLDUSDT","EIGENUSDT","ENAUSDT",
-    "ENJUSDT","ENSUSDT","ENSOUSDT","EPICUSDT","ESPUSDT","ETCUSDT",
-    "ETHUSDT","ETHFIUSDT","FUSDT","FARTCOINUSDT","FETUSDT",
-    "FFUSDT","FIDAUSDT","FILUSDT","FLOKIUSDT","FLUIDUSDT","FOGOUSDT",
-    "FOLKSUSDT","FORMUSDT","GALAUSDT","GASUSDT","GIGGLEUSDT",
-    "GLMUSDT","GMTUSDT","GMXUSDT","GOATUSDT","GPSUSDT","GRASSUSDT","GUSDT",
-    "GRIFFAINUSDT","GRTUSDT","GUNUSDT","GWEIUSDT","HUSDT","HBARUSDT",
-    "HEIUSDT","HEMIUSDT","HMSTRUSDT","HOLOUSDT","HOMEUSDT","HYPEUSDT","HYPERUSDT",
-    "ICNTUSDT","ICPUSDT","IDOLUSDT","ILVUSDT",
-    "IMXUSDT","INITUSDT","INJUSDT","INXUSDT","IOUSDT",
-    "IOTAUSDT","IOTXUSDT","IPUSDT","JASMYUSDT","JCTUSDT","JSTUSDT",
-    "JTOUSDT","JUPUSDT","KAIAUSDT","KAITOUSDT","KASUSDT","KAVAUSDT",
-    "kBONKUSDT","KERNELUSDT","KGENUSDT","KITEUSDT","kPEPEUSDT","kSHIBUSDT",
-    "LAUSDT","LABUSDT","LAYERUSDT","LDOUSDT","LIGHTUSDT","LINEAUSDT",
-    "LINKUSDT","LITUSDT","LPTUSDT","LSKUSDT","LTCUSDT","LUNAUSDT",
-    "LUNCUSDT","LYNUSDT","MUSDT","MAGICUSDT","MAGMAUSDT","MANAUSDT",
-    "MANTAUSDT","MANTRAUSDT","MASKUSDT","MAVUSDT","MAVIAUSDT","MBOXUSDT",
-    "MEUSDT","MEGAUSDT","MELANIAUSDT","MEMEUSDT","MERLUSDT","METUSDT",
-    "METAUSDT","MEWUSDT","MINAUSDT","MMTUSDT","MNTUSDT","MONUSDT",
-    "MOODENGUSDT","MORPHOUSDT","MOVEUSDT","MOVRUSDT","MUUSDT","MUBARAKUSDT",
-    "MYXUSDT","NAORISUSDT","NEARUSDT","NEIROCTOUSDT",
-    "NEOUSDT","NEWTUSDT","NILUSDT","NMRUSDT","NOMUSDT","NOTUSDT",
-    "NXPCUSDT","ONDOUSDT","ONGUSDT","ONTUSDT","OPUSDT","OPENUSDT",
-    "OPNUSDT","ORCAUSDT","ORDIUSDT","OXTUSDT","PARTIUSDT",
-    "PENDLEUSDT","PENGUUSDT","PEOPLEUSDT","PEPEUSDT","PHAUSDT","PIEVERSEUSDT",
-    "PIPPINUSDT","PLUMEUSDT","PNUTUSDT","POLUSDT","POLYXUSDT",
-    "POPCATUSDT","POWERUSDT","PROMPTUSDT","PROVEUSDT","PUMPUSDT","PURRUSDT",
-    "PYTHUSDT","QUSDT","QNTUSDT","RAVEUSDT","RAYUSDT",
-    "RECALLUSDT","RENDERUSDT","RESOLVUSDT","REZUSDT","RIVERUSDT","ROBOUSDT",
-    "ROSEUSDT","RPLUSDT","RSRUSDT","RUNEUSDT","SUSDT","SAGAUSDT","SAHARAUSDT",
-    "SANDUSDT","SAPIENUSDT","SEIUSDT","SENTUSDT","SHIBUSDT","SIGNUSDT",
-    "SIRENUSDT","SKHYNIXUSDT","SKRUSDT","SKYUSDT","SKYAIUSDT","SLPUSDT",
-    "SNXUSDT","SOLUSDT","SOMIUSDT","SONICUSDT","SOONUSDT","SOPHUSDT",
-    "SPACEUSDT","SPKUSDT","SPXUSDT","SQDUSDT","SSVUSDT",
-    "STBLUSDT","STEEMUSDT","STOUSDT","STRKUSDT","STXUSDT",
-    "SUIUSDT","SUNUSDT","SUPERUSDT","SUSHIUSDT","SYRUPUSDT","TUSDT",
-    "TACUSDT","TAGUSDT","TAIKOUSDT","TAOUSDT","THEUSDT","THETAUSDT",
-    "TIAUSDT","TNSRUSDT","TONUSDT","TOSHIUSDT","TOWNSUSDT","TRBUSDT",
-    "TRIAUSDT","TRUMPUSDT","TRXUSDT","TURBOUSDT","UAIUSDT","UBUSDT",
-    "UMAUSDT","UNIUSDT","USUSDT","USDKRWUSDT","USELESSUSDT",
-    "USUALUSDT","VANAUSDT","VANRYUSDT","VETUSDT","VINEUSDT","VIRTUALUSDT",
-    "VTHOUSDT","VVVUSDT","WUSDT","WALUSDT","WAXPUSDT","WCTUSDT","WETUSDT",
-    "WIFUSDT","WLDUSDT","WLFIUSDT","WOOUSDT","WTIUSDT","XAIUSDT",
-    "XCUUSDT","XDCUSDT","XLMUSDT","XMRUSDT","XPDUSDT","XPINUSDT",
-    "XPLUSDT","XRPUSDT","XTZUSDT","XVGUSDT","YGGUSDT","YZYUSDT","ZAMAUSDT",
-    "ZBTUSDT","ZECUSDT","ZENUSDT","ZEREBROUSDT","ZETAUSDT","ZILUSDT",
-    "ZKUSDT","ZKCUSDT","ZKJUSDT","ZKPUSDT","ZORAUSDT","ZROUSDT",
-
+        "AAVEUSDT", "ACEUSDT", "ACHUSDT", "ACTUSDT", "ADAUSDT", "AEROUSDT", "AGLDUSDT",
+        "AINUSDT", "AIOUSDT", "AIXBTUSDT", "AKTUSDT", "ALGOUSDT", "ALICEUSDT", "ALTUSDT",
+        "ANIMEUSDT", "ANKRUSDT", "APEUSDT", "APEXUSDT", "API3USDT", "APRUSDT", "APTUSDT",
+        "ARUSDT", "ARBUSDT", "ARKUSDT", "ARKMUSDT", "ARPAUSDT", "ATUSDT", "ATHUSDT",
+        "ATOMUSDT", "AVAXUSDT", "AXSUSDT", "BANANAUSDT", "BATUSDT", "BCHUSDT", "BEATUSDT",
+        "BERAUSDT", "BIGTIMEUSDT", "BIOUSDT", "BLASTUSDT", "BLURUSDT", "BNBUSDT",
+        "BOMEUSDT", "BRETTUSDT", "BTCUSDT", "C98USDT", "CAKEUSDT", "CELOUSDT", "CFXUSDT",
+        "CHZUSDT", "COMPUSDT", "CRVUSDT", "CTKUSDT", "CVCUSDT", "CYBERUSDT", "DASHUSDT",
+        "DOGEUSDT", "DOTUSDT", "DRIFTUSDT", "DYDXUSDT", "DYMUSDT", "EGLDUSDT", "EIGENUSDT",
+        "ENAUSDT", "ENJUSDT", "ENSUSDT", "ETCUSDT", "ETHUSDT", "ETHFIUSDT", "FETUSDT",
+        "FIDAUSDT", "FILUSDT", "FLOKIUSDT", "GALAUSDT", "GLMUSDT", "GMTUSDT", "GMXUSDT",
+        "GOATUSDT", "GRASSUSDT", "GRTUSDT", "HBARUSDT", "HMSTRUSDT", "HOLOUSDT", "HYPEUSDT",
+        "ICPUSDT", "ILVUSDT", "IMXUSDT", "INJUSDT", "IOTAUSDT", "IOTXUSDT", "JASMYUSDT",
+        "JUPUSDT", "KAIAUSDT", "KASUSDT", "KAVAUSDT", "KITEUSDT", "LDOUSDT", "LINKUSDT",
+        "LITUSDT", "LPTUSDT", "LTCUSDT", "LUNCUSDT", "MAGICUSDT", "MANAUSDT", "MANTAUSDT",
+        "MANTRAUSDT", "MASKUSDT", "MAVUSDT", "MBOXUSDT", "MEMEUSDT", "MINAUSDT", "MNTUSDT",
+        "MOODENGUSDT", "MOVEUSDT", "NEARUSDT", "NEOUSDT", "NILUSDT", "NOTUSDT", "ONDOUSDT",
+        "ONGUSDT", "ONTUSDT", "OPUSDT", "ORDIUSDT", "PENDLEUSDT", "PENGUUSDT", "PEOPLEUSDT",
+        "PEPEUSDT", "PNUTUSDT", "POLUSDT", "POPCATUSDT", "PYTHUSDT", "QNTUSDT", "RAYUSDT",
+        "RENDERUSDT", "ROSEUSDT", "RUNEUSDT", "SAGAUSDT", "SANDUSDT", "SEIUSDT", "SHIBUSDT",
+        "SIRENUSDT", "SKRUSDT", "SKYUSDT", "SLPUSDT", "SNXUSDT", "SOLUSDT", "SONICUSDT",
+        "STRKUSDT", "STXUSDT", "SUIUSDT", "SUPERUSDT", "SUSHIUSDT", "TAOUSDT", "THEUSDT",
+        "THETAUSDT", "TIAUSDT", "TNSRUSDT", "TONUSDT", "TRBUSDT", "TRUMPUSDT", "TURBOUSDT",
+        "UMAUSDT", "UNIUSDT", "VANAUSDT", "VETUSDT", "VIRTUALUSDT", "WUSDT", "WIFUSDT",
+        "WLDUSDT", "WOOUSDT", "XAIUSDT", "XLMUSDT", "XMRUSDT", "XRPUSDT", "XTZUSDT",
+        "YGGUSDT", "ZECUSDT", "ZENUSDT", "ZEREBROUSDT", "ZETAUSDT", "ZILUSDT",
+        "ZKUSDT", "ZROUSDT", "1000BONKUSDT", "1000PEPEUSDT", "1000SHIBUSDT",
+        # Tambahan coin yang mungkin valid (dari log sebelumnya)
+        "4USDT", "ARCUSDT", "CHILLGUYUSDT", "CLOUSDT", "DEXEUSDT", "GIGGLEUSDT",
+        "GRIFFAINUSDT", "GUNUSDT", "KAITOUSDT", "LABUSDT", "MONUSDT", "PIPPINUSDT",
+        "POWERUSDT", "RAVEUSDT", "RESOLVUSDT", "STOUSDT", "XPINUSDT", "XVGUSDT",
     ],
     
-    # Phase 1: Bitget-only filter thresholds (based on feature discovery v2)
-    "phase1_threshold": 60,      # Skor minimal untuk lolos ke phase 2
+    # Phase 1: Bitget-only filter
+    "phase1_threshold": 65,            # dinaikkan dari 60
+    "phase1_min_volume_usd": 300_000,  # minimal volume 24h
     "phase1_weights": {
         "atr": 25,
         "range": 25,
@@ -160,15 +116,15 @@ CONFIG: Dict = {
         "support": 15,
         "decel": 10,
     },
-    "phase1_atr_thresholds": [3.5, 2.5, 1.8],      # score: 25, 18, 10
-    "phase1_range_thresholds": [4.0, 2.5, 1.8],    # score: 25, 16, 8
-    "phase1_bbw_thresholds": [0.15, 0.10, 0.07],   # score: 20, 14, 8
-    "phase1_wick_thresholds": [1.0, 0.65, 0.4],    # score: 15, 10, 6
-    "phase1_support_dist_range": (0.3, 1.5),       # sweet spot
-    "phase1_support_dist_wide": (1.5, 3.0),        # score half
-    "phase1_decel_thresholds": [-0.30, -0.15, -0.05],  # score: 10, 6, 3
+    "phase1_atr_thresholds": [3.5, 2.5, 1.8],
+    "phase1_range_thresholds": [4.0, 2.5, 1.8],
+    "phase1_bbw_thresholds": [0.15, 0.10, 0.07],
+    "phase1_wick_thresholds": [1.0, 0.65, 0.4],
+    "phase1_support_dist_range": (0.3, 1.5),
+    "phase1_support_dist_wide": (1.5, 3.0),
+    "phase1_decel_thresholds": [-0.30, -0.15, -0.05],
     
-    # Phase 2: Final scoring thresholds (sama seperti v14)
+    # Phase 2: Final scoring thresholds
     "alert_threshold_early": 95,
     "alert_threshold_continuation": 100,
     "alert_threshold_reversal": 80,
@@ -176,7 +132,8 @@ CONFIG: Dict = {
     
     # Velocity gates (relaxed for early breakout)
     "velocity_gates": {
-        "chg_1h_max": 10.0,
+        "chg_1h_max_early": 8.0,       # lebih ketat untuk EARLY
+        "chg_1h_max_continuation": 12.0,
         "chg_4h_max": 15.0,
         "chg_24h_max_early": 15.0,
         "chg_24h_max_continuation": 30.0,
@@ -184,17 +141,32 @@ CONFIG: Dict = {
     },
     
     # Cooldown & limits
-    "cooldown_hours": 6,
+    "cooldown_hours": 12,              # dinaikkan dari 6
     "max_alerts_per_scan": 5,
     "candle_limit_bitget": 100,
     "coinalyze_lookback_h": 72,
     "coinalyze_funding_lookback_h": 168,
-    "coinalyze_batch_size": 10,
+    "coinalyze_batch_size": 5,         # turun dari 10 untuk hindari rate limit
     "coinalyze_rate_limit_wait": 1.2,
     "btc_dump_threshold": -3.0,
     
     # Database
     "history_db": "/tmp/scanner_v15_history.db",
+    
+    # Entry/SL/TP (ATR-based)
+    "sl_mult_volatile": 2.5,
+    "sl_mult_normal": 2.0,
+    "sl_mult_quiet": 1.5,
+    "tp1_pct": 15.0,
+    "tp2_pct": 30.0,
+    "tp3_pct": 50.0,
+    "min_rr_ratio": 2.0,
+    
+    # Position sizing
+    "account_balance": 10000.0,
+    "risk_per_trade_pct": 1.0,
+    "max_position_pct": 5.0,
+    "max_leverage": 10,
     
     # Stock blacklist
     "stock_token_blacklist": [
@@ -205,7 +177,13 @@ CONFIG: Dict = {
         "TSLAUSDT", "CRCLUSDT", "SPYUSDT", "GLDUSDT", "MSFTUSDT",
         "PLTRUSDT", "INTCUSDT", "XAUSDT", "USDCUSDT", "TRXUSDT",
     ],
+    
+    # Additional blacklist for suspicious symbols
+    "extra_blacklist": [
+        "1USDT", "2USDT", "3USDT", "5USDT", "6USDT", "7USDT", "8USDT", "9USDT", "0USDT",
+    ],
 }
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  📊  DATA CLASSES
@@ -288,7 +266,7 @@ class ScoreResult:
     urgency: str
     risk_warnings: List[str] = field(default_factory=list)
     position: Optional[dict] = None
-    bitget_phase1_score: int = 0  # New field untuk logging
+    bitget_phase1_score: int = 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -377,6 +355,16 @@ def is_stock_token(symbol: str) -> bool:
     return symbol.strip().upper() in blacklist
 
 
+def is_valid_symbol(symbol: str) -> bool:
+    """Validasi simbol: minimal 2 huruf + USDT, tidak di extra blacklist"""
+    if symbol in CONFIG.get("extra_blacklist", []):
+        return False
+    # Pattern: setidaknya 2 huruf diikuti USDT (case insensitive)
+    if not re.match(r'^[A-Za-z]{2,}USDT$', symbol):
+        return False
+    return True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  📐  ATR & TECHNICAL INDICATORS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -397,7 +385,6 @@ def calc_atr(candles: List[dict], n: int = 14) -> float:
 
 
 def calc_bbw(candles: List[dict]) -> float:
-    """Bollinger Band Width (BBW) sebagai rasio"""
     if len(candles) < 22:
         return 0.0
     closes = [c["close"] for c in candles[-20:]]
@@ -410,7 +397,6 @@ def calc_bbw(candles: List[dict]) -> float:
 
 
 def calc_range_pct(candles: List[dict]) -> float:
-    """Rentang harga 3 candle terakhir dalam persen"""
     if len(candles) < 10:
         return 0.0
     recent = candles[-9:-1]
@@ -423,7 +409,6 @@ def calc_range_pct(candles: List[dict]) -> float:
 
 
 def calc_lower_wick_pct(candles: List[dict]) -> float:
-    """Rata-rata lower wick 3 candle terakhir dalam persen"""
     if len(candles) < 5:
         return 0.0
     wick_pcts = []
@@ -439,11 +424,6 @@ def calc_lower_wick_pct(candles: List[dict]) -> float:
 
 
 def calc_dist_to_support(candles: List[dict], price: float) -> Tuple[float, bool]:
-    """
-    Menghitung jarak ke support terdekat dan apakah dalam compression.
-    Support di-cluster dari lows 96 candle.
-    Returns: (distance_pct, inside_compression)
-    """
     window = min(96, len(candles))
     if window < 10 or price <= 0:
         return 100.0, True
@@ -453,7 +433,6 @@ def calc_dist_to_support(candles: List[dict], price: float) -> Tuple[float, bool
     if len(lows) < 4:
         return 100.0, True
     
-    # Clustering dengan toleransi 2%
     tol = 0.02
     clusters: Dict[float, int] = {}
     for low in lows:
@@ -469,23 +448,17 @@ def calc_dist_to_support(candles: List[dict], price: float) -> Tuple[float, bool
     if not clusters:
         return 100.0, True
     
-    # Support valid: bounce antara 2-5 kali dan di bawah harga
     valid = [(lvl, cnt) for lvl, cnt in clusters.items() if 2 <= cnt <= 5 and lvl < price]
     if not valid:
         return 100.0, True
     
-    # Support terkuat (bounce terbanyak)
     support_level, bounce = max(valid, key=lambda x: x[1])
     dist_pct = (price - support_level) / support_level * 100
-    
-    # Inside compression: harga dalam 3% di atas support
     inside_comp = (dist_pct <= 3.0)
-    
     return dist_pct, inside_comp
 
 
 def calc_momentum_decel(candles: List[dict]) -> float:
-    """Momentum deceleration: perubahan percepatan 5 candle terakhir"""
     if len(candles) < 8:
         return 0.0
     chgs = []
@@ -499,52 +472,50 @@ def calc_momentum_decel(candles: List[dict]) -> float:
         return 0.0
     recent = _mean(chgs[-2:])
     earlier = _mean(chgs[:2])
-    return recent - earlier  # negatif = deceleration
+    return recent - earlier
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  🎯  PHASE 1: BITGET-ONLY FILTER (Fast)
 # ══════════════════════════════════════════════════════════════════════════════
-def phase1_bitget_filter(candles: List[dict]) -> Tuple[int, Dict[str, Any]]:
-    """
-    Menghitung skor berdasarkan fitur-fitur candle saja.
-    Berdasarkan feature discovery v2 dengan bobot:
-    - ATR (25), range (25), BBW (20), lower wick (15), support (15), decel (10)
-    Threshold untuk lolos: skor >= 60
-    """
+def phase1_bitget_filter(candles: List[dict], vol_24h: float) -> Tuple[int, Dict[str, Any]]:
     if len(candles) < 30:
         return 0, {"error": "insufficient_candles"}
     
+    # Minimum volume
+    if vol_24h < CONFIG["phase1_min_volume_usd"]:
+        return 0, {"error": f"low_volume_{vol_24h/1e3:.0f}K"}
+    
     cfg = CONFIG["phase1_weights"]
-    thresholds = CONFIG["phase1_atr_thresholds"]
     details = {}
     score = 0
     
     # 1. ATR
     atr = calc_atr(candles[-22:], 14) * 100
-    if atr >= thresholds[0]:
+    thr = CONFIG["phase1_atr_thresholds"]
+    if atr >= thr[0]:
         score += cfg["atr"]
         details["atr_score"] = cfg["atr"]
-    elif atr >= thresholds[1]:
+    elif atr >= thr[1]:
         score += 18
         details["atr_score"] = 18
-    elif atr >= thresholds[2]:
+    elif atr >= thr[2]:
         score += 10
         details["atr_score"] = 10
     else:
         details["atr_score"] = 0
     details["atr_pct"] = round(atr, 2)
     
-    # 2. Range 3 candle
+    # 2. Range
     range_pct = calc_range_pct(candles)
-    thresholds_r = CONFIG["phase1_range_thresholds"]
-    if range_pct >= thresholds_r[0]:
+    thr_r = CONFIG["phase1_range_thresholds"]
+    if range_pct >= thr_r[0]:
         score += cfg["range"]
         details["range_score"] = cfg["range"]
-    elif range_pct >= thresholds_r[1]:
+    elif range_pct >= thr_r[1]:
         score += 16
         details["range_score"] = 16
-    elif range_pct >= thresholds_r[2]:
+    elif range_pct >= thr_r[2]:
         score += 8
         details["range_score"] = 8
     else:
@@ -553,14 +524,14 @@ def phase1_bitget_filter(candles: List[dict]) -> Tuple[int, Dict[str, Any]]:
     
     # 3. BBW
     bbw = calc_bbw(candles)
-    thresholds_b = CONFIG["phase1_bbw_thresholds"]
-    if bbw >= thresholds_b[0]:
+    thr_b = CONFIG["phase1_bbw_thresholds"]
+    if bbw >= thr_b[0]:
         score += cfg["bbw"]
         details["bbw_score"] = cfg["bbw"]
-    elif bbw >= thresholds_b[1]:
+    elif bbw >= thr_b[1]:
         score += 14
         details["bbw_score"] = 14
-    elif bbw >= thresholds_b[2]:
+    elif bbw >= thr_b[2]:
         score += 8
         details["bbw_score"] = 8
     else:
@@ -569,30 +540,30 @@ def phase1_bitget_filter(candles: List[dict]) -> Tuple[int, Dict[str, Any]]:
     
     # 4. Lower wick
     wick = calc_lower_wick_pct(candles)
-    thresholds_w = CONFIG["phase1_wick_thresholds"]
-    if wick >= thresholds_w[0]:
+    thr_w = CONFIG["phase1_wick_thresholds"]
+    if wick >= thr_w[0]:
         score += cfg["wick"]
         details["wick_score"] = cfg["wick"]
-    elif wick >= thresholds_w[1]:
+    elif wick >= thr_w[1]:
         score += 10
         details["wick_score"] = 10
-    elif wick >= thresholds_w[2]:
+    elif wick >= thr_w[2]:
         score += 6
         details["wick_score"] = 6
     else:
         details["wick_score"] = 0
     details["wick_pct"] = round(wick, 2)
     
-    # 5. Distance to support & inside compression
+    # 5. Support & compression
     price = candles[-2]["close"]
-    dist, inside_comp = calc_dist_to_support(candles, price)
+    dist, inside = calc_dist_to_support(candles, price)
     details["dist_to_support"] = round(dist, 2)
-    details["inside_compression"] = 1 if inside_comp else 0
+    details["inside_compression"] = 1 if inside else 0
     
-    if not inside_comp:  # tidak dalam compression
-        sweet_low, sweet_high = CONFIG["phase1_support_dist_range"]
+    if not inside:
+        low, high = CONFIG["phase1_support_dist_range"]
         wide_low, wide_high = CONFIG["phase1_support_dist_wide"]
-        if sweet_low <= dist <= sweet_high:
+        if low <= dist <= high:
             score += cfg["support"]
             details["support_score"] = cfg["support"]
         elif wide_low <= dist <= wide_high:
@@ -605,14 +576,14 @@ def phase1_bitget_filter(candles: List[dict]) -> Tuple[int, Dict[str, Any]]:
     
     # 6. Momentum deceleration
     decel = calc_momentum_decel(candles)
-    thresholds_d = CONFIG["phase1_decel_thresholds"]
-    if decel <= thresholds_d[0]:
+    thr_d = CONFIG["phase1_decel_thresholds"]
+    if decel <= thr_d[0]:
         score += cfg["decel"]
         details["decel_score"] = cfg["decel"]
-    elif decel <= thresholds_d[1]:
+    elif decel <= thr_d[1]:
         score += 6
         details["decel_score"] = 6
-    elif decel <= thresholds_d[2]:
+    elif decel <= thr_d[2]:
         score += 3
         details["decel_score"] = 3
     else:
@@ -628,7 +599,7 @@ def phase1_bitget_filter(candles: List[dict]) -> Tuple[int, Dict[str, Any]]:
 # ══════════════════════════════════════════════════════════════════════════════
 class BitgetClient:
     BASE_URL = "https://api.bitget.com"
-    _candles_cache: Dict[str, tuple] = {}  # key -> (timestamp, candles)
+    _candles_cache: Dict[str, tuple] = {}
     CACHE_TTL = 55 * 60
     
     @classmethod
@@ -705,23 +676,27 @@ class BitgetClient:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🌐  COINALYZE API CLIENT (dengan rate limiting)
+#  🌐  COINALYZE API CLIENT (dengan rate limiting & backoff)
 # ══════════════════════════════════════════════════════════════════════════════
 class CoinalyzeClient:
     BASE_URL = "https://api.coinalyze.net/v1"
     _last_call: float = 0.0
+    _retry_count: int = 0
     
     def __init__(self, api_key: str):
         self.api_key = api_key
         self._markets_cache: Optional[List[dict]] = None
-        self._bn_map: Dict[str, str] = {}   # Bitget symbol -> Binance symbol di Coinalyze
-        self._by_map: Dict[str, str] = {}   # Bitget symbol -> Bybit symbol untuk L/S
+        self._bn_map: Dict[str, str] = {}
+        self._by_map: Dict[str, str] = {}
     
     def _wait(self):
+        base_wait = CONFIG["coinalyze_rate_limit_wait"]
+        # Exponential backoff berdasarkan retry count
+        wait = base_wait * (self._retry_count + 1)
+        wait = min(wait, 10)  # maks 10 detik
         elapsed = time.time() - CoinalyzeClient._last_call
-        wait = CONFIG["coinalyze_rate_limit_wait"] - elapsed
-        if wait > 0:
-            time.sleep(wait)
+        if elapsed < wait:
+            time.sleep(wait - elapsed)
         CoinalyzeClient._last_call = time.time()
     
     def _get(self, endpoint: str, params: dict) -> Optional[Any]:
@@ -732,14 +707,15 @@ class CoinalyzeClient:
             try:
                 resp = requests.get(f"{self.BASE_URL}/{endpoint}", params=params, headers=headers, timeout=15)
                 if resp.status_code == 429:
-                    retry = resp.headers.get("Retry-After", "10")
+                    retry_after = resp.headers.get("Retry-After", "5")
                     try:
-                        wait = int(float(retry)) + 1
+                        wait = int(float(retry_after)) + 1
                     except:
-                        wait = 11
+                        wait = 6
                     jitter = random.uniform(0.5, 2.0)
-                    log.warning(f"  Coinalyze rate limit, wait {wait}s + {jitter:.1f}s")
+                    log.warning(f"  Coinalyze rate limit, wait {wait}s + {jitter:.1f}s (attempt {attempt+1}/3)")
                     time.sleep(wait + jitter)
+                    self._retry_count += 1
                     continue
                 if resp.status_code != 200:
                     log.warning(f"  Coinalyze {endpoint} HTTP {resp.status_code}: {resp.text[:150]}")
@@ -748,15 +724,16 @@ class CoinalyzeClient:
                 if isinstance(data, dict) and "error" in data:
                     log.warning(f"  Coinalyze error: {data['error']}")
                     return None
+                self._retry_count = 0
                 return data
             except Exception as e:
                 log.warning(f"  Coinalyze request error: {e}")
                 if attempt < 2:
                     time.sleep(3)
+        self._retry_count = 0
         return None
     
     def build_symbol_maps(self, bitget_symbols: List[str]) -> None:
-        """Mapping simbol Bitget ke Coinalyze (Binance untuk OHLCV/OI/liq, Bybit untuk L/S)"""
         if self._markets_cache is None:
             log.info("  Loading Coinalyze markets...")
             data = self._get("future-markets", {})
@@ -775,9 +752,9 @@ class CoinalyzeClient:
             quote = m.get("quote_asset", "").upper()
             if not (is_perp and quote == "USDT" and clz_sym):
                 continue
-            if exc == "A":  # Binance
+            if exc == "A":
                 bn_lookup[sym_on_exc] = clz_sym
-            elif exc == "6" and m.get("has_long_short_ratio_data"):  # Bybit
+            elif exc == "6" and m.get("has_long_short_ratio_data"):
                 by_ls_lookup[sym_on_exc] = clz_sym
         
         def normalize(s: str) -> str:
@@ -831,22 +808,19 @@ class CoinalyzeClient:
         return result
     
     def fetch_for_symbols(self, symbols: List[str], from_ts: int, to_ts: int) -> Dict[str, ClzData]:
-        """Fetch data Coinalyze untuk daftar simbol tertentu"""
         result = {sym: ClzData() for sym in symbols}
         
-        # Siapkan mapping reverse
         bn_syms = [self._bn_map[s] for s in symbols if s in self._bn_map]
         by_syms = [self._by_map[s] for s in symbols if s in self._by_map]
         bn_rev = {v: k for k, v in self._bn_map.items()}
         by_rev = {v: k for k, v in self._by_map.items()}
         
-        interval = CONFIG["coinalyze_interval"] if "coinalyze_interval" in CONFIG else "1hour"
-        fund_interval = CONFIG.get("coinalyze_funding_interval", "daily")
-        fund_interval_alt = CONFIG.get("coinalyze_funding_interval_alt", "1hour")
+        interval = "1hour"
+        fund_interval = "daily"
+        fund_interval_alt = "1hour"
         fund_from = to_ts - CONFIG["coinalyze_funding_lookback_h"] * 3600
         
         if bn_syms:
-            # OHLCV
             log.info(f"  Fetching Binance OHLCV ({len(bn_syms)} syms)...")
             ohlcv_data = self._batch_fetch("ohlcv-history", bn_syms,
                                            {"interval": interval, "from": from_ts, "to": to_ts})
@@ -855,7 +829,6 @@ class CoinalyzeClient:
                 if bsym:
                     result[bsym].ohlcv = hist
             
-            # OI
             log.info(f"  Fetching OI history...")
             oi_data = self._batch_fetch("open-interest-history", bn_syms,
                                         {"interval": interval, "from": from_ts, "to": to_ts, "convert_to_usd": "true"})
@@ -864,7 +837,6 @@ class CoinalyzeClient:
                 if bsym:
                     result[bsym].oi = hist
             
-            # Liquidations
             log.info(f"  Fetching Liquidations...")
             liq_data = self._batch_fetch("liquidation-history", bn_syms,
                                          {"interval": interval, "from": from_ts, "to": to_ts, "convert_to_usd": "true"})
@@ -873,7 +845,6 @@ class CoinalyzeClient:
                 if bsym:
                     result[bsym].liq = hist
             
-            # Funding history
             log.info(f"  Fetching Funding rate history...")
             for interval_try in [fund_interval, fund_interval_alt]:
                 fund_data = self._batch_fetch("funding-rate-history", bn_syms,
@@ -888,7 +859,6 @@ class CoinalyzeClient:
                 else:
                     log.warning(f"    Funding interval '{interval_try}' empty, trying next...")
             
-            # Predicted funding
             log.info(f"  Fetching Predicted funding history...")
             pred_data = self._batch_fetch("predicted-funding-rate-history", bn_syms,
                                           {"interval": "daily", "from": fund_from, "to": to_ts})
@@ -910,22 +880,73 @@ class CoinalyzeClient:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🏆  PHASE 2: FINAL SCORING (menggunakan fungsi dari v14)
+#  📐  ATR-BASED ENTRY TARGETS
 # ══════════════════════════════════════════════════════════════════════════════
-# Karena fungsi scoring di v14 sangat panjang, kita akan mengimpor ulang
-# fungsi-fungsi penting yang sudah ada. Untuk menjaga agar kode ini mandiri,
-# saya akan menulis ulang versi ringkas dari scoring yang diperlukan.
-# Namun agar tidak terlalu panjang, saya akan menyertakan hanya fungsi-fungsi
-# yang diperlukan untuk final scoring. (Dalam implementasi nyata, Anda bisa
-# memisahkan ke file terpisah)
+def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
+    if len(candles) < 16:
+        return None
+    atr = calc_atr(candles, 14)
+    if atr > 0.04:
+        sl_mult = CONFIG["sl_mult_volatile"]
+    elif atr > 0.02:
+        sl_mult = CONFIG["sl_mult_normal"]
+    else:
+        sl_mult = CONFIG["sl_mult_quiet"]
+    
+    sl = price * (1 - atr * sl_mult)
+    sl_pct = (price - sl) / price * 100
+    tp1 = price * (1 + CONFIG["tp1_pct"] / 100)
+    tp2 = price * (1 + CONFIG["tp2_pct"] / 100)
+    tp3 = price * (1 + CONFIG["tp3_pct"] / 100)
+    risk = price - sl
+    if risk <= 0:
+        return None
+    rr1 = (tp1 - price) / risk
+    if rr1 < CONFIG["min_rr_ratio"]:
+        return None
+    
+    return {
+        "entry": round(price, 8),
+        "entry_zone_low": round(price * (1 - atr * 0.3), 8),
+        "entry_zone_high": round(price * (1 + atr * 0.2), 8),
+        "sl": round(sl, 8),
+        "sl_pct": round(sl_pct, 1),
+        "tp1": round(tp1, 8),
+        "tp1_pct": CONFIG["tp1_pct"],
+        "tp2": round(tp2, 8),
+        "tp2_pct": CONFIG["tp2_pct"],
+        "tp3": round(tp3, 8),
+        "tp3_pct": CONFIG["tp3_pct"],
+        "rr1": round(rr1, 2),
+        "atr_pct": round(atr * 100, 2),
+        "atr_decimal": atr,
+        "sl_mult": sl_mult,
+    }
 
-# Untuk mempersingkat, kita akan menggunakan fungsi-fungsi yang sudah ada
-# dari scanner v14.9.1. Karena itu kita perlu mengimpor modul tersebut.
-# Tapi karena kita membuat file baru, saya akan menyalin fungsi-fungsi penting.
-# Berikut adalah core scoring functions (tier1, tier2, tier3) yang sudah
-# terbukti bekerja. Saya akan menyertakan versi ringkas tetapi tetap lengkap.
 
-# ── TIER 1: Coinalyze signals (L/S, buy volume, funding, predicted) ──────────
+def calc_position_size(entry: float, sl: float, atr: float) -> dict:
+    bal = CONFIG["account_balance"]
+    risk_usd = bal * CONFIG["risk_per_trade_pct"] / 100
+    risk_per_unit = (entry - sl) / entry
+    if risk_per_unit <= 0:
+        risk_per_unit = atr * CONFIG["sl_mult_normal"]
+    pos_needed = risk_usd / risk_per_unit
+    pos_cap = bal * CONFIG["max_position_pct"] / 100
+    pos_val = min(pos_needed, pos_cap)
+    leverage = min(pos_val / bal, CONFIG["max_leverage"]) if pos_val > bal else 1.0
+    pos_val = min(pos_val, bal * max(leverage, 1))
+    return {
+        "position_size": round(pos_val / entry, 6) if entry > 0 else 0,
+        "leverage": round(leverage, 2),
+        "risk_usd": round(risk_usd, 2),
+        "position_value": round(pos_val, 2),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  🏆  PHASE 2: FINAL SCORING (dengan Coinalyze)
+# ══════════════════════════════════════════════════════════════════════════════
+# Fungsi-fungsi tier1, tier2, tier3 (ringkas tapi lengkap)
 def score_long_short_ratio(clz: ClzData) -> Tuple[int, dict]:
     if not clz.has_ls:
         return 0, {"source": "no_ls_data"}
@@ -933,7 +954,6 @@ def score_long_short_ratio(clz: ClzData) -> Tuple[int, dict]:
     if len(hist) < 4:
         return 0, {"source": "insufficient_ls"}
     current_long = float(hist[-2].get("l", 0.5) or 0.5)
-    current_short = float(hist[-2].get("s", 0.5) or 0.5)
     long_4h_ago = float(hist[-5].get("l", 0.5) or 0.5) if len(hist) >= 5 else current_long
     long_trend = current_long - long_4h_ago
     score, signals = 0, []
@@ -955,7 +975,7 @@ def score_long_short_ratio(clz: ClzData) -> Tuple[int, dict]:
     if current_long > 0.58:
         score = max(0, score - 15)
         signals.append(f"⚠️ LONG_HEAVY={current_long:.1%}")
-    return min(score, 35), {"long_ratio": round(current_long, 4), "long_trend_4h": round(long_trend, 4), "signals": signals}
+    return min(score, 35), {"long_ratio": round(current_long, 4), "signals": signals}
 
 
 def score_buy_volume_ratio(clz: ClzData) -> Tuple[int, dict]:
@@ -1060,7 +1080,6 @@ def score_liquidations(clz: ClzData) -> Tuple[int, dict]:
     if not baseline:
         return 0, {"source": "no_baseline"}
     current = float(hist[-2].get("s", 0) or 0)
-    # Robust z-score
     med = sorted(baseline)[len(baseline)//2]
     mad = sorted([abs(x-med) for x in baseline])[len(baseline)//2] if baseline else 1
     if mad < 1e-9:
@@ -1076,31 +1095,19 @@ def score_liquidations(clz: ClzData) -> Tuple[int, dict]:
     return min(score, 20), {"short_liq_z": round(z, 2), "signals": signals}
 
 
-# ── TIER 3: Bitget candles (sama seperti sebelumnya, tapi kita panggil ulang)
-# Kita sudah memiliki fungsi-fungsi dari phase1 yang bisa dipakai untuk tier3.
-# Namun untuk konsistensi, kita akan menggunakan fungsi yang sama dengan v14.
-
-# Berikut adalah fungsi-fungsi tier3 yang sudah ada di v14, kita salin:
+# Tier 3 functions (Bitget candles)
 def detect_bbw_squeeze(candles: List[dict]) -> Tuple[int, dict]:
     if len(candles) < 22:
         return 0, {}
-    closes = [c["close"] for c in candles[-20:]]
-    sma = _mean(closes)
-    if sma <= 0:
-        return 0, {}
-    var = sum((x - sma)**2 for x in closes) / 20
-    std = var**0.5
-    bb_w = (sma + 2*std - (sma - 2*std)) / sma
+    bbw = calc_bbw(candles)
     w = 5
-    if bb_w > 0.15:
-        score, pat = w, "WIDE_EXPANSION"
-    elif bb_w > 0.10:
-        score, pat = int(w*0.8), "EXPANDING"
-    elif bb_w > 0.06:
-        score, pat = int(w*0.4), "MODERATE"
-    else:
-        score, pat = 0, "TIGHT_SQUEEZE"
-    return score, {"bb_w": round(bb_w, 4), "pattern": pat}
+    if bbw > 0.15:
+        return w, {"bb_w": round(bbw, 4), "pattern": "WIDE_EXPANSION"}
+    elif bbw > 0.10:
+        return int(w*0.8), {"bb_w": round(bbw, 4), "pattern": "EXPANDING"}
+    elif bbw > 0.06:
+        return int(w*0.4), {"bb_w": round(bbw, 4), "pattern": "MODERATE"}
+    return 0, {"bb_w": round(bbw, 4), "pattern": "TIGHT_SQUEEZE"}
 
 
 def detect_volume_dryup(candles: List[dict]) -> Tuple[int, dict]:
@@ -1183,7 +1190,6 @@ def detect_rs_btc(coin_chg_1h: float, btc_chg_1h: float) -> Tuple[int, dict]:
 
 
 def detect_lower_wick(candles: List[dict]) -> Tuple[int, dict]:
-    # Versi sederhana untuk tier3
     wick = calc_lower_wick_pct(candles)
     w = 15
     if wick >= 1.0:
@@ -1232,151 +1238,6 @@ def detect_dist_to_support(candles: List[dict], price: float) -> Tuple[int, dict
     return 0, {"dist_pct": round(dist, 2), "pattern": "FAR_FROM_SUPPORT"}
 
 
-# ── PUMP TYPE CLASSIFICATION (ringkas) ───────────────────────────────────────
-def classify_pump_types(data: CoinData, ls_sc, bv_sc, fund_sc, pred_sc, oi_sc, liq_sc,
-                        bbw_sc, dry_sc, accum_sc, vret_sc, rs_sc, wick_sc, decel_sc,
-                        supp_sc, rs24_sc) -> List[PumpType]:
-    pump_types = []
-    cfg = CONFIG  # gunakan konfigurasi dari v14 (kita tidak punya, buat sederhana)
-    # Short squeeze (Type E)
-    if ls_sc >= 8 and (liq_sc >= 6 or fund_sc >= 7):
-        pump_types.append(PumpType("E", "Short Squeeze", min((ls_sc+liq_sc+fund_sc+pred_sc)*2, 100), []))
-    # Whale accumulation (Type B)
-    if bv_sc >= 8 and accum_sc >= 5:
-        pump_types.append(PumpType("B", "Whale Accumulation", min((bv_sc+accum_sc)*3, 100), []))
-    # Technical breakout (Type D)
-    if bbw_sc >= 8 and dry_sc >= 5 and (oi_sc >= 6 or liq_sc >= 6 or fund_sc >= 10):
-        pump_types.append(PumpType("D", "Technical Breakout", min((bbw_sc+dry_sc)*3, 100), []))
-    # Volatility return (Type F)
-    if vret_sc >= 10:
-        pump_types.append(PumpType("F", "Volatility Return", min(vret_sc*5, 100), []))
-    return pump_types
-
-
-# ── FINAL SCORING (versi ringkas yang mengintegrasikan semua) ────────────────
-def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]:
-    """
-    Melakukan scoring final dengan semua tier.
-    Mengembalikan ScoreResult jika memenuhi threshold.
-    """
-    # Velocity gates (relaxed)
-    phase = classify_phase(data.chg_24h)
-    is_cont = (phase.phase == "CONTINUATION")
-    if phase.phase not in ["DOWNTREND", "WEAK"]:
-        vg = CONFIG["velocity_gates"]
-        if data.chg_24h < vg["chg_24h_min"]:
-            return None
-        max_24h = vg["chg_24h_max_continuation"] if is_cont else vg["chg_24h_max_early"]
-        if data.chg_24h > max_24h:
-            return None
-        if data.chg_1h > vg["chg_1h_max"]:
-            return None
-        if data.chg_4h > vg["chg_4h_max"]:
-            return None
-    
-    # Tier 1 & 2 (Coinalyze)
-    ls_sc, ls_d = score_long_short_ratio(data.clz)
-    bv_sc, bv_d = score_buy_volume_ratio(data.clz)
-    fund_sc, fund_d = score_funding_trend(data.clz, data.funding)
-    pred_sc, pred_d = score_predicted_funding(data.clz)
-    oi_sc, oi_d = score_oi_buildup(data.clz)
-    liq_sc, liq_d = score_liquidations(data.clz)
-    tier1 = ls_sc + bv_sc + fund_sc + pred_sc
-    tier2 = oi_sc + liq_sc
-    
-    # Tier 3 (Bitget)
-    bbw_sc, bbw_d = detect_bbw_squeeze(data.candles)
-    stab_sc, stab_d = 0, {}  # tidak digunakan
-    dry_sc, dry_d = detect_volume_dryup(data.candles)
-    accum_sc, accum_d = detect_accumulation(data.candles)
-    vret_sc, vret_d = detect_volatility_return(data.candles)
-    rs_sc, rs_d = detect_rs_btc(data.chg_1h, data.btc_chg_1h)
-    wick_sc, wick_d = detect_lower_wick(data.candles)
-    decel_sc, decel_d = detect_momentum_decel(data.candles)
-    supp_sc, supp_d = detect_dist_to_support(data.candles, data.price)
-    rs24_sc, rs24_d = detect_rs_24h(data.candles, data.btc_chg_24h)
-    tier3 = (bbw_sc + dry_sc + accum_sc + vret_sc + rs_sc + wick_sc + decel_sc + supp_sc + rs24_sc)
-    
-    # Phase base score
-    phase_score = phase.base_score
-    
-    # Total
-    total = phase_score + tier1 + tier2 + tier3
-    
-    # Pump types
-    pump_types = classify_pump_types(data, ls_sc, bv_sc, fund_sc, pred_sc, oi_sc, liq_sc,
-                                     bbw_sc, dry_sc, accum_sc, vret_sc, rs_sc, wick_sc,
-                                     decel_sc, supp_sc, rs24_sc)
-    
-    has_any_clz = data.clz.has_ohlcv or data.clz.has_oi or data.clz.has_liq or data.clz.has_ls or data.clz.has_funding_hist
-    
-    # Threshold
-    if phase.phase == "EARLY":
-        threshold = CONFIG["alert_threshold_early"]
-    elif phase.phase == "CONTINUATION":
-        threshold = CONFIG["alert_threshold_continuation"]
-    elif phase.phase in ["DOWNTREND", "WEAK"]:
-        threshold = CONFIG["alert_threshold_reversal"]
-    else:
-        threshold = 110
-    
-    # Bitget-only fallback
-    if not has_any_clz and phase.phase == "EARLY":
-        threshold = CONFIG["alert_threshold_bitget_only"]
-    
-    if total < threshold:
-        return None
-    if not pump_types:
-        # Default pump type jika score tinggi tapi tidak ada klasifikasi
-        pump_types.append(PumpType("T", "Technical Setup", min(total, 100), ["Aggregate signals"]))
-    
-    # Buat entry targets (sederhana)
-    entry = {
-        "entry": data.price,
-        "entry_zone_low": data.price * 0.99,
-        "entry_zone_high": data.price * 1.01,
-        "sl": data.price * 0.97,
-        "sl_pct": 3.0,
-        "tp1": data.price * 1.15,
-        "tp2": data.price * 1.30,
-        "tp3": data.price * 1.50,
-        "rr1": 5.0,
-        "atr_decimal": calc_atr(data.candles, 14),
-    }
-    
-    return ScoreResult(
-        symbol=data.symbol,
-        score=min(total, 250),
-        phase=phase.phase,
-        pump_types=pump_types,
-        confidence="strong" if total >= 95 else "watch",
-        components={
-            "phase": phase_score,
-            "tier1_clz": tier1,
-            "tier2_clz": tier2,
-            "tier3_technical": tier3,
-            "detail": {
-                "ls": ls_sc, "bv": bv_sc, "fund": fund_sc, "pred": pred_sc,
-                "oi": oi_sc, "liq": liq_sc,
-                "bbw": bbw_sc, "dry": dry_sc, "accum": accum_sc,
-                "vret": vret_sc, "rs": rs_sc, "wick": wick_sc,
-                "decel": decel_sc, "supp": supp_sc, "rs24": rs24_sc,
-            },
-            "data_sources": "Coinalyze" if has_any_clz else "Bitget-only",
-        },
-        catalysts=[],
-        entry=entry,
-        price=data.price,
-        vol_24h=data.vol_24h,
-        chg_24h=data.chg_24h,
-        chg_1h=data.chg_1h,
-        funding=data.funding,
-        urgency="",
-        risk_warnings=[],
-        bitget_phase1_score=phase1_score,
-    )
-
-
 def classify_phase(chg_24h: float) -> PhaseInfo:
     if chg_24h < -8.0:
         return PhaseInfo("DOWNTREND", 5, "Deep downtrend", "HIGH")
@@ -1395,6 +1256,116 @@ def classify_phase(chg_24h: float) -> PhaseInfo:
         else:
             base = 35
         return PhaseInfo("EARLY", base, "Early prime zone", "LOW")
+
+
+def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]:
+    # Velocity gates
+    phase = classify_phase(data.chg_24h)
+    is_cont = (phase.phase == "CONTINUATION")
+    vg = CONFIG["velocity_gates"]
+    if phase.phase not in ["DOWNTREND", "WEAK"]:
+        if data.chg_24h < vg["chg_24h_min"]:
+            return None
+        max_24h = vg["chg_24h_max_continuation"] if is_cont else vg["chg_24h_max_early"]
+        if data.chg_24h > max_24h:
+            return None
+        max_1h = vg["chg_1h_max_continuation"] if is_cont else vg["chg_1h_max_early"]
+        if data.chg_1h > max_1h:
+            return None
+        if data.chg_4h > vg["chg_4h_max"]:
+            return None
+        # Filter tambahan: jika EARLY dan chg_1h < -2%, tolak
+        if phase.phase == "EARLY" and data.chg_1h < -2.0:
+            return None
+    
+    # Tier 1 & 2
+    ls_sc, ls_d = score_long_short_ratio(data.clz)
+    bv_sc, bv_d = score_buy_volume_ratio(data.clz)
+    fund_sc, fund_d = score_funding_trend(data.clz, data.funding)
+    pred_sc, pred_d = score_predicted_funding(data.clz)
+    oi_sc, oi_d = score_oi_buildup(data.clz)
+    liq_sc, liq_d = score_liquidations(data.clz)
+    tier1 = ls_sc + bv_sc + fund_sc + pred_sc
+    tier2 = oi_sc + liq_sc
+    
+    # Tier 3
+    bbw_sc, _ = detect_bbw_squeeze(data.candles)
+    dry_sc, _ = detect_volume_dryup(data.candles)
+    accum_sc, _ = detect_accumulation(data.candles)
+    vret_sc, _ = detect_volatility_return(data.candles)
+    rs_sc, _ = detect_rs_btc(data.chg_1h, data.btc_chg_1h)
+    wick_sc, _ = detect_lower_wick(data.candles)
+    decel_sc, _ = detect_momentum_decel(data.candles)
+    supp_sc, _ = detect_dist_to_support(data.candles, data.price)
+    rs24_sc, _ = detect_rs_24h(data.candles, data.btc_chg_24h)
+    tier3 = bbw_sc + dry_sc + accum_sc + vret_sc + rs_sc + wick_sc + decel_sc + supp_sc + rs24_sc
+    
+    # Phase base
+    phase_score = phase.base_score
+    total = phase_score + tier1 + tier2 + tier3
+    
+    # Pump types
+    pump_types = []
+    if ls_sc >= 8 and (liq_sc >= 6 or fund_sc >= 7):
+        pump_types.append(PumpType("E", "Short Squeeze", min((ls_sc+liq_sc+fund_sc+pred_sc)*2, 100), []))
+    if bv_sc >= 8 and accum_sc >= 5:
+        pump_types.append(PumpType("B", "Whale Accumulation", min((bv_sc+accum_sc)*3, 100), []))
+    if bbw_sc >= 8 and dry_sc >= 5 and (oi_sc >= 6 or liq_sc >= 6 or fund_sc >= 10):
+        pump_types.append(PumpType("D", "Technical Breakout", min((bbw_sc+dry_sc)*3, 100), []))
+    if vret_sc >= 10:
+        pump_types.append(PumpType("F", "Volatility Return", min(vret_sc*5, 100), []))
+    
+    has_any_clz = data.clz.has_ohlcv or data.clz.has_oi or data.clz.has_liq or data.clz.has_ls or data.clz.has_funding_hist
+    
+    if phase.phase == "EARLY":
+        threshold = CONFIG["alert_threshold_early"]
+    elif phase.phase == "CONTINUATION":
+        threshold = CONFIG["alert_threshold_continuation"]
+    elif phase.phase in ["DOWNTREND", "WEAK"]:
+        threshold = CONFIG["alert_threshold_reversal"]
+    else:
+        threshold = 110
+    
+    if not has_any_clz and phase.phase == "EARLY":
+        threshold = CONFIG["alert_threshold_bitget_only"]
+    
+    if total < threshold:
+        return None
+    if not pump_types:
+        pump_types.append(PumpType("T", "Technical Setup", min(total, 100), ["Aggregate signals"]))
+    
+    entry_data = calc_entry_targets(data.candles, data.price)
+    if entry_data is None:
+        return None
+    
+    position = calc_position_size(entry_data["entry"], entry_data["sl"], entry_data["atr_decimal"])
+    
+    return ScoreResult(
+        symbol=data.symbol,
+        score=min(total, 250),
+        phase=phase.phase,
+        pump_types=pump_types,
+        confidence="very_strong" if total >= 130 else "strong" if total >= 95 else "watch",
+        components={
+            "phase": phase_score,
+            "tier1_clz": tier1,
+            "tier2_clz": tier2,
+            "tier3_technical": tier3,
+            "detail": {},
+            "data_sources": "Coinalyze" if has_any_clz else "Bitget-only",
+        },
+        catalysts=[],
+        entry=entry_data,
+        price=data.price,
+        vol_24h=data.vol_24h,
+        chg_24h=data.chg_24h,
+        chg_1h=data.chg_1h,
+        funding=data.funding,
+        urgency="",
+        risk_warnings=[],
+        position=position,
+        bitget_phase1_score=phase1_score,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1426,7 +1397,7 @@ def build_alert(r: ScoreResult, rank: int) -> str:
         f"{'─'*58}",
         f"#{rank}  {r.symbol}  {emoji}  Score: {r.score}  [{r.phase}]",
         f"   {bar}",
-        f"   Phase1 Score: {r.bitget_phase1_score} (filter threshold 60)",
+        f"   Phase1 Score: {r.bitget_phase1_score} (threshold {CONFIG['phase1_threshold']})",
         f"   Data: {r.components.get('data_sources', 'N/A')}",
         f"",
         f"   Vol: {vol} | Δ1h: {r.chg_1h:+.1f}% | Δ24h: {r.chg_24h:+.1f}% | F: {r.funding*100:.4f}%",
@@ -1436,9 +1407,16 @@ def build_alert(r: ScoreResult, rank: int) -> str:
         e = r.entry
         lines += [
             f"",
-            f"   💰 ENTRY: ${e['entry']:.8f}  (SL: ${e['sl']:.8f}, -{e['sl_pct']:.1f}%)",
-            f"      TP1: ${e['tp1']:.8f} (+15%)  TP2: ${e['tp2']:.8f} (+30%)",
+            f"   💰 ENTRY ZONE:",
+            f"      Low:  ${e['entry_zone_low']:.8f}",
+            f"      Mid:  ${e['entry']:.8f}",
+            f"      High: ${e['entry_zone_high']:.8f}",
+            f"      SL:   ${e['sl']:.8f}  (-{e['sl_pct']:.1f}%)  [ATR×{e['sl_mult']:.1f}]",
+            f"      TP1:  ${e['tp1']:.8f}  (+{e['tp1_pct']:.0f}%)  R/R {e['rr1']:.1f}x",
         ]
+    if r.position:
+        p = r.position
+        lines.append(f"      Size: {p['position_size']:.4f} | Lev: {p['leverage']:.1f}x | Risk: ${p['risk_usd']:.0f}")
     return "\n".join(lines)
 
 
@@ -1447,7 +1425,7 @@ def build_alert(r: ScoreResult, rank: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
     log.info("═" * 70)
-    log.info(f"  PRE-PUMP SCANNER v{VERSION} — TWO-PHASE ARCHITECTURE")
+    log.info(f"  PRE-PUMP SCANNER v{VERSION} — TWO-PHASE ARCHITECTURE (PRODUCTION)")
     log.info("  Phase 1: Bitget-only filter (ATR, range, BBW, wick, support, decel)")
     log.info("  Phase 2: Coinalyze verification (OI, liq, funding, L/S)")
     log.info(f"  Whitelist size: {len(CONFIG['whitelist'])} symbols")
@@ -1481,9 +1459,12 @@ def main():
     
     # Step 2: Phase 1 — Bitget-only filter untuk semua whitelist
     log.info("🔍 Phase 1: Bitget-only filtering...")
-    candidates_phase1 = []  # list of (symbol, phase1_score, candles, ticker)
+    candidates_phase1 = []
     
     for sym in CONFIG["whitelist"]:
+        if not is_valid_symbol(sym):
+            log.debug(f"  {sym}: invalid symbol format")
+            continue
         if is_on_cooldown(sym):
             continue
         if is_stock_token(sym):
@@ -1496,13 +1477,15 @@ def main():
             price = float(ticker.get("lastPr", 0))
             if price <= 0:
                 continue
+            vol_24h = float(ticker.get("quoteVolume", 0))
+            if vol_24h < CONFIG["phase1_min_volume_usd"]:
+                continue
             
             candles = BitgetClient.get_candles(sym, CONFIG["candle_limit_bitget"])
             if len(candles) < 30:
                 continue
             
-            # Hitung skor phase1
-            score, details = phase1_bitget_filter(candles)
+            score, details = phase1_bitget_filter(candles, vol_24h)
             if score >= CONFIG["phase1_threshold"]:
                 candidates_phase1.append((sym, score, candles, ticker))
                 log.debug(f"  {sym}: Phase1 score={score} -> passed")
