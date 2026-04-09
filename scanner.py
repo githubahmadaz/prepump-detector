@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.3 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
+║  PRE-PUMP SCANNER v15.5 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
 ║                                                                              ║
 ║  PERBAIKAN v15.1:                                                            ║
 ║    • Filter simbol dengan regex (min 2 huruf + USDT)                         ║
@@ -36,6 +36,12 @@
 ║    • TP1/2/3 → resistance terkuat bertingkat; fallback RR-derived            ║
 ║    • Alert menampilkan sumber S/R level untuk setiap SL & TP                ║
 ║    • ATR tetap sebagai fallback jika S/R tidak cukup                        ║
+║  PERBAIKAN v15.5 (Koreksi logika BTC):                                       ║
+║    • HAPUS macro BTC filter (konsep salah — setiap hari ada coin pump)       ║
+║    • btc_context_bonus: REWARD coin outperform/decouple BTC (max +35 poin)  ║
+║    • detect_rs_btc: bobot naik 8→15, deteksi DECOUPLE saat BTC turun        ║
+║    • detect_rs_24h: bobot naik 10→18, reward coin hijau saat BTC merah      ║
+║    • BTC context ditampilkan di setiap alert                                 ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -62,7 +68,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "15.3.0-PRODUCTION"
+VERSION = "15.5.0-PRODUCTION"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 def setup_logging() -> logging.Logger:
@@ -197,6 +203,7 @@ CONFIG: Dict = {
         "chg_24h_max_early": 15.0,
         "chg_24h_max_continuation": 30.0,
         "chg_24h_min": -8.0,
+        "chg_1h_min_reversal": -3.0,   # [v15.4] WEAK/DOWNTREND: tolak jika chg_1h < -3% (masih turun)
     },
     
     # Cooldown & limits
@@ -1100,9 +1107,16 @@ def find_sr_levels(candles: List[dict], price: float) -> Dict[str, Any]:
     all_res = score_levels(res_clusters, candles_w)
 
     # ── 4. Filter: support di bawah price, resistance di atas price ──────────
-    # Tambahkan buffer kecil: support tidak boleh terlalu jauh (>20%) atau terlalu dekat (<0.3%)
     supports    = [s for s in all_sup if s["price"] < price * 0.997 and s["price"] > price * 0.80]
     resistances = [r for r in all_res if r["price"] > price * 1.003 and r["price"] < price * 1.50]
+
+    # [v15.4 FIX] Sort resistances by PRICE ascending (bukan by score).
+    # TP1/2/3 harus selalu naik: TP1 < TP2 < TP3.
+    # Sebelumnya diurutkan by score → resistance jauh bisa masuk sebagai TP1,
+    # resistance dekat masuk sebagai TP2, sehingga TP2 < TP1 (bug kritis).
+    # Strategi: ambil resistance yang valid secara price order, prioritaskan
+    # yang lebih dekat ke price terlebih dahulu.
+    resistances = sorted(resistances, key=lambda x: x["price"])
 
     return {
         "supports":    supports,
@@ -1205,6 +1219,18 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
     tp1_floor = price + risk * CONFIG["min_rr_ratio"]
     if tp1 < price * 1.05:
         tp1 = max(tp1, tp1_floor)
+
+    # [v15.4 FIX] Pastikan TP2 > TP1 dan TP3 > TP2 (strictly ascending).
+    # Bug sebelumnya: resistance diurutkan by score bukan by price,
+    # menyebabkan TP2 < TP1 pada ~50% sinyal.
+    # Enforcement: jika TP2 <= TP1, override dengan TP1 * 1.05 (minimal 5% di atas TP1)
+    if tp2 <= tp1:
+        tp2 = tp1 * 1.05
+    if tp3 <= tp2:
+        tp3 = tp2 * 1.05
+    # Juga pastikan TP2/TP3 tidak melewati batas wajar (max 100% dari entry)
+    tp2 = min(tp2, price * 2.0)
+    tp3 = min(tp3, price * 2.0)
 
     # ── RR check ─────────────────────────────────────────────────────────────
     rr1 = (tp1 - price) / risk
@@ -1500,14 +1526,28 @@ def detect_volatility_return(candles: List[dict]) -> Tuple[int, dict]:
 
 
 def detect_rs_btc(coin_chg_1h: float, btc_chg_1h: float) -> Tuple[int, dict]:
+    """
+    Relative Strength vs BTC pada timeframe 1h.
+    Fokus utama: coin yang NAIK atau FLAT saat BTC TURUN = sinyal decoupling terkuat.
+    """
     if btc_chg_1h == 0:
         return 0, {"rs": 0}
     rs = coin_chg_1h - btc_chg_1h
-    w = 8
-    if rs < -0.2 and btc_chg_1h > 0.3:
-        return w, {"rs": round(rs, 2), "pattern": "BTC_LEADING_CATCHUP_PENDING"}
-    elif rs < -0.1 and btc_chg_1h > 0:
-        return int(w*0.6), {"rs": round(rs, 2), "pattern": "SLIGHT_LAG_VS_BTC"}
+    w = 15  # [v15.5] dinaikkan dari 8 → 15, RS adalah sinyal paling relevan
+    
+    # Skenario terkuat: BTC turun, coin tetap naik/flat = DECOUPLING
+    if btc_chg_1h < -0.5 and coin_chg_1h > 0:
+        return w, {"rs": round(rs, 2), "pattern": "DECOUPLE_BTC_DOWN_COIN_UP"}
+    elif btc_chg_1h < 0 and coin_chg_1h > 0:
+        return int(w * 0.8), {"rs": round(rs, 2), "pattern": "RS_POSITIVE_VS_BTC_DOWN"}
+    # BTC naik tapi coin lebih kencang = momentum kuat
+    elif rs >= 3.0 and btc_chg_1h > 0:
+        return int(w * 0.7), {"rs": round(rs, 2), "pattern": "STRONG_OUTPERFORM_BTC"}
+    elif rs >= 1.5 and btc_chg_1h > 0:
+        return int(w * 0.4), {"rs": round(rs, 2), "pattern": "OUTPERFORM_BTC"}
+    # Lag: BTC naik tapi coin belum ikut = potential catchup
+    elif rs < -0.2 and btc_chg_1h > 0.3:
+        return int(w * 0.5), {"rs": round(rs, 2), "pattern": "BTC_LEADING_CATCHUP_PENDING"}
     return 0, {"rs": round(rs, 2), "pattern": "INLINE"}
 
 
@@ -1536,15 +1576,25 @@ def detect_momentum_decel(candles: List[dict]) -> Tuple[int, dict]:
 
 
 def detect_rs_24h(candles: List[dict], btc_chg_24h: float) -> Tuple[int, dict]:
+    """
+    Relative Strength vs BTC pada timeframe 24h.
+    Coin yang positif saat BTC negatif = rotasi/akumulasi nyata.
+    """
     coin_chg_24h = get_chg_from_candles(candles, 24) if len(candles) >= 26 else 0.0
     if btc_chg_24h == 0:
         return 0, {"rs_24h": 0}
     rs = coin_chg_24h - btc_chg_24h
-    w = 10
-    if rs >= 0.3:
-        return w, {"rs_24h": round(rs, 2), "pattern": "OUTPERFORM_BTC_24H"}
-    elif rs >= 0.1:
-        return int(w*0.6), {"rs_24h": round(rs, 2), "pattern": "SLIGHT_OUTPERFORM_24H"}
+    w = 18  # [v15.5] dinaikkan dari 10 → 18
+
+    # Decoupling 24h: BTC merah, coin hijau = sinyal rotasi terkuat
+    if btc_chg_24h < -1.0 and coin_chg_24h > 0:
+        return w, {"rs_24h": round(rs, 2), "pattern": "DECOUPLE_24H_BTC_DOWN_COIN_UP"}
+    elif btc_chg_24h < 0 and coin_chg_24h > 0:
+        return int(w * 0.8), {"rs_24h": round(rs, 2), "pattern": "RS24_POSITIVE_VS_BTC_DOWN"}
+    elif rs >= 5.0:
+        return int(w * 0.7), {"rs_24h": round(rs, 2), "pattern": "STRONG_OUTPERFORM_24H"}
+    elif rs >= 2.0:
+        return int(w * 0.4), {"rs_24h": round(rs, 2), "pattern": "OUTPERFORM_24H"}
     return 0, {"rs_24h": round(rs, 2), "pattern": "INLINE"}
 
 
@@ -1607,6 +1657,51 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         if phase.phase == "EARLY" and data.chg_1h < -2.0:
             log.info(f"  ✗ {sym} [EARLY] REJECT: chg_1h={data.chg_1h:+.1f}% < -2%")
             return None
+    else:
+        # [v15.4 FIX] WEAK/DOWNTREND juga perlu filter momentum 1h.
+        # Sebelumnya WEAK/DOWNTREND tidak ada velocity gate sama sekali.
+        # CLOUSDT lolos dengan chg_1h=-4.6% (WEAK) → SL kena.
+        # Rule: WEAK/DOWNTREND hanya valid sebagai reversal jika chg_1h tidak terlalu negatif.
+        if data.chg_1h < vg.get("chg_1h_min_reversal", -3.0):
+            log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_1h={data.chg_1h:+.1f}% < min reversal {vg.get('chg_1h_min_reversal', -3.0)}")
+            return None
+    
+    # [v15.5] BTC Relative Strength Context.
+    # BUKAN filter/pemblokir — justru REWARD coin yang outperform BTC.
+    # Logika: setiap hari selalu ada coin yang pump meski BTC bearish.
+    # Coin yang naik/flat saat BTC turun = sinyal decoupling = pre-pump terkuat.
+    # btc_rs_1h  = chg_1h coin - chg_1h BTC  → positif = outperform 1h
+    # btc_rs_24h = chg_24h coin - chg_24h BTC → positif = outperform 24h
+    btc_rs_1h  = data.chg_1h  - data.btc_chg_1h
+    btc_rs_24h = data.chg_24h - data.btc_chg_24h
+    
+    # Bonus skor untuk outperformance — akan dijumlahkan ke total setelah tier3
+    btc_context_bonus = 0
+    btc_context_notes = []
+    
+    # Outperform 1h: coin naik / flat saat BTC turun (atau coin naik lebih kencang saat BTC naik)
+    if data.btc_chg_1h < -0.5 and data.chg_1h > 0:
+        btc_context_bonus += 20
+        btc_context_notes.append(f"DECOUPLE_1H coin={data.chg_1h:+.1f}% BTC={data.btc_chg_1h:+.1f}%")
+    elif data.btc_chg_1h < 0 and data.chg_1h > 0:
+        btc_context_bonus += 12
+        btc_context_notes.append(f"RS_POS_1H coin={data.chg_1h:+.1f}% BTC={data.btc_chg_1h:+.1f}%")
+    elif btc_rs_1h >= 2.0:
+        btc_context_bonus += 8
+        btc_context_notes.append(f"OUTPERFORM_1H rs={btc_rs_1h:+.1f}%")
+    
+    # Outperform 24h: coin lebih kuat dari BTC dalam 24 jam
+    if data.btc_chg_24h < -1.0 and data.chg_24h > 0:
+        btc_context_bonus += 20
+        btc_context_notes.append(f"DECOUPLE_24H coin={data.chg_24h:+.1f}% BTC={data.btc_chg_24h:+.1f}%")
+    elif data.btc_chg_24h < 0 and data.chg_24h > 0:
+        btc_context_bonus += 12
+        btc_context_notes.append(f"RS_POS_24H coin={data.chg_24h:+.1f}% BTC={data.btc_chg_24h:+.1f}%")
+    elif btc_rs_24h >= 3.0:
+        btc_context_bonus += 8
+        btc_context_notes.append(f"OUTPERFORM_24H rs={btc_rs_24h:+.1f}%")
+    
+    btc_context_bonus = min(btc_context_bonus, 35)  # cap 35 poin
     
     # Tier 1 & 2
     ls_sc, ls_d = score_long_short_ratio(data.clz)
@@ -1642,7 +1737,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     
     # Phase base
     phase_score = phase.base_score
-    total = phase_score + tier1 + tier2 + tier3
+    total = phase_score + tier1 + tier2 + tier3 + btc_context_bonus
     
     # Pump types
     pump_types = []
@@ -1678,10 +1773,11 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         return None
     
     log.info(f"  ~ {sym} [{phase.phase}] score={total} vs threshold={threshold} | "
-             f"phase={phase_score} t1={tier1} t2={tier2} t3={tier3} | "
+             f"phase={phase_score} t1={tier1} t2={tier2} t3={tier3} btc_bonus={btc_context_bonus} | "
              f"ls={ls_sc} bv={bv_sc} fund={fund_sc} pred={pred_sc} oi={oi_sc} liq={liq_sc} | "
              f"bbw={bbw_sc} dry={dry_sc} acc={accum_sc} vret={vret_sc} rs={rs_sc} "
-             f"wick={wick_sc} decel={decel_sc} supp={supp_sc} rs24={rs24_sc}")
+             f"wick={wick_sc} decel={decel_sc} supp={supp_sc} rs24={rs24_sc} | "
+             f"btc_ctx={btc_context_notes}")
     
     if total < threshold:
         log.info(f"  ✗ {sym} [{phase.phase}] REJECT: total={total} < threshold={threshold}")
@@ -1708,6 +1804,8 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
             "tier1_clz": tier1,
             "tier2_clz": tier2,
             "tier3_technical": tier3,
+            "btc_context_bonus": btc_context_bonus,
+            "btc_context_notes": " | ".join(btc_context_notes) if btc_context_notes else "—",
             "detail": {},
             "data_sources": "Coinalyze" if has_any_clz else "Bitget-only",
         },
@@ -1758,7 +1856,8 @@ def build_alert(r: ScoreResult, rank: int) -> str:
         f"   Data: {r.components.get('data_sources', 'N/A')}  |  CLZ: T1={r.components['tier1_clz']} T2={r.components['tier2_clz']}",
         f"",
         f"   Vol: {vol} | Δ1h: {r.chg_1h:+.1f}% | Δ24h: {r.chg_24h:+.1f}% | F: {r.funding*100:.4f}%",
-        f"   T1:{r.components['tier1_clz']} T2:{r.components['tier2_clz']} T3:{r.components['tier3_technical']}",
+        f"   T1:{r.components['tier1_clz']} T2:{r.components['tier2_clz']} T3:{r.components['tier3_technical']} BTC+:{r.components.get('btc_context_bonus',0)}",
+        f"   BTC: {r.components.get('btc_context_notes','—')}",
     ]
     if r.entry:
         e = r.entry
