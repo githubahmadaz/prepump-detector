@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.5 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
+║  PRE-PUMP SCANNER v15.6 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
 ║                                                                              ║
 ║  PERBAIKAN v15.1:                                                            ║
 ║    • Filter simbol dengan regex (min 2 huruf + USDT)                         ║
@@ -36,12 +36,10 @@
 ║    • TP1/2/3 → resistance terkuat bertingkat; fallback RR-derived            ║
 ║    • Alert menampilkan sumber S/R level untuk setiap SL & TP                ║
 ║    • ATR tetap sebagai fallback jika S/R tidak cukup                        ║
-║  PERBAIKAN v15.5 (Koreksi logika BTC):                                       ║
-║    • HAPUS macro BTC filter (konsep salah — setiap hari ada coin pump)       ║
-║    • btc_context_bonus: REWARD coin outperform/decouple BTC (max +35 poin)  ║
-║    • detect_rs_btc: bobot naik 8→15, deteksi DECOUPLE saat BTC turun        ║
-║    • detect_rs_24h: bobot naik 10→18, reward coin hijau saat BTC merah      ║
-║    • BTC context ditampilkan di setiap alert                                 ║
+║  PERBAIKAN v15.6 (dari kasus BEATUSDT SL langsung kena):                     ║
+║    • Filter EARLY chg_4h < -3%: momentum 4h negatif = distribusi aktif      ║
+║    • Tier1 keras check: pred_funding sendirian tidak cukup lolos filter      ║
+║    • SL minimum 4%: SL < 4% di-override ke ATR/floor (noise protection)     ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -68,7 +66,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "15.5.0-PRODUCTION"
+VERSION = "15.6.0-PRODUCTION"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 def setup_logging() -> logging.Logger:
@@ -203,7 +201,8 @@ CONFIG: Dict = {
         "chg_24h_max_early": 15.0,
         "chg_24h_max_continuation": 30.0,
         "chg_24h_min": -8.0,
-        "chg_1h_min_reversal": -3.0,   # [v15.4] WEAK/DOWNTREND: tolak jika chg_1h < -3% (masih turun)
+        "chg_1h_min_reversal": -3.0,   # [v15.4] WEAK/DOWNTREND: tolak jika chg_1h < -3%
+        "chg_4h_min_early": -3.0,      # [v15.6] EARLY: tolak jika chg_4h < -3% (momentum 4h negatif)
     },
     
     # Cooldown & limits
@@ -1168,6 +1167,31 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
             sl = sl_candidate
             sl_source = f"S@{sup['price']:.6g}(t{sup['touches']})"
             break
+    
+    # [v15.6 FIX] SL minimum absolute distance: 4% dari entry.
+    # SL < 4% terlalu rentan noise candle normal altcoin (wick 1-3% adalah hal biasa).
+    # BEAT kena SL di -3.1% — masih dalam range noise normal.
+    # Jika SL dari S/R < 4%, fallback ke ATR-based dengan floor 4%.
+    if sl is not None:
+        sl_pct_check = (price - sl) / price * 100
+        if sl_pct_check < 4.0:
+            # Override ke ATR-based minimum
+            if atr > 0.04:
+                sl_mult_use = CONFIG["sl_mult_volatile"]
+            elif atr > 0.02:
+                sl_mult_use = CONFIG["sl_mult_normal"]
+            else:
+                sl_mult_use = CONFIG["sl_mult_quiet"]
+            sl_atr = price * (1 - atr * sl_mult_use)
+            sl_pct_atr = (price - sl_atr) / price * 100
+            # Gunakan mana yang lebih besar (lebih jauh dari entry)
+            if sl_pct_atr >= 4.0:
+                sl = sl_atr
+                sl_source = f"ATR×{sl_mult_use}(SR_too_close,was_{sl_pct_check:.1f}%)"
+            else:
+                # ATR juga < 4%, paksa minimum 4%
+                sl = price * 0.96
+                sl_source = f"FLOOR_4%(was_{sl_pct_check:.1f}%)"
 
     # Fallback ATR jika tidak ada support ditemukan
     if sl is None or sl <= 0 or sl >= price:
@@ -1657,6 +1681,12 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         if phase.phase == "EARLY" and data.chg_1h < -2.0:
             log.info(f"  ✗ {sym} [EARLY] REJECT: chg_1h={data.chg_1h:+.1f}% < -2%")
             return None
+        # [v15.6 FIX] EARLY dengan chg_4h < -3% = momentum 4h berlawanan dengan thesis.
+        # BEAT kena SL langsung karena chg_4h=-4.0% saat entry — koin masih turun aktif.
+        # Thesis pre-pump tidak valid jika 4h terakhir masih distribusi.
+        if phase.phase == "EARLY" and data.chg_4h < vg.get("chg_4h_min_early", -3.0):
+            log.info(f"  ✗ {sym} [EARLY] REJECT: chg_4h={data.chg_4h:+.1f}% < min {vg.get('chg_4h_min_early', -3.0)}%")
+            return None
     else:
         # [v15.4 FIX] WEAK/DOWNTREND juga perlu filter momentum 1h.
         # Sebelumnya WEAK/DOWNTREND tidak ada velocity gate sama sekali.
@@ -1770,6 +1800,16 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     if has_any_clz and (tier1 + tier2) < 15:
         log.info(f"  ✗ {sym} [{phase.phase}] REJECT: tier1+tier2={tier1+tier2} < 15 "
                  f"(ls={ls_sc} bv={bv_sc} fund={fund_sc} pred={pred_sc} oi={oi_sc} liq={liq_sc})")
+        return None
+    
+    # [v15.6 FIX] Tier1 "keras" check: pred_funding sendirian tidak cukup.
+    # BEAT lolos dengan tier1=20 hanya dari pred=20 (projected, bukan real).
+    # Sinyal tier1 keras = funding aktual negatif (fund>0), L/S ratio short dom (ls>0),
+    # atau buy volume kuat (bv>0). Minimal satu harus aktif jika tier1 hanya dari pred.
+    tier1_hard = ls_sc + bv_sc + fund_sc  # exclude pred_funding (projected)
+    if has_any_clz and pred_sc > 0 and tier1_hard == 0 and tier2 < 20:
+        log.info(f"  ✗ {sym} [{phase.phase}] REJECT: tier1 hanya dari pred_funding={pred_sc} "
+                 f"tanpa sinyal keras (ls={ls_sc} bv={bv_sc} fund={fund_sc} tier2={tier2})")
         return None
     
     log.info(f"  ~ {sym} [{phase.phase}] score={total} vs threshold={threshold} | "
