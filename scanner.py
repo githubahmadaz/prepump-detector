@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.1 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
+║  PRE-PUMP SCANNER v15.2 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
 ║                                                                              ║
-║  PERBAIKAN:                                                                  ║
+║  PERBAIKAN v15.1:                                                            ║
 ║    • Filter simbol dengan regex (min 2 huruf + USDT)                         ║
 ║    • ATR-based entry, stop loss, take profit                                ║
 ║    • Phase1 threshold dinaikkan ke 65                                       ║
@@ -12,6 +12,24 @@
 ║    • Optimasi rate limit Coinalyze (batch size 5, backoff)                  ║
 ║    • Filter tambahan: EARLY dengan chg_1h < -2% ditolak                     ║
 ║    • Blacklist coin illiquid / scam                                         ║
+║                                                                              ║
+║  PERBAIKAN v15.2 (Audit Marco Torres):                                       ║
+║  [HIGH]                                                                      ║
+║    • Sort Coinalyze history data by timestamp (fix silent scoring errors)    ║
+║    • Fix BTC circuit breaker lag: gunakan lastPr ticker, bukan candles[-3]   ║
+║    • Hapus Bitget-only fallback threshold (75→block): EARLY tanpa CLZ skip  ║
+║  [MEDIUM]                                                                    ║
+║    • Minimum CLZ contribution check (tier1+tier2 >= 15 jika data ada)       ║
+║    • Volume spike mutual exclusivity: dry_sc XOR accum_sc                   ║
+║    • Phase1 compound check: penalty jika wick & decel keduanya absen        ║
+║  [PARAMETER]                                                                 ║
+║    • phase1_threshold: 65 → 72                                              ║
+║    • phase1_min_volume_usd: 300K → 500K                                     ║
+║    • sl_mult_volatile: 2.5 → 3.0                                            ║
+║    • tp1_pct: 15% → 10%                                                     ║
+║    • min_rr_ratio: 2.0 → 1.8                                                ║
+║    • cooldown_hours: 12 → 18                                                ║
+║    • velocity_gates.chg_1h_max_early: 8.0 → 5.0                            ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -38,7 +56,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "15.1.0-PRODUCTION"
+VERSION = "15.2.0-PRODUCTION"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 def setup_logging() -> logging.Logger:
@@ -141,8 +159,8 @@ CONFIG: Dict = {
     ],
     
     # Phase 1: Bitget-only filter
-    "phase1_threshold": 65,            # dinaikkan dari 60
-    "phase1_min_volume_usd": 300_000,  # minimal volume 24h
+    "phase1_threshold": 72,            # [v15.2] dinaikkan dari 65 → 72 (~65% dari max 110)
+    "phase1_min_volume_usd": 500_000,  # [v15.2] dinaikkan dari 300K → 500K (kurangi manipulasi)
     "phase1_weights": {
         "atr": 25,
         "range": 25,
@@ -167,7 +185,7 @@ CONFIG: Dict = {
     
     # Velocity gates (relaxed for early breakout)
     "velocity_gates": {
-        "chg_1h_max_early": 8.0,       # lebih ketat untuk EARLY
+        "chg_1h_max_early": 5.0,       # [v15.2] diperketat 8.0 → 5.0: EARLY >5% sudah terlambat
         "chg_1h_max_continuation": 12.0,
         "chg_4h_max": 15.0,
         "chg_24h_max_early": 15.0,
@@ -176,7 +194,7 @@ CONFIG: Dict = {
     },
     
     # Cooldown & limits
-    "cooldown_hours": 12,              # dinaikkan dari 6
+    "cooldown_hours": 18,              # [v15.2] dinaikkan dari 12 → 18 jam (cover full pump+distribusi)
     "max_alerts_per_scan": 5,
     "candle_limit_bitget": 100,
     "coinalyze_lookback_h": 72,
@@ -189,13 +207,13 @@ CONFIG: Dict = {
     "history_db": "/tmp/scanner_v15_history.db",
     
     # Entry/SL/TP (ATR-based)
-    "sl_mult_volatile": 2.5,
+    "sl_mult_volatile": 3.0,   # [v15.2] dinaikkan 2.5 → 3.0 (kurangi SL premature hit di altcoin volatile)
     "sl_mult_normal": 2.0,
     "sl_mult_quiet": 1.5,
-    "tp1_pct": 15.0,
+    "tp1_pct": 10.0,           # [v15.2] diturunkan 15% → 10% (tingkatkan TP1 realization rate ~35%→55%)
     "tp2_pct": 30.0,
     "tp3_pct": 50.0,
-    "min_rr_ratio": 2.0,
+    "min_rr_ratio": 1.8,       # [v15.2] diturunkan 2.0 → 1.8 (sesuai SL lebih besar & TP1 lebih kecil)
     
     # Position sizing
     "account_balance": 10000.0,
@@ -354,6 +372,44 @@ def set_alert(symbol: str, score: int, phase: str, entry_price: float):
         conn.close()
     except Exception as e:
         log.warning(f"set_alert failed: {e}")
+
+
+def check_and_update_outcomes(tickers: Dict[str, dict]):
+    """
+    [v15.2] Feedback loop: periksa alert yang belum di-check (outcome_checked=0)
+    dan isi outcome_pct berdasarkan harga sekarang vs entry_price.
+    Dipanggil setiap scan untuk membangun data akurasi empiris.
+    """
+    try:
+        conn = sqlite3.connect(CONFIG["history_db"])
+        c = conn.cursor()
+        # Ambil alert yang sudah >=1 jam tapi belum di-check
+        cutoff = int(time.time()) - 3600
+        c.execute(
+            "SELECT id, symbol, entry_price FROM alerts WHERE outcome_checked=0 AND alerted_at <= ?",
+            (cutoff,)
+        )
+        rows = c.fetchall()
+        updated = 0
+        for row_id, symbol, entry_price in rows:
+            ticker = tickers.get(symbol)
+            if not ticker or not entry_price or entry_price <= 0:
+                continue
+            current_price = float(ticker.get("lastPr", 0) or 0)
+            if current_price <= 0:
+                continue
+            outcome_pct = (current_price - entry_price) / entry_price * 100
+            c.execute(
+                "UPDATE alerts SET outcome_pct=?, outcome_checked=1 WHERE id=?",
+                (round(outcome_pct, 4), row_id)
+            )
+            updated += 1
+        if updated > 0:
+            conn.commit()
+            log.info(f"  Outcome tracking: updated {updated} alerts")
+        conn.close()
+    except Exception as e:
+        log.warning(f"check_and_update_outcomes failed: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -626,6 +682,18 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float) -> Tuple[int, Dict
     details["decel"] = round(decel, 3)
     
     details["total_score"] = score
+    
+    # [v15.2 MEDIUM] Compound check: penalty jika wick & decel keduanya absen.
+    # Keduanya adalah indikator konfirmasi paling langsung untuk pre-pump setup
+    # (rejection dari support + decelerating selling pressure). Tanpa keduanya,
+    # skor tinggi kemungkinan didorong oleh volatilitas distribusi, bukan akumulasi.
+    if details.get("wick_score", 0) == 0 and details.get("decel_score", 0) == 0:
+        score = max(0, score - 15)
+        details["compound_penalty"] = -15
+        details["total_score"] = score
+    else:
+        details["compound_penalty"] = 0
+    
     return score, details
 
 
@@ -819,7 +887,12 @@ class CoinalyzeClient:
                     mapped_by += 1
                     break
         
-        log.info(f"  Mapping: {mapped_bn}/{len(bitget_symbols)} Binance, {mapped_by}/{len(bitget_symbols)} Bybit")
+        log.info(f"  Mapping: {mapped_bn}/{len(bitget_symbols)} Binance ({mapped_bn/max(len(bitget_symbols),1)*100:.0f}%), "
+                 f"{mapped_by}/{len(bitget_symbols)} Bybit ({mapped_by/max(len(bitget_symbols),1)*100:.0f}%)")
+        # [v15.2] Log simbol yang tidak ter-map untuk diagnosis coverage
+        unmapped = [s for s in bitget_symbols if s not in self._bn_map]
+        if unmapped:
+            log.debug(f"  Unmapped from Binance: {unmapped[:10]}{'...' if len(unmapped)>10 else ''}")
     
     def _batch_fetch(self, endpoint: str, symbols: List[str], params: dict) -> Dict[str, list]:
         batch_size = CONFIG["coinalyze_batch_size"]
@@ -834,6 +907,12 @@ class CoinalyzeClient:
                     for item in data:
                         sym = item.get("symbol", "")
                         hist = item.get("history", [])
+                        # [v15.2 HIGH] Sort ascending by timestamp sebelum disimpan.
+                        # Semua scoring functions menggunakan indeks posisi (hist[-2], hist[-5], dll)
+                        # dengan asumsi data urut ascending. Tanpa sort ini, kalkulasi tier1/tier2
+                        # bisa silent-error jika API mengembalikan data tidak terurut.
+                        if hist:
+                            hist = sorted(hist, key=lambda x: x.get("t", 0))
                         if sym and hist:
                             result[sym] = hist
                 elif data and isinstance(data, dict) and "error" in data:
@@ -1333,6 +1412,16 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     decel_sc, _ = detect_momentum_decel(data.candles)
     supp_sc, _ = detect_dist_to_support(data.candles, data.price)
     rs24_sc, _ = detect_rs_24h(data.candles, data.btc_chg_24h)
+    
+    # [v15.2 MEDIUM] Volume mutual exclusivity: dry_sc (volume dryup) dan accum_sc
+    # (volume spike akumulasi) secara logis kontradiktif untuk candle yang sama.
+    # Gunakan nilai tertinggi saja untuk menghindari double-counting.
+    if dry_sc > 0 and accum_sc > 0:
+        if accum_sc >= dry_sc:
+            dry_sc = 0
+        else:
+            accum_sc = 0
+    
     tier3 = bbw_sc + dry_sc + accum_sc + vret_sc + rs_sc + wick_sc + decel_sc + supp_sc + rs24_sc
     
     # Phase base
@@ -1361,8 +1450,22 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     else:
         threshold = 110
     
+    # [v15.2 HIGH] Hapus Bitget-only fallback threshold (75).
+    # Sebelumnya: jika tidak ada CLZ data pada EARLY, threshold turun ke 75.
+    # Masalah: koin tanpa coverage Coinalyze adalah koin dengan likuiditas cross-exchange
+    # rendah — paling rentan manipulasi. Threshold 75 hanya +10 dari Phase1 (65),
+    # tidak memberikan filter berarti. EARLY tanpa data CLZ apapun = skip.
     if not has_any_clz and phase.phase == "EARLY":
-        threshold = CONFIG["alert_threshold_bitget_only"]
+        log.debug(f"  {data.symbol}: EARLY skip — no Coinalyze data (v15.2 policy)")
+        return None
+    
+    # [v15.2 MEDIUM] Minimum CLZ contribution check.
+    # Jika data CLZ tersedia tapi tidak ada satupun sinyal yang mendukung (tier1+tier2 < 15),
+    # artinya OI, funding, liquidation, dan L/S ratio semuanya netral/negatif.
+    # Kondisi ini adalah kontra-indikasi — jangan loloskan hanya karena tier3 tinggi.
+    if has_any_clz and (tier1 + tier2) < 15:
+        log.debug(f"  {data.symbol}: CLZ data ada tapi tier1+tier2={tier1+tier2} < 15 — skip")
+        return None
     
     if total < threshold:
         return None
@@ -1433,7 +1536,7 @@ def build_alert(r: ScoreResult, rank: int) -> str:
         f"#{rank}  {r.symbol}  {emoji}  Score: {r.score}  [{r.phase}]",
         f"   {bar}",
         f"   Phase1 Score: {r.bitget_phase1_score} (threshold {CONFIG['phase1_threshold']})",
-        f"   Data: {r.components.get('data_sources', 'N/A')}",
+        f"   Data: {r.components.get('data_sources', 'N/A')}  |  CLZ: T1={r.components['tier1_clz']} T2={r.components['tier2_clz']}",
         f"",
         f"   Vol: {vol} | Δ1h: {r.chg_1h:+.1f}% | Δ24h: {r.chg_24h:+.1f}% | F: {r.funding*100:.4f}%",
         f"   T1:{r.components['tier1_clz']} T2:{r.components['tier2_clz']} T3:{r.components['tier3_technical']}",
@@ -1479,10 +1582,24 @@ def main():
         log.error("❌ No tickers from Bitget")
         return 1
     
+    # [v15.2] Feedback loop: update outcome untuk alert sebelumnya
+    log.info("📊 Checking previous alert outcomes...")
+    check_and_update_outcomes(tickers)
+    
     btc_candles = BitgetClient.get_candles("BTCUSDT", 30)
     btc_chg_1h = 0.0
     btc_chg_24h = 0.0
-    if len(btc_candles) >= 3:
+    # [v15.2 HIGH] Fix BTC 1h lag: gunakan lastPr dari ticker (real-time) vs candles[-2] close.
+    # Versi lama menggunakan candles[-2] vs candles[-3] → selalu 1 jam di belakang.
+    # Pada kondisi flash crash, circuit breaker baru aktif H+1 setelah dump dimulai.
+    btc_ticker = tickers.get("BTCUSDT")
+    if btc_ticker and len(btc_candles) >= 2:
+        btc_current = float(btc_ticker.get("lastPr", 0) or 0)
+        btc_prev_close = btc_candles[-2]["close"]
+        if btc_current > 0 and btc_prev_close > 0:
+            btc_chg_1h = (btc_current - btc_prev_close) / btc_prev_close * 100
+    elif len(btc_candles) >= 3:
+        # Fallback jika ticker BTC tidak tersedia
         btc_chg_1h = (btc_candles[-2]["close"] - btc_candles[-3]["close"]) / btc_candles[-3]["close"] * 100
     if len(btc_candles) >= 26:
         btc_chg_24h = get_chg_from_candles(btc_candles, 24)
