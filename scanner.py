@@ -1009,14 +1009,30 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
     
     sl = price * (1 - atr * sl_mult)
     sl_pct = (price - sl) / price * 100
-    tp1 = price * (1 + CONFIG["tp1_pct"] / 100)
-    tp2 = price * (1 + CONFIG["tp2_pct"] / 100)
-    tp3 = price * (1 + CONFIG["tp3_pct"] / 100)
     risk = price - sl
     if risk <= 0:
         return None
+    
+    # [v15.2 FIX] TP1 proporsional terhadap risk (SL), bukan fixed %.
+    # TP1_fixed=10% dengan SL volatile=-12% menghasilkan RR=0.83 → selalu reject.
+    # Gunakan min_rr_ratio sebagai floor: TP1 = max(tp1_pct_fixed, risk × min_rr).
+    # Ini memastikan RR1 selalu >= min_rr_ratio untuk koin apapun, sambil tetap
+    # menggunakan tp1_pct sebagai minimum absolut (floor) agar profit layak.
+    tp1_min_pct = CONFIG["tp1_pct"] / 100          # 10% floor
+    tp1_rr_pct  = (risk / price) * CONFIG["min_rr_ratio"]  # RR-derived target
+    tp1_actual_pct = max(tp1_min_pct, tp1_rr_pct)
+    
+    tp1 = price * (1 + tp1_actual_pct)
+    tp2 = price * (1 + CONFIG["tp2_pct"] / 100)
+    tp3 = price * (1 + CONFIG["tp3_pct"] / 100)
+    
     rr1 = (tp1 - price) / risk
-    if rr1 < CONFIG["min_rr_ratio"]:
+    
+    # Sanity check: jika setelah kalkulasi proporsional masih < min_rr, log dan skip
+    # Gunakan epsilon 1e-9 untuk menghindari floating point false-reject
+    if rr1 < CONFIG["min_rr_ratio"] - 1e-9:
+        log.debug(f"  calc_entry_targets: RR1={rr1:.2f} < {CONFIG['min_rr_ratio']} "
+                  f"(atr={atr*100:.2f}% sl_mult={sl_mult} sl_pct={sl_pct:.1f}%) — skip")
         return None
     
     return {
@@ -1026,7 +1042,7 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
         "sl": round(sl, 8),
         "sl_pct": round(sl_pct, 1),
         "tp1": round(tp1, 8),
-        "tp1_pct": CONFIG["tp1_pct"],
+        "tp1_pct": round(tp1_actual_pct * 100, 1),
         "tp2": round(tp2, 8),
         "tp2_pct": CONFIG["tp2_pct"],
         "tp3": round(tp3, 8),
@@ -1483,6 +1499,8 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     
     entry_data = calc_entry_targets(data.candles, data.price)
     if entry_data is None:
+        log.info(f"  ✗ {sym} [{phase.phase}] REJECT: calc_entry_targets=None "
+                 f"(ATR terlalu besar untuk RR terpenuhi — lihat debug log)")
         return None
     
     position = calc_position_size(entry_data["entry"], entry_data["sl"], entry_data["atr_decimal"])
