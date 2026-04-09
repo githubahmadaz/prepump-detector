@@ -1373,23 +1373,31 @@ def classify_phase(chg_24h: float) -> PhaseInfo:
 
 
 def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]:
+    sym = data.symbol  # shorthand untuk logging
+    
     # Velocity gates
     phase = classify_phase(data.chg_24h)
+    log.info(f"  → {sym}: phase={phase.phase} chg_24h={data.chg_24h:+.1f}% chg_1h={data.chg_1h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
     is_cont = (phase.phase == "CONTINUATION")
     vg = CONFIG["velocity_gates"]
     if phase.phase not in ["DOWNTREND", "WEAK"]:
         if data.chg_24h < vg["chg_24h_min"]:
+            log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_24h={data.chg_24h:+.1f}% < min {vg['chg_24h_min']}")
             return None
         max_24h = vg["chg_24h_max_continuation"] if is_cont else vg["chg_24h_max_early"]
         if data.chg_24h > max_24h:
+            log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_24h={data.chg_24h:+.1f}% > max {max_24h}")
             return None
         max_1h = vg["chg_1h_max_continuation"] if is_cont else vg["chg_1h_max_early"]
         if data.chg_1h > max_1h:
+            log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_1h={data.chg_1h:+.1f}% > max {max_1h}")
             return None
         if data.chg_4h > vg["chg_4h_max"]:
+            log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_4h={data.chg_4h:+.1f}% > max {vg['chg_4h_max']}")
             return None
         # Filter tambahan: jika EARLY dan chg_1h < -2%, tolak
         if phase.phase == "EARLY" and data.chg_1h < -2.0:
+            log.info(f"  ✗ {sym} [EARLY] REJECT: chg_1h={data.chg_1h:+.1f}% < -2%")
             return None
     
     # Tier 1 & 2
@@ -1451,23 +1459,24 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         threshold = 110
     
     # [v15.2 HIGH] Hapus Bitget-only fallback threshold (75).
-    # Sebelumnya: jika tidak ada CLZ data pada EARLY, threshold turun ke 75.
-    # Masalah: koin tanpa coverage Coinalyze adalah koin dengan likuiditas cross-exchange
-    # rendah — paling rentan manipulasi. Threshold 75 hanya +10 dari Phase1 (65),
-    # tidak memberikan filter berarti. EARLY tanpa data CLZ apapun = skip.
     if not has_any_clz and phase.phase == "EARLY":
-        log.debug(f"  {data.symbol}: EARLY skip — no Coinalyze data (v15.2 policy)")
+        log.info(f"  ✗ {sym} [EARLY] REJECT: no Coinalyze data")
         return None
     
     # [v15.2 MEDIUM] Minimum CLZ contribution check.
-    # Jika data CLZ tersedia tapi tidak ada satupun sinyal yang mendukung (tier1+tier2 < 15),
-    # artinya OI, funding, liquidation, dan L/S ratio semuanya netral/negatif.
-    # Kondisi ini adalah kontra-indikasi — jangan loloskan hanya karena tier3 tinggi.
     if has_any_clz and (tier1 + tier2) < 15:
-        log.debug(f"  {data.symbol}: CLZ data ada tapi tier1+tier2={tier1+tier2} < 15 — skip")
+        log.info(f"  ✗ {sym} [{phase.phase}] REJECT: tier1+tier2={tier1+tier2} < 15 "
+                 f"(ls={ls_sc} bv={bv_sc} fund={fund_sc} pred={pred_sc} oi={oi_sc} liq={liq_sc})")
         return None
     
+    log.info(f"  ~ {sym} [{phase.phase}] score={total} vs threshold={threshold} | "
+             f"phase={phase_score} t1={tier1} t2={tier2} t3={tier3} | "
+             f"ls={ls_sc} bv={bv_sc} fund={fund_sc} pred={pred_sc} oi={oi_sc} liq={liq_sc} | "
+             f"bbw={bbw_sc} dry={dry_sc} acc={accum_sc} vret={vret_sc} rs={rs_sc} "
+             f"wick={wick_sc} decel={decel_sc} supp={supp_sc} rs24={rs24_sc}")
+    
     if total < threshold:
+        log.info(f"  ✗ {sym} [{phase.phase}] REJECT: total={total} < threshold={threshold}")
         return None
     if not pump_types:
         pump_types.append(PumpType("T", "Technical Setup", min(total, 100), ["Aggregate signals"]))
