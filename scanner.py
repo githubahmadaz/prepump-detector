@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v15.2 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
+║  PRE-PUMP SCANNER v15.3 — TWO-PHASE ARCHITECTURE (PRODUCTION READY)         ║
 ║                                                                              ║
 ║  PERBAIKAN v15.1:                                                            ║
 ║    • Filter simbol dengan regex (min 2 huruf + USDT)                         ║
@@ -30,6 +30,12 @@
 ║    • min_rr_ratio: 2.0 → 1.8                                                ║
 ║    • cooldown_hours: 12 → 18                                                ║
 ║    • velocity_gates.chg_1h_max_early: 8.0 → 5.0                            ║
+║  PERBAIKAN v15.3 (S/R Engine):                                               ║
+║    • find_sr_levels(): deteksi swing high/low + cluster scoring 1H           ║
+║    • SL → di bawah support terkuat terdekat + buffer ATR×0.3                ║
+║    • TP1/2/3 → resistance terkuat bertingkat; fallback RR-derived            ║
+║    • Alert menampilkan sumber S/R level untuk setiap SL & TP                ║
+║    • ATR tetap sebagai fallback jika S/R tidak cukup                        ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -56,7 +62,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "15.2.0-PRODUCTION"
+VERSION = "15.3.0-PRODUCTION"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 def setup_logging() -> logging.Logger:
@@ -994,63 +1000,249 @@ class CoinalyzeClient:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  📐  ATR-BASED ENTRY TARGETS
+#  📐  S/R LEVEL ENGINE (1H candles)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def find_sr_levels(candles: List[dict], price: float) -> Dict[str, Any]:
+    """
+    Deteksi level Support & Resistance terkuat dari candles 1H menggunakan
+    metode swing high/low + cluster scoring.
+
+    Algoritma:
+    1. Identifikasi swing low (support) dan swing high (resistance) dari candles.
+       Swing low: candle[i].low < candle[i-n].low AND candle[i].low < candle[i+n].low
+       untuk n=2 (konfirmasi 2 candle kiri+kanan).
+    2. Cluster swing points yang berdekatan (tolerance 1.5% harga) → satu level.
+    3. Score setiap level berdasarkan:
+       - touch_count: berapa kali harga menyentuh level (±1.5%)  → bobot 3 per touch
+       - recency: level yang lebih baru lebih relevan              → bobot 1–5
+       - volume_at_touch: rata-rata volume candle saat touch       → bobot relatif
+    4. Return: supports (di bawah price) dan resistances (di atas price),
+       masing-masing diurutkan by score descending.
+    """
+    window = min(96, len(candles) - 1)
+    if window < 10 or price <= 0:
+        return {"supports": [], "resistances": []}
+
+    candles_w = candles[-window - 1: -1]  # exclude live candle, gunakan closed candles
+    n_candles  = len(candles_w)
+    swing_radius = 2   # minimal 2 candle konfirmasi kiri & kanan
+    tol = 0.015        # 1.5% cluster tolerance
+
+    # ── 1. Kumpulkan swing lows dan swing highs ──────────────────────────────
+    swing_lows:  List[Tuple[float, int]] = []  # (price_level, candle_index)
+    swing_highs: List[Tuple[float, int]] = []
+
+    for i in range(swing_radius, n_candles - swing_radius):
+        lo = candles_w[i]["low"]
+        hi = candles_w[i]["high"]
+        # Swing low: lebih rendah dari semua candle dalam radius
+        if all(lo <= candles_w[i - k]["low"] for k in range(1, swing_radius + 1)) and \
+           all(lo <= candles_w[i + k]["low"] for k in range(1, swing_radius + 1)):
+            swing_lows.append((lo, i))
+        # Swing high: lebih tinggi dari semua candle dalam radius
+        if all(hi >= candles_w[i - k]["high"] for k in range(1, swing_radius + 1)) and \
+           all(hi >= candles_w[i + k]["high"] for k in range(1, swing_radius + 1)):
+            swing_highs.append((hi, i))
+
+    # ── 2. Cluster swing points → level unik ────────────────────────────────
+    def cluster_swings(swings: List[Tuple[float, int]]) -> List[Dict]:
+        if not swings:
+            return []
+        clusters: List[Dict] = []
+        for lvl, idx in sorted(swings, key=lambda x: x[0]):
+            matched = False
+            for cl in clusters:
+                if abs(lvl - cl["price"]) / cl["price"] < tol:
+                    # Update cluster: price = weighted mean
+                    cl["price"] = (cl["price"] * cl["count"] + lvl) / (cl["count"] + 1)
+                    cl["count"] += 1
+                    cl["last_idx"] = max(cl["last_idx"], idx)
+                    matched = True
+                    break
+            if not matched:
+                clusters.append({"price": lvl, "count": 1, "last_idx": idx})
+        return clusters
+
+    sup_clusters = cluster_swings(swing_lows)
+    res_clusters = cluster_swings(swing_highs)
+
+    # ── 3. Score setiap level ────────────────────────────────────────────────
+    def score_levels(clusters: List[Dict], all_candles: List[dict]) -> List[Dict]:
+        scored = []
+        total_candles = len(all_candles)
+        for cl in clusters:
+            lvl = cl["price"]
+            # Touch count: hitung berapa candle yang high/low menyentuh ±tol dari level
+            touches = 0
+            vol_touches = []
+            for c in all_candles:
+                c_lo, c_hi = c["low"], c["high"]
+                if abs(c_lo - lvl) / lvl < tol or abs(c_hi - lvl) / lvl < tol:
+                    touches += 1
+                    vol_touches.append(c.get("volume_usd", 0))
+            avg_vol = _mean(vol_touches) if vol_touches else 0
+            # Recency score: 1–5, makin baru makin tinggi
+            recency = 1 + int((cl["last_idx"] / max(total_candles - 1, 1)) * 4)
+            # Final score
+            score = touches * 3 + recency + (1 if avg_vol > 0 else 0)
+            scored.append({
+                "price":    round(lvl, 8),
+                "touches":  touches,
+                "recency":  recency,
+                "score":    score,
+                "avg_vol":  round(avg_vol, 0),
+                "count":    cl["count"],
+            })
+        return sorted(scored, key=lambda x: x["score"], reverse=True)
+
+    all_sup = score_levels(sup_clusters, candles_w)
+    all_res = score_levels(res_clusters, candles_w)
+
+    # ── 4. Filter: support di bawah price, resistance di atas price ──────────
+    # Tambahkan buffer kecil: support tidak boleh terlalu jauh (>20%) atau terlalu dekat (<0.3%)
+    supports    = [s for s in all_sup if s["price"] < price * 0.997 and s["price"] > price * 0.80]
+    resistances = [r for r in all_res if r["price"] > price * 1.003 and r["price"] < price * 1.50]
+
+    return {
+        "supports":    supports,
+        "resistances": resistances,
+        "all_supports": all_sup,
+        "all_resistances": all_res,
+    }
+
+
 def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
+    """
+    [v15.3] SL dan TP berbasis level Support/Resistance 1H terkuat.
+
+    Logika:
+    - SL  → di bawah support terkuat terdekat, ditambah buffer ATR×0.3
+            (buffer mencegah SL tepat di level, memberi ruang wick)
+    - TP1 → resistance terkuat terdekat di atas entry
+    - TP2 → resistance ke-2 (atau TP1 × 1.5 jika tidak ada)
+    - TP3 → resistance ke-3 (atau TP1 × 2.0 jika tidak ada)
+    - Fallback ke ATR-based jika S/R tidak ditemukan (minimal data)
+
+    RR validation: hanya lolos jika RR1 >= min_rr_ratio.
+    """
     if len(candles) < 16:
         return None
+
     atr = calc_atr(candles, 14)
-    if atr > 0.04:
-        sl_mult = CONFIG["sl_mult_volatile"]
-    elif atr > 0.02:
-        sl_mult = CONFIG["sl_mult_normal"]
-    else:
-        sl_mult = CONFIG["sl_mult_quiet"]
+
+    # ── Cari level S/R ───────────────────────────────────────────────────────
+    sr = find_sr_levels(candles, price)
+    supports    = sr["supports"]
+    resistances = sr["resistances"]
+
+    method = "sr"  # akan diubah ke "atr_fallback" jika S/R tidak cukup
+
+    # ── SL: support terkuat terdekat + buffer ────────────────────────────────
+    sl = None
+    sl_source = "none"
     
-    sl = price * (1 - atr * sl_mult)
+    # Prioritas: support TERDEKAT yang memiliki score >= 5 (minimal 2 touch + recency)
+    # Urutkan by jarak ke price (ascending), bukan by score, untuk mendapatkan SL terdekat
+    supports_by_dist = sorted(supports, key=lambda x: price - x["price"])
+    
+    for sup in supports_by_dist:
+        sl_candidate = sup["price"] - (price * atr * 0.3)  # buffer ATR×0.3
+        sl_pct_candidate = (price - sl_candidate) / price * 100
+        # Cap: SL maksimal 12% dari entry untuk menghindari SL terlalu jauh
+        if sl_pct_candidate <= 12.0 and sl_candidate > 0:
+            sl = sl_candidate
+            sl_source = f"S@{sup['price']:.6g}(t{sup['touches']})"
+            break
+
+    # Fallback ATR jika tidak ada support ditemukan
+    if sl is None or sl <= 0 or sl >= price:
+        if atr > 0.04:
+            sl_mult = CONFIG["sl_mult_volatile"]
+        elif atr > 0.02:
+            sl_mult = CONFIG["sl_mult_normal"]
+        else:
+            sl_mult = CONFIG["sl_mult_quiet"]
+        sl = price * (1 - atr * sl_mult)
+        sl_source = f"ATR×{sl_mult}"
+        method = "atr_fallback"
+
     sl_pct = (price - sl) / price * 100
-    risk = price - sl
+    risk    = price - sl
     if risk <= 0:
         return None
-    
-    # [v15.2 FIX] TP1 proporsional terhadap risk (SL), bukan fixed %.
-    # TP1_fixed=10% dengan SL volatile=-12% menghasilkan RR=0.83 → selalu reject.
-    # Gunakan min_rr_ratio sebagai floor: TP1 = max(tp1_pct_fixed, risk × min_rr).
-    # Ini memastikan RR1 selalu >= min_rr_ratio untuk koin apapun, sambil tetap
-    # menggunakan tp1_pct sebagai minimum absolut (floor) agar profit layak.
-    tp1_min_pct = CONFIG["tp1_pct"] / 100          # 10% floor
-    tp1_rr_pct  = (risk / price) * CONFIG["min_rr_ratio"]  # RR-derived target
-    tp1_actual_pct = max(tp1_min_pct, tp1_rr_pct)
-    
-    tp1 = price * (1 + tp1_actual_pct)
-    tp2 = price * (1 + CONFIG["tp2_pct"] / 100)
-    tp3 = price * (1 + CONFIG["tp3_pct"] / 100)
-    
+
+    # ── TP1/TP2/TP3: resistance terkuat bertingkat ───────────────────────────
+    tp_source = []
+
+    if resistances:
+        tp1 = resistances[0]["price"]
+        tp_source.append(f"R1@{resistances[0]['price']:.6g}(t{resistances[0]['touches']})")
+    else:
+        # Fallback: TP1 berbasis RR proporsional
+        tp1 = price + risk * CONFIG["min_rr_ratio"]
+        tp_source.append("RR-derived")
+        method = "atr_fallback" if method != "sr" else "sr_tp_fallback"
+
+    if len(resistances) >= 2:
+        tp2 = resistances[1]["price"]
+        tp_source.append(f"R2@{resistances[1]['price']:.6g}(t{resistances[1]['touches']})")
+    else:
+        tp2 = price * (1 + CONFIG["tp2_pct"] / 100)
+        tp2 = max(tp2, tp1 * 1.03)  # minimal 3% di atas TP1
+        tp_source.append("tp2_fallback")
+
+    if len(resistances) >= 3:
+        tp3 = resistances[2]["price"]
+        tp_source.append(f"R3@{resistances[2]['price']:.6g}(t{resistances[2]['touches']})")
+    else:
+        tp3 = price * (1 + CONFIG["tp3_pct"] / 100)
+        tp3 = max(tp3, tp2 * 1.03)
+        tp_source.append("tp3_fallback")
+
+    # ── Validasi TP1 >= TP min floor (10%) ──────────────────────────────────
+    # Jika resistance terlalu dekat (<5% dari entry), gunakan RR-derived sebagai floor
+    tp1_floor = price + risk * CONFIG["min_rr_ratio"]
+    if tp1 < price * 1.05:
+        tp1 = max(tp1, tp1_floor)
+
+    # ── RR check ─────────────────────────────────────────────────────────────
     rr1 = (tp1 - price) / risk
-    
-    # Sanity check: jika setelah kalkulasi proporsional masih < min_rr, log dan skip
-    # Gunakan epsilon 1e-9 untuk menghindari floating point false-reject
     if rr1 < CONFIG["min_rr_ratio"] - 1e-9:
         log.debug(f"  calc_entry_targets: RR1={rr1:.2f} < {CONFIG['min_rr_ratio']} "
-                  f"(atr={atr*100:.2f}% sl_mult={sl_mult} sl_pct={sl_pct:.1f}%) — skip")
+                  f"sl_pct={sl_pct:.1f}% tp1={tp1:.6g} — skip")
         return None
-    
+
+    tp1_pct = (tp1 / price - 1) * 100
+    tp2_pct = (tp2 / price - 1) * 100
+    tp3_pct = (tp3 / price - 1) * 100
+    rr2 = (tp2 - price) / risk if risk > 0 else 0
+    rr3 = (tp3 - price) / risk if risk > 0 else 0
+
     return {
-        "entry": round(price, 8),
-        "entry_zone_low": round(price * (1 - atr * 0.3), 8),
-        "entry_zone_high": round(price * (1 + atr * 0.2), 8),
-        "sl": round(sl, 8),
-        "sl_pct": round(sl_pct, 1),
-        "tp1": round(tp1, 8),
-        "tp1_pct": round(tp1_actual_pct * 100, 1),
-        "tp2": round(tp2, 8),
-        "tp2_pct": CONFIG["tp2_pct"],
-        "tp3": round(tp3, 8),
-        "tp3_pct": CONFIG["tp3_pct"],
-        "rr1": round(rr1, 2),
-        "atr_pct": round(atr * 100, 2),
-        "atr_decimal": atr,
-        "sl_mult": sl_mult,
+        "entry":            round(price, 8),
+        "entry_zone_low":   round(price * (1 - atr * 0.3), 8),
+        "entry_zone_high":  round(price * (1 + atr * 0.2), 8),
+        "sl":               round(sl, 8),
+        "sl_pct":           round(sl_pct, 1),
+        "sl_source":        sl_source,
+        "tp1":              round(tp1, 8),
+        "tp1_pct":          round(tp1_pct, 1),
+        "tp2":              round(tp2, 8),
+        "tp2_pct":          round(tp2_pct, 1),
+        "tp3":              round(tp3, 8),
+        "tp3_pct":          round(tp3_pct, 1),
+        "rr1":              round(rr1, 2),
+        "rr2":              round(rr2, 2),
+        "rr3":              round(rr3, 2),
+        "atr_pct":          round(atr * 100, 2),
+        "atr_decimal":      atr,
+        "sl_mult":          round(sl_pct / (atr * 100) if atr > 0 else 0, 1),
+        "method":           method,
+        "sl_source":        sl_source,
+        "tp_source":        " | ".join(tp_source),
+        "n_supports":       len(supports),
+        "n_resistances":    len(resistances),
     }
 
 
@@ -1570,14 +1762,24 @@ def build_alert(r: ScoreResult, rank: int) -> str:
     ]
     if r.entry:
         e = r.entry
+        method_tag = f"[{e.get('method','?')}]"
+        sl_src     = e.get('sl_source', '')
+        tp_src     = e.get('tp_source', '')
+        n_sup      = e.get('n_supports', 0)
+        n_res      = e.get('n_resistances', 0)
+        rr2_str    = f"  R/R {e['rr2']:.1f}x" if e.get('rr2') else ""
+        rr3_str    = f"  R/R {e['rr3']:.1f}x" if e.get('rr3') else ""
         lines += [
             f"",
-            f"   💰 ENTRY ZONE:",
+            f"   💰 ENTRY ZONE:  {method_tag}  S/R found: {n_sup} sup / {n_res} res",
             f"      Low:  ${e['entry_zone_low']:.8f}",
             f"      Mid:  ${e['entry']:.8f}",
             f"      High: ${e['entry_zone_high']:.8f}",
-            f"      SL:   ${e['sl']:.8f}  (-{e['sl_pct']:.1f}%)  [ATR×{e['sl_mult']:.1f}]",
-            f"      TP1:  ${e['tp1']:.8f}  (+{e['tp1_pct']:.0f}%)  R/R {e['rr1']:.1f}x",
+            f"      SL:   ${e['sl']:.8f}  (-{e['sl_pct']:.1f}%)  ← {sl_src}",
+            f"      TP1:  ${e['tp1']:.8f}  (+{e['tp1_pct']:.1f}%)  R/R {e['rr1']:.1f}x",
+            f"      TP2:  ${e['tp2']:.8f}  (+{e['tp2_pct']:.1f}%){rr2_str}",
+            f"      TP3:  ${e['tp3']:.8f}  (+{e['tp3_pct']:.1f}%){rr3_str}",
+            f"      Src:  {tp_src}",
         ]
     if r.position:
         p = r.position
