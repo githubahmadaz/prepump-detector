@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v16.1.0 — SPRINT 1 FIXES                                 ║
+║  PRE-PUMP SCANNER v16.0 — CONFLUENCE ARCHITECTURE                          ║
 ║                                                                              ║
-║  PERUBAHAN DARI v16.0.0-CONFLUENCE:                                          ║
+║  PERBAIKAN DARI v15.6:                                                       ║
 ║                                                                              ║
-║  [SPRINT1-FIX-A] 🔴 KRITIS — Outcome tracking return_1h/2h/3h diperbaiki   ║
-║    BUG LAMA: elapsed>=3h → semua kolom diisi nilai sama (return jam ke-3).  ║
-║    FIX: Setiap kolom hanya diupdate SEKALI pada window-nya via NULL check.  ║
-║    return_1h diisi saat scan pertama setelah 1h, return_2h setelah 2h,      ║
-║    return_3h + hit_15pct + checked=1 setelah 3h.                            ║
-║    Dampak: Data precision menjadi valid untuk Sprint 2 kalibrasi.           ║
+║  [FIX-1] 🔴 KRITIS — Confluence check diimplementasi (check_confluence)     ║
+║    Sinyal hanya lolos jika minimal 3 dari 4 kategori independen aktif:       ║
+║    CAT-A (Derivatives), CAT-B (Order Flow), CAT-C (Price RS), CAT-D (Micro)  ║
+║    Efek: memotong 60-70% false positive single-category                      ║
 ║                                                                              ║
-║  [SPRINT1-FIX-B] 🟠 SERIUS — Pre-filter chg_24h di Phase 1                 ║
-║    BUG LAMA: Coin PARABOLIC (+239%, +213%, +71%) lolos Phase 1,             ║
-║    baru ditolak di Phase 2 — setelah Coinalyze sudah di-fetch sia-sia.      ║
-║    FIX: Cek ticker field 'change24h' SEBELUM fetch candles & Coinalyze.     ║
-║    Gate: >35% atau <-20% langsung skip (lebih longgar dari Phase 2 gate).   ║
-║    Dampak: ~59% pengurangan Coinalyze waste → scan time -4-6 menit.        ║
+║  [FIX-2] 🔴 KRITIS — Double-count BTC RS dihapus                            ║
+║    btc_context_bonus dihapus. detect_rs_btc + detect_rs_24h digabung         ║
+║    ke score_btc_decoupling() (CAT-C) dengan regime-aware scoring.            ║
+║    Satu fenomena = satu skor. rs_sc maks 20 (bukan 53 sebelumnya).           ║
 ║                                                                              ║
-║  TIDAK DIUBAH (butuh 50+ signal outcomes sebelum boleh diubah):             ║
-║  • confluence_cat_b_min tetap 1 (belum ada data untuk justifikasi)          ║
-║  • Semua threshold numerik lainnya tetap                                     ║
+║  [FIX-3] 🟠 SERIUS — Phase 1 tambah momentum pre-pump filter                ║
+║    Tambah momentum_score: chg_4h dan chg_1h kontekstual.                    ║
+║    Coin yang sedang distribusi aktif (turun 4h) diberi penalty.              ║
+║    Phase 1 kini membedakan volatilitas biasa vs pre-pump setup.              ║
+║                                                                              ║
+║  [FIX-4] 🟠 SERIUS — BV ratio window diperlebar 6h → 12h                    ║
+║    hist[-13:-1] menggantikan hist[-7:-1]. Menangkap whale accumulation       ║
+║    yang berlangsung 12-48 jam sebelum pump.                                  ║
+║                                                                              ║
+║  [FIX-5] 🟡 MENENGAH — TP1 fallback berbasis RR adaptif, bukan fixed %      ║
+║    TP fallback kini menggunakan resistance terdekat dari fractal high         ║
+║    jika S/R engine tidak menemukan cukup levels. Tidak lagi pakai            ║
+║    tp1_pct fixed 10% yang tidak mencerminkan struktur pasar.                 ║
+║                                                                              ║
+║  [BONUS] Precision tracking tabel signal_outcomes (wajib untuk iterasi)     ║
+║  [BONUS] check_and_update_outcomes() diperluas: return_1h, return_2h, 3h    ║
+║  [BONUS] get_precision_report() untuk evaluasi harian                        ║
 ║                                                                              ║
 ║  PERINGATAN WAJIB:                                                           ║
 ║  • Setiap perubahan threshold tanpa data live = overfitting                  ║
@@ -53,7 +63,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "16.1.0-SPRINT1"
+VERSION = "16.1.1-SPRINT1"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -203,11 +213,12 @@ CONFIG: Dict = {
         "chg_4h_min_early":        -3.0,
     },
 
-    # ── [SPRINT1-FIX-B] Phase 1 pre-filter chg_24h (dari ticker, sebelum candle fetch) ──
-    # Sengaja lebih longgar dari Phase 2 velocity gate untuk menghindari false exclusion.
-    # Phase 2 gate: max_early=15%, max_continuation=30%. Pre-filter: max=35%, min=-20%.
-    "phase1_prefilter_chg24h_max":  35.0,   # lebih dari ini pasti PARABOLIC → skip
-    "phase1_prefilter_chg24h_min": -20.0,   # lebih dalam dari ini → distribusi berat → skip
+    # ── [SPRINT1-FIX-B] Phase 1 pre-filter chg_24h ───────────────────────────
+    # Field 'change24h' dari Bitget USDT-Futures ticker adalah decimal multiplier.
+    # Contoh: DASHUSDT change24h=0.34513 → +34.5%, RAVEUSDT=2.13526 → +213.5%
+    # Terverifikasi 10 April 2026 dari API response langsung.
+    "phase1_prefilter_chg24h_max":  35.0,   # >35% → pasti PARABOLIC, skip Coinalyze
+    "phase1_prefilter_chg24h_min": -20.0,   # <-20% → distribusi berat, skip
 
     # ── Cooldown & limits ─────────────────────────────────────────────────────
     "cooldown_hours":        18,
@@ -442,23 +453,16 @@ def set_alert(symbol: str, score: int, phase: str, entry_price: float,
 
 def check_and_update_outcomes(tickers: Dict[str, dict]):
     """
-    [SPRINT1-FIX-A] Feedback loop: cek sinyal yang sudah >1 jam.
-    Update return_1h, return_2h, return_3h, hit_15pct secara INDEPENDENT per timeframe.
-
-    BUG LAMA (v16.0): Saat elapsed >= 3h, semua kolom (return_1h, return_2h, return_3h)
-    diisi nilai yang sama = return saat di-check. Akibatnya return_1h dan return_2h
-    tidak pernah ter-capture pada waktunya — selalu overwritten oleh nilai jam ke-3.
-
-    FIX: Setiap kolom hanya diupdate SEKALI pada window-nya, dan TIDAK dioverwrite
-    jika sudah terisi. checked=1 hanya di-set setelah elapsed >= 3h.
-    hit_15pct dihitung dari return_3h (atau return terbaik yang ada jika 3h belum ready).
+    [BONUS] Feedback loop: cek sinyal yang sudah >1 jam.
+    Update return_1h, return_2h, return_3h, hit_15pct.
+    Dipanggil setiap scan untuk membangun data precision empiris.
     """
     try:
         conn = sqlite3.connect(CONFIG["history_db"])
         c = conn.cursor()
         now = int(time.time())
 
-        # ── Update tabel alerts (untuk cooldown tracking) ─────────────────────
+        # Update tabel alerts (untuk cooldown tracking)
         c.execute(
             "SELECT id, symbol, entry_price FROM alerts WHERE outcome_checked=0 AND alerted_at <= ?",
             (now - 3600,)
@@ -476,8 +480,9 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 (round(out, 4), row_id)
             )
 
-        # ── Update signal_outcomes (multi-timeframe, independent per kolom) ───
-        # Ambil sinyal yang belum di-close (checked=0) dan sudah cukup tua (>=1h)
+        # [SPRINT1-FIX-A] Update signal_outcomes — independent per window via NULL check.
+        # BUG LAMA: elapsed>=3h menulis ret ke semua kolom (return_1h=return_2h=return_3h=ret@jam3).
+        # FIX: setiap kolom hanya diisi SEKALI pada window-nya. Tidak dioverwrite jika sudah ada.
         c.execute(
             """SELECT id, symbol, alerted_at, entry_price,
                       return_1h, return_2h, return_3h
@@ -487,7 +492,6 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
         )
         rows = c.fetchall()
         updated = 0
-
         for row_id, symbol, alerted_at, entry_price, r1h, r2h, r3h in rows:
             ticker = tickers.get(symbol)
             if not ticker or not entry_price or entry_price <= 0:
@@ -495,24 +499,20 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
             cur = float(ticker.get("lastPr", 0) or 0)
             if cur <= 0:
                 continue
-
             elapsed = now - alerted_at
             ret = round((cur - entry_price) / entry_price * 100, 2)
 
-            # [FIX] Setiap window hanya diisi SEKALI (jika kolom masih NULL)
-            # Window 1h: elapsed 1h-2h → isi return_1h jika belum ada
+            # Window 1h: isi return_1h hanya jika belum ada
             if elapsed >= 3600 and r1h is None:
-                c.execute("UPDATE signal_outcomes SET return_1h=? WHERE id=?",
-                          (ret, row_id))
-                r1h = ret  # update local untuk logika di bawah
+                c.execute("UPDATE signal_outcomes SET return_1h=? WHERE id=?", (ret, row_id))
+                r1h = ret
 
-            # Window 2h: elapsed 2h-3h → isi return_2h jika belum ada
+            # Window 2h: isi return_2h hanya jika belum ada
             if elapsed >= 2 * 3600 and r2h is None:
-                c.execute("UPDATE signal_outcomes SET return_2h=? WHERE id=?",
-                          (ret, row_id))
+                c.execute("UPDATE signal_outcomes SET return_2h=? WHERE id=?", (ret, row_id))
                 r2h = ret
 
-            # Window 3h: elapsed >= 3h → isi return_3h, hitung hit_15pct, close
+            # Window 3h: isi return_3h, hitung hit_15pct, close sinyal
             if elapsed >= 3 * 3600 and r3h is None:
                 hit = 1 if ret >= 15.0 else 0
                 c.execute("""
@@ -2148,28 +2148,19 @@ def main():
                 continue
 
             # [SPRINT1-FIX-B] Pre-filter chg_24h dari ticker SEBELUM fetch candles.
-            # Bitget USDT-Futures ticker menyediakan field 'chgUtc' (change sejak 00:00 UTC)
-            # dan 'change24h' (rolling 24h change, decimal). Kita pakai 'change24h'.
-            # Tujuan: buang coin PARABOLIC/terlalu jauh sebelum fetch Coinalyze.
-            # Ini eliminasi ~59% Coinalyze waste berdasarkan run log Apr 10.
-            try:
-                # 'change24h' di Bitget adalah decimal, misal 0.239 = +23.9%
-                # Fallback ke 0 jika field tidak ada (aman — coin tetap lolos pre-filter)
-                raw_chg = ticker.get("change24h") or ticker.get("chgUtc") or 0
-                chg_24h_ticker = float(raw_chg) * 100  # konversi ke persen
-            except (TypeError, ValueError):
-                chg_24h_ticker = 0.0
-
-            # Gate: buang coin yang pasti akan ditolak velocity gate di Phase 2.
-            # Threshold sengaja dibuat LEBIH LONGGAR dari Phase 2 (+30% vs +15%/+30%)
-            # untuk menghindari false exclusion jika ticker chg != candle chg.
-            p1_chg24h_max = CONFIG.get("phase1_prefilter_chg24h_max", 35.0)
-            p1_chg24h_min = CONFIG.get("phase1_prefilter_chg24h_min", -20.0)
-            if chg_24h_ticker > p1_chg24h_max or chg_24h_ticker < p1_chg24h_min:
-                log.debug(f"  {sym}: Phase1 pre-filter chg_24h={chg_24h_ticker:+.1f}% → skip Coinalyze")
-                continue
-
-            candles = BitgetClient.get_candles(sym, CONFIG["candle_limit_bitget"])
+            # 'change24h' = decimal multiplier (0.345 = +34.5%). Terverifikasi dari API.
+            # Fallback eksplisit ke None-check — hindari 'or 0' yang salah tangani 0.0.
+            _raw = ticker.get("change24h")
+            if _raw is not None:
+                try:
+                    chg_24h_ticker = float(_raw) * 100
+                    _max = CONFIG["phase1_prefilter_chg24h_max"]
+                    _min = CONFIG["phase1_prefilter_chg24h_min"]
+                    if chg_24h_ticker > _max or chg_24h_ticker < _min:
+                        log.debug(f"  {sym}: pre-filter chg_24h={chg_24h_ticker:+.1f}% → skip")
+                        continue
+                except (TypeError, ValueError):
+                    pass  # field ada tapi tidak bisa diparse → biarkan lolos, aman
             if len(candles) < 30:
                 continue
 
