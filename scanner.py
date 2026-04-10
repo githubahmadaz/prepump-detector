@@ -2161,6 +2161,9 @@ def main():
                         continue
                 except (TypeError, ValueError):
                     pass  # field ada tapi tidak bisa diparse → biarkan lolos, aman
+
+            # Fetch candles SETELAH pre-filter (hemat API call untuk coin yang sudah dibuang)
+            candles = BitgetClient.get_candles(sym, CONFIG["candle_limit_bitget"])
             if len(candles) < 30:
                 continue
 
