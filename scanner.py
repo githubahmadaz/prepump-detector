@@ -190,7 +190,7 @@ CONFIG: Dict = {
 
     # ── [FIX-1] Confluence thresholds (4 kategori independen) ────────────────
     "confluence_cat_a_min":  20,   # Derivatives: ls+fund+pred+oi
-    "confluence_cat_b_min":  10,   # Order Flow:  bv+accum
+    "confluence_cat_b_min":  1,   # Order Flow:  bv+accum
     "confluence_cat_c_min":   8,   # Price RS:    rs_sc (score_btc_decoupling)
     "confluence_cat_d_min":   8,   # Microstructure: vret+wick+decel
     "confluence_min_cats":    3,   # minimal 3 dari 4 kategori harus aktif
