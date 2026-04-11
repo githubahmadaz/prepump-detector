@@ -232,7 +232,7 @@ CONFIG: Dict = {
     "btc_dump_threshold":    -3.0,
 
     # ── Database ──────────────────────────────────────────────────────────────
-   "history_db": os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner_history.db"),
+    "history_db": os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner_history.db"),
 
     # ── Entry / SL / TP ───────────────────────────────────────────────────────
     "sl_mult_volatile":  3.0,
@@ -350,8 +350,9 @@ class ScoreResult:
     vol_24h:          float
     chg_24h:          float
     chg_1h:           float
-    funding:          float
-    urgency:          str
+    chg_4h:           float = 0.0   # [FIX] tambah chg_4h untuk outcome DB
+    funding:          float = 0.0
+    urgency:          str = ""
     confluence:       ConfluenceResult = field(default_factory=lambda: ConfluenceResult(False,"",0,0,0,0,0))
     risk_warnings:    List[str] = field(default_factory=list)
     position:         Optional[dict] = None
@@ -2058,6 +2059,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         vol_24h=data.vol_24h,
         chg_24h=data.chg_24h,
         chg_1h=data.chg_1h,
+        chg_4h=data.chg_4h,        # [FIX] chg_4h untuk outcome DB
         funding=data.funding,
         urgency="",
         confluence=cf,
