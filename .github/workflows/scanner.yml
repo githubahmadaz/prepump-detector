@@ -2,43 +2,48 @@ name: Pre-Pump Scanner
 
 on:
   schedule:
-    - cron: '0 */1 * * *'   # setiap 2 jam sekali (menit 0)
+    - cron: '0 * * * *'   # setiap jam — sesuaikan dengan jadwal kamu
   workflow_dispatch:
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      # ──────────────────────────────────────────────────────────────
-      # [FIX L] PERSISTENT COOLDOWN — restore dari run sebelumnya
-      # Tanpa ini: runner baru tiap 30 menit = cooldown.json hilang
-      # = koin yang sama di-alert berulang (lihat: IOTX scan #1 & #2)
-      # ──────────────────────────────────────────────────────────────
-      - name: Restore cooldown cache
-        uses: actions/cache@v4
-        with:
-          path: cooldown.json
-          key: scanner-cooldown-${{ github.run_id }}
-          restore-keys: |
-            scanner-cooldown-
-
       - name: Install dependencies
-        run: pip install ccxt pandas numpy requests
+        run: pip install -r requirements.txt
 
+      # ── Jalankan outcome_analyzer DULU (evaluate sinyal lama)
+      - name: Evaluate previous signals
+        env:
+          COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          python outcome_analyzer.py --hours 48 --detail 24 || true
+
+      # ── Jalankan scanner (hasilkan sinyal baru)
       - name: Run scanner
         env:
+          COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python scanner.py
 
-      # actions/cache otomatis menyimpan cooldown.json yang baru
-      # ke cache setelah job selesai — tidak perlu step tambahan
+      # ── Commit DB kembali ke repo agar persist
+      - name: Save DB to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add scanner_history.db || true
+          git diff --staged --quiet || git commit -m "chore: update scanner DB [skip ci]"
+          git push || true
