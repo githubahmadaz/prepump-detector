@@ -404,7 +404,9 @@ def print_signal_detail(conn, hours_back: int = 24):
 
         print(f"\n  {status}  {sym:16s}  Score:{score:3d}  [{phase}]  {dt_str}")
         print(f"    A={a} B={b} C={cc} D={d}  |  BTC={regime}")
-        print(f"    Entry={entry:.6f}  SL={sl:.6f if sl else 'N/A'}  TP1={tp1:.6f if tp1 else 'N/A'}")
+        sl_str  = f"{sl:.6f}"  if sl  else "N/A"
+        tp1_str = f"{tp1:.6f}" if tp1 else "N/A"
+        print(f"    Entry={entry:.6f}  SL={sl_str}  TP1={tp1_str}")
 
         fund_str = f"{fund*100:.4f}%" if fund else "N/A"
         c1h_str  = f"{c1h:+.1f}%" if c1h is not None else "N/A"
