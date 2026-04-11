@@ -63,7 +63,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "16.1.1-SPRINT1"
+VERSION = "16.1.2-SPRINT1"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -205,6 +205,7 @@ CONFIG: Dict = {
     "velocity_gates": {
         "chg_1h_max_early":        5.0,
         "chg_1h_max_continuation": 12.0,
+        "chg_2h_max_continuation": 8.0,   # [SPRINT1-FIX-D] gate baru: pump 2h terakhir
         "chg_4h_max":              15.0,
         "chg_24h_max_early":       15.0,
         "chg_24h_max_continuation":30.0,
@@ -304,6 +305,7 @@ class CoinData:
     btc_chg_1h:  float = 0.0
     btc_chg_4h:  float = 0.0    # [FIX-2] tambah 4h BTC untuk regime detection
     btc_chg_24h: float = 0.0
+    chg_2h:      float = 0.0    # [SPRINT1-FIX-D] untuk deteksi pump yang sudah terjadi
     clz:         ClzData = field(default_factory=ClzData)
 
 
@@ -378,7 +380,7 @@ def init_db():
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_alert_sym ON alerts(symbol, alerted_at DESC)")
 
-    # [BONUS] Tabel signal_outcomes — precision tracking per kategori
+    # [SPRINT1] Tabel signal_outcomes — precision tracking + outcome analysis
     c.execute("""
         CREATE TABLE IF NOT EXISTS signal_outcomes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -394,10 +396,26 @@ def init_db():
             btc_regime  TEXT,
             fingerprint TEXT,
             entry_price REAL,
+            sl_price    REAL    DEFAULT NULL,
+            tp1_price   REAL    DEFAULT NULL,
+            tp2_price   REAL    DEFAULT NULL,
+            sl_pct      REAL    DEFAULT NULL,
+            tp1_pct     REAL    DEFAULT NULL,
+            chg_1h_signal  REAL DEFAULT NULL,
+            chg_4h_signal  REAL DEFAULT NULL,
+            chg_24h_signal REAL DEFAULT NULL,
+            funding_signal REAL DEFAULT NULL,
+            vol_24h_signal REAL DEFAULT NULL,
+            tier1       INTEGER DEFAULT NULL,
+            tier2       INTEGER DEFAULT NULL,
+            tier3       INTEGER DEFAULT NULL,
             return_1h   REAL    DEFAULT NULL,
             return_2h   REAL    DEFAULT NULL,
             return_3h   REAL    DEFAULT NULL,
+            max_return  REAL    DEFAULT NULL,
             hit_15pct   INTEGER DEFAULT NULL,
+            hit_10pct   INTEGER DEFAULT NULL,
+            hit_sl      INTEGER DEFAULT NULL,
             checked     INTEGER DEFAULT 0
         )
     """)
@@ -429,21 +447,33 @@ def set_alert(symbol: str, score: int, phase: str, entry_price: float,
             "INSERT INTO alerts (symbol, alerted_at, score, phase, entry_price) VALUES (?,?,?,?,?)",
             (symbol, int(time.time()), score, phase, entry_price)
         )
-        # [BONUS] Juga simpan ke signal_outcomes untuk precision tracking
+        # [SPRINT1] Simpan ke signal_outcomes dengan semua field untuk outcome_analyzer
         if result is not None:
-            cf = result.confluence
-            btc_regime = result.components.get("btc_regime", "UNKNOWN")
+            cf  = result.confluence
+            btc = result.components.get("btc_regime", "UNKNOWN")
             pump_str = "|".join(pt.type_code for pt in result.pump_types)
+            e   = result.entry or {}
             c.execute("""
                 INSERT INTO signal_outcomes
                 (symbol, alerted_at, score, phase, pump_types,
                  cat_a_score, cat_b_score, cat_c_score, cat_d_score,
-                 btc_regime, fingerprint, entry_price)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 btc_regime, fingerprint, entry_price,
+                 sl_price, tp1_price, tp2_price, sl_pct, tp1_pct,
+                 chg_1h_signal, chg_4h_signal, chg_24h_signal,
+                 funding_signal, vol_24h_signal,
+                 tier1, tier2, tier3)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 symbol, int(time.time()), score, phase, pump_str,
                 cf.cat_a, cf.cat_b, cf.cat_c, cf.cat_d,
-                btc_regime, result.signal_fingerprint, entry_price
+                btc, result.signal_fingerprint, entry_price,
+                e.get("sl"),   e.get("tp1"),  e.get("tp2"),
+                e.get("sl_pct"), e.get("tp1_pct"),
+                result.chg_1h, getattr(result, "chg_4h", None), result.chg_24h,
+                result.funding, result.vol_24h,
+                result.components.get("tier1_clz"),
+                result.components.get("tier2_clz"),
+                result.components.get("tier3_technical"),
             ))
         conn.commit()
         conn.close()
@@ -512,14 +542,26 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("UPDATE signal_outcomes SET return_2h=? WHERE id=?", (ret, row_id))
                 r2h = ret
 
-            # Window 3h: isi return_3h, hitung hit_15pct, close sinyal
+            # Window 3h: isi return_3h, hitung semua hit flags, close sinyal
             if elapsed >= 3 * 3600 and r3h is None:
-                hit = 1 if ret >= 15.0 else 0
+                # Ambil sl_price untuk cek hit_sl
+                c.execute("SELECT sl_price, tp1_price FROM signal_outcomes WHERE id=?", (row_id,))
+                sl_row = c.fetchone()
+                sl_price = sl_row[0] if sl_row else None
+
+                hit_15  = 1 if ret >= 15.0 else 0
+                hit_10  = 1 if ret >= 10.0 else 0
+                hit_sl  = 1 if (sl_price and entry_price > 0 and
+                                 cur <= sl_price) else 0
+                # max_return: ambil nilai tertinggi dari r1h, r2h, ret (approx)
+                candidates = [x for x in [r1h, r2h, ret] if x is not None]
+                max_ret = max(candidates) if candidates else ret
+
                 c.execute("""
                     UPDATE signal_outcomes
-                    SET return_3h=?, hit_15pct=?, checked=1
+                    SET return_3h=?, hit_15pct=?, hit_10pct=?, hit_sl=?, max_return=?, checked=1
                     WHERE id=?
-                """, (ret, hit, row_id))
+                """, (ret, hit_15, hit_10, hit_sl, round(max_ret, 2), row_id))
                 updated += 1
 
         if updated > 0:
@@ -1527,23 +1569,52 @@ def score_buy_volume_ratio(clz: ClzData) -> Tuple[int, dict]:
 
 
 def score_funding_trend(clz: ClzData, current_funding: float) -> Tuple[int, dict]:
+    """
+    [SPRINT1-FIX-C] Funding scoring dengan outlier guard.
+
+    LOGIKA DASAR: funding negatif = short lebih banyak bayar ke long = bullish bias.
+    Tapi ada batas: funding < -0.15% adalah ANOMALI (bukan pre-squeeze normal).
+    Contoh: SIRENUSDT funding=-0.3036% mendapat score 40 (max) di v16.0 → false positive.
+
+    Di level -0.15% ke bawah, lebih mungkin terjadi:
+    - Distribusi aktif oleh market maker
+    - Token bermasalah (delisting risk)
+    - Extreme manipulation — bukan setup pump yang sehat
+
+    FIX: Tambah outlier threshold. Funding < -0.15% → score 0 + flag ANOMALY.
+    Range valid untuk bullish signal: -0.001 s/d -0.0015 (normal short squeeze setup).
+    """
     score, sigs = 0, []
+
+    # [FIX-C] Guard: funding ekstrem anomali bukan sinyal bullish
+    OUTLIER_THRESHOLD = -0.0015   # -0.15% — di bawah ini = anomali, skip scoring
+    if current_funding < OUTLIER_THRESHOLD:
+        sigs.append(f"FUNDING_ANOMALY={current_funding*100:.4f}% (terlalu negatif, bukan pre-squeeze)")
+        return 0, {"current": round(current_funding * 100, 5), "signals": sigs,
+                   "warning": "OUTLIER_SKIPPED"}
+
+    # Range normal: scoring bertingkat
     if current_funding < -0.0010:
         score += 15; sigs.append(f"EXTREME_FUNDING={current_funding*100:.4f}%")
     elif current_funding < -0.0005:
         score += 10; sigs.append(f"STRONG_NEG_FUNDING={current_funding*100:.4f}%")
     elif current_funding < -0.0002:
         score += 6;  sigs.append(f"NEG_FUNDING={current_funding*100:.4f}%")
+
     if clz.has_funding_hist:
         rates = [float(c.get("c", 0) or 0) for c in clz.funding_hist if c.get("c") is not None]
         if len(rates) >= 6:
             recent = _mean(rates[-3:])
             prev   = _mean(rates[-6:-3])
             drift  = recent - prev
-            if drift < -0.0003:
+            # [FIX-C] Guard drift juga: jika funding history rata-rata sangat negatif, skip
+            if _mean(rates[-3:]) < OUTLIER_THRESHOLD:
+                sigs.append(f"FUNDING_HIST_ANOMALY avg={_mean(rates[-3:])*100:.4f}%")
+            elif drift < -0.0003:
                 score += 25; sigs.append(f"FUNDING_TRENDING_NEG Δ={drift*100:.4f}%")
             elif drift < -0.0001:
                 score += 15; sigs.append(f"FUNDING_DRIFTING_NEG Δ={drift*100:.4f}%")
+
     return min(score, 40), {"current": round(current_funding * 100, 5), "signals": sigs}
 
 
@@ -1792,7 +1863,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     sym   = data.symbol
     phase = classify_phase(data.chg_24h)
     log.info(f"  → {sym}: phase={phase.phase} chg_24h={data.chg_24h:+.1f}% "
-             f"chg_1h={data.chg_1h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
+             f"chg_1h={data.chg_1h:+.1f}% chg_2h={data.chg_2h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
 
     # ── Velocity gates ────────────────────────────────────────────────────────
     is_cont = (phase.phase == "CONTINUATION")
@@ -1808,6 +1879,18 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
             log.info(f"  ✗ {sym} REJECT: chg_1h={data.chg_1h:+.1f}% > {max_1h}"); return None
         if data.chg_4h > vg["chg_4h_max"]:
             log.info(f"  ✗ {sym} REJECT: chg_4h={data.chg_4h:+.1f}% > {vg['chg_4h_max']}"); return None
+
+        # [SPRINT1-FIX-D] Gate chg_2h untuk CONTINUATION — cegah entry terlambat.
+        # Jika coin sudah naik >8% dalam 2 jam terakhir, pump sudah terjadi.
+        # Scanner tidak boleh memberi sinyal entry di akhir gerakan.
+        # Threshold 8% sengaja moderat: longgar cukup untuk tidak membuang
+        # setup valid, ketat cukup untuk menolak LITUSDT (+9% dalam 2h).
+        if is_cont:
+            chg_2h_max = vg.get("chg_2h_max_continuation", 8.0)
+            if data.chg_2h > chg_2h_max:
+                log.info(f"  ✗ {sym} [CONTINUATION] REJECT: chg_2h={data.chg_2h:+.1f}% > {chg_2h_max}% (pump sudah terjadi)")
+                return None
+
         if phase.phase == "EARLY" and data.chg_1h < -2.0:
             log.info(f"  ✗ {sym} [EARLY] REJECT: chg_1h={data.chg_1h:+.1f}% < -2%"); return None
         if phase.phase == "EARLY" and data.chg_4h < vg.get("chg_4h_min_early", -3.0):
@@ -2209,6 +2292,7 @@ def main():
             chg_24h = get_chg_from_candles(candles, 24)
             chg_1h  = get_chg_from_candles(candles, 1)
             chg_4h  = get_chg_from_candles(candles, 4)
+            chg_2h  = get_chg_from_candles(candles, 2)   # [SPRINT1-FIX-D]
             funding = BitgetClient.get_funding(sym)
 
             coin_data = CoinData(
@@ -2223,6 +2307,7 @@ def main():
                 btc_chg_1h=btc_chg_1h,
                 btc_chg_4h=btc_chg_4h,    # [FIX-2]
                 btc_chg_24h=btc_chg_24h,
+                chg_2h=chg_2h,             # [SPRINT1-FIX-D]
                 clz=clz_data.get(sym, ClzData()),
             )
 
