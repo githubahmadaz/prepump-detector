@@ -34,7 +34,7 @@ jobs:
       # ── Jalankan scanner (hasilkan sinyal baru)
       - name: Run scanner
         env:
-          COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
+          COINALYZE_API_KEY: ${{ secrets.ab447e9a-3a26-4253-a68e-1cd0603d22d2 }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python scanner.py
