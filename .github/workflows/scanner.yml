@@ -1,26 +1,37 @@
 name: Pre-Pump Scanner
+
 on:
   schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
+    - cron: '0 * * * *'   # setiap jam UTC
+  workflow_dispatch:       # bisa dijalankan manual dari tab Actions
 
 permissions:
-  contents: write
+  contents: write          # izin push DB kembali ke repo
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+
     steps:
+      # ── 1. Checkout repo (termasuk scanner_history.db dari commit sebelumnya) ──
       - name: Checkout repo
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Setup Python ────────────────────────────────────────────────────────
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+
+      # ── 3. Install dependencies ────────────────────────────────────────────────
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # ── 4. Evaluate sinyal lama (outcome_analyzer) ────────────────────────────
+      #    Dijalankan SEBELUM scanner agar sinyal lama di-evaluate dulu
+      #    || true → jangan stop workflow meski ada error
       - name: Evaluate previous signals
         env:
           COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
@@ -28,12 +39,26 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
           python outcome_analyzer.py --hours 48 --detail 24 || true
+
+      # ── 5. Jalankan scanner ────────────────────────────────────────────────────
       - name: Run scanner
         env:
           COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python scanner.py
+
+      # ── 6. Track pump events (pump_tracker) ───────────────────────────────────
+      #    Dijalankan SETELAH scanner agar cross-reference sinyal baru sudah masuk DB
+      #    Mencatat semua coin yang pump ≥8% terlepas scanner beri sinyal atau tidak
+      - name: Track pump events
+        env:
+          COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
+        run: |
+          python pump_tracker.py || true
+
+      # ── 7. Commit DB kembali ke repo ───────────────────────────────────────────
+      #    [skip ci] mencegah commit ini memicu workflow baru secara rekursif
       - name: Save DB to repo
         run: |
           git config user.name  "github-actions[bot]"
