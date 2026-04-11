@@ -232,7 +232,7 @@ CONFIG: Dict = {
     "btc_dump_threshold":    -3.0,
 
     # ── Database ──────────────────────────────────────────────────────────────
-    "history_db": "/tmp/scanner_v16_history.db",
+   "history_db": os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner_history.db"),
 
     # ── Entry / SL / TP ───────────────────────────────────────────────────────
     "sl_mult_volatile":  3.0,
