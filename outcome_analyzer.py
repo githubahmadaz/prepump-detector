@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-DB_PATH  = os.getenv("SCANNER_DB", "/tmp/scanner_v16_history.db")
+DB_PATH  = os.getenv("SCANNER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner_history.db"))
 BITGET_BASE = "https://api.bitget.com"
 
 
