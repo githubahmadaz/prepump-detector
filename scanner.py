@@ -420,10 +420,47 @@ def init_db():
             hit_15pct   INTEGER DEFAULT NULL,
             hit_10pct   INTEGER DEFAULT NULL,
             hit_sl      INTEGER DEFAULT NULL,
-            checked     INTEGER DEFAULT 0
+            checked     INTEGER DEFAULT 0,
+            data_version TEXT   DEFAULT NULL
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_so_sym ON signal_outcomes(symbol, alerted_at DESC)")
+
+    # ── [SPRINT2] Migration: tambah kolom baru jika DB lama belum punya ─────────
+    # Aman dijalankan berulang — ALTER TABLE hanya jalan jika kolom belum ada
+    existing_cols = {row[1] for row in c.execute("PRAGMA table_info(signal_outcomes)")}
+    new_cols = {
+        "return_6h":    "REAL DEFAULT NULL",
+        "return_12h":   "REAL DEFAULT NULL",
+        "hit_10pct":    "INTEGER DEFAULT NULL",
+        "hit_sl":       "INTEGER DEFAULT NULL",
+        "sl_price":     "REAL DEFAULT NULL",
+        "tp1_price":    "REAL DEFAULT NULL",
+        "tp2_price":    "REAL DEFAULT NULL",
+        "sl_pct":       "REAL DEFAULT NULL",
+        "tp1_pct":      "REAL DEFAULT NULL",
+        "chg_4h_signal":"REAL DEFAULT NULL",
+        "max_return":   "REAL DEFAULT NULL",
+        "tier1":        "INTEGER DEFAULT NULL",
+        "tier2":        "INTEGER DEFAULT NULL",
+        "tier3":        "INTEGER DEFAULT NULL",
+        "data_version": "TEXT DEFAULT NULL",
+    }
+    for col, typedef in new_cols.items():
+        if col not in existing_cols:
+            c.execute(f"ALTER TABLE signal_outcomes ADD COLUMN {col} {typedef}")
+            log.info(f"  DB migration: tambah kolom {col}")
+
+    # ── [SPRINT2] Tag data lama sebagai v1 (window 3h) ───────────────────────────
+    # Data lama checked=1 menggunakan window 3h. Tag dengan data_version='v1_3h'
+    # agar bisa dipisah dari data baru (v2_12h) dalam analisis precision.
+    # TIDAK dihapus — tetap valid untuk analisis return_3h.
+    c.execute("""
+        UPDATE signal_outcomes
+        SET data_version='v1_3h'
+        WHERE checked=1 AND data_version IS NULL
+    """)
+
     conn.commit()
     conn.close()
 
@@ -569,7 +606,7 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("""
                     UPDATE signal_outcomes
                     SET return_12h=?, hit_15pct=?, hit_10pct=?, hit_sl=?,
-                        max_return=?, checked=1
+                        max_return=?, checked=1, data_version='v2_12h'
                     WHERE id=?
                 """, (ret, hit_15, hit_10, hit_sl, round(max_ret, 2), row_id))
                 updated += 1
