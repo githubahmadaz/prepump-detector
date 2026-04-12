@@ -236,10 +236,14 @@ def detect_pumps(tickers: Dict[str, dict]) -> List[dict]:
 def crossref_with_signals(conn, pumps: List[dict]) -> List[dict]:
     """
     Untuk tiap pump event, cek apakah scanner pernah beri sinyal
-    dalam 6 jam sebelum pump terdeteksi.
+    dalam 24 jam sebelum pump terdeteksi.
+
+    [FIX] Window diperlebar dari 6h ke 24h karena pump sering berlangsung
+    12-24 jam. Scanner yang alert di jam pertama pump akan terus dihitung
+    'missed' di deteksi berikutnya jika window hanya 6h.
     """
     c = conn.cursor()
-    window = 6 * 3600   # 6 jam sebelum pump
+    window = 24 * 3600   # 24 jam sebelum pump
 
     for pump in pumps:
         sym = pump["symbol"]
