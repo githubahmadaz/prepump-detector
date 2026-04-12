@@ -63,7 +63,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "16.1.2-SPRINT1"
+VERSION = "16.2.0-SPRINT2"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -203,9 +203,11 @@ CONFIG: Dict = {
 
     # ── Velocity gates ────────────────────────────────────────────────────────
     "velocity_gates": {
-        "chg_1h_max_early":        5.0,
+        "chg_1h_max_early":        4.0,   # [SPRINT2-FIX-2] turun dari 5.0% → 4.0%
+                                           # MAGMAUSDT c1h=+9.6%, LABUSDT c1h=+6.9% keduanya miss
+                                           # c1h tinggi = momentum sudah exhausted saat entry
         "chg_1h_max_continuation": 12.0,
-        "chg_2h_max_continuation": 8.0,   # [SPRINT1-FIX-D] gate baru: pump 2h terakhir
+        "chg_2h_max_continuation": 8.0,   # [SPRINT1-FIX-D]
         "chg_4h_max":              15.0,
         "chg_24h_max_early":       15.0,
         "chg_24h_max_continuation":30.0,
@@ -232,7 +234,7 @@ CONFIG: Dict = {
     "btc_dump_threshold":    -3.0,
 
     # ── Database ──────────────────────────────────────────────────────────────
-    "history_db": os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner_history.db"),
+   "history_db": os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner_history.db"),
 
     # ── Entry / SL / TP ───────────────────────────────────────────────────────
     "sl_mult_volatile":  3.0,
@@ -350,9 +352,8 @@ class ScoreResult:
     vol_24h:          float
     chg_24h:          float
     chg_1h:           float
-    chg_4h:           float = 0.0   # [FIX] tambah chg_4h untuk outcome DB
-    funding:          float = 0.0
-    urgency:          str = ""
+    funding:          float
+    urgency:          str
     confluence:       ConfluenceResult = field(default_factory=lambda: ConfluenceResult(False,"",0,0,0,0,0))
     risk_warnings:    List[str] = field(default_factory=list)
     position:         Optional[dict] = None
@@ -413,6 +414,8 @@ def init_db():
             return_1h   REAL    DEFAULT NULL,
             return_2h   REAL    DEFAULT NULL,
             return_3h   REAL    DEFAULT NULL,
+            return_6h   REAL    DEFAULT NULL,
+            return_12h  REAL    DEFAULT NULL,
             max_return  REAL    DEFAULT NULL,
             hit_15pct   INTEGER DEFAULT NULL,
             hit_10pct   INTEGER DEFAULT NULL,
@@ -511,19 +514,19 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 (round(out, 4), row_id)
             )
 
-        # [SPRINT1-FIX-A] Update signal_outcomes — independent per window via NULL check.
-        # BUG LAMA: elapsed>=3h menulis ret ke semua kolom (return_1h=return_2h=return_3h=ret@jam3).
-        # FIX: setiap kolom hanya diisi SEKALI pada window-nya. Tidak dioverwrite jika sudah ada.
+        # [SPRINT2-FIX-3] Update signal_outcomes — expanded windows 1h/2h/3h/6h/12h.
+        # Justifikasi: avg max_return=+5.75% tapi return_3h=+2.18%. Gap 3.57% menunjukkan
+        # banyak pump bergerak setelah window 3h. checked=1 sekarang setelah 12h.
         c.execute(
             """SELECT id, symbol, alerted_at, entry_price,
-                      return_1h, return_2h, return_3h
+                      return_1h, return_2h, return_3h, return_6h, return_12h
                FROM signal_outcomes
                WHERE checked=0 AND alerted_at <= ?""",
             (now - 3600,)
         )
         rows = c.fetchall()
         updated = 0
-        for row_id, symbol, alerted_at, entry_price, r1h, r2h, r3h in rows:
+        for row_id, symbol, alerted_at, entry_price, r1h, r2h, r3h, r6h, r12h in rows:
             ticker = tickers.get(symbol)
             if not ticker or not entry_price or entry_price <= 0:
                 continue
@@ -533,34 +536,40 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
             elapsed = now - alerted_at
             ret = round((cur - entry_price) / entry_price * 100, 2)
 
-            # Window 1h: isi return_1h hanya jika belum ada
             if elapsed >= 3600 and r1h is None:
                 c.execute("UPDATE signal_outcomes SET return_1h=? WHERE id=?", (ret, row_id))
                 r1h = ret
 
-            # Window 2h: isi return_2h hanya jika belum ada
             if elapsed >= 2 * 3600 and r2h is None:
                 c.execute("UPDATE signal_outcomes SET return_2h=? WHERE id=?", (ret, row_id))
                 r2h = ret
 
-            # Window 3h: isi return_3h, hitung semua hit flags, close sinyal
             if elapsed >= 3 * 3600 and r3h is None:
-                # Ambil sl_price untuk cek hit_sl
-                c.execute("SELECT sl_price, tp1_price FROM signal_outcomes WHERE id=?", (row_id,))
+                c.execute("UPDATE signal_outcomes SET return_3h=? WHERE id=?", (ret, row_id))
+                r3h = ret
+
+            if elapsed >= 6 * 3600 and r6h is None:
+                c.execute("UPDATE signal_outcomes SET return_6h=? WHERE id=?", (ret, row_id))
+                r6h = ret
+
+            # Window 12h: close sinyal, hitung semua hit flags
+            if elapsed >= 12 * 3600 and r12h is None:
+                c.execute("SELECT sl_price FROM signal_outcomes WHERE id=?", (row_id,))
                 sl_row = c.fetchone()
                 sl_price = sl_row[0] if sl_row else None
 
-                hit_15  = 1 if ret >= 15.0 else 0
-                hit_10  = 1 if ret >= 10.0 else 0
-                hit_sl  = 1 if (sl_price and entry_price > 0 and
-                                 cur <= sl_price) else 0
-                # max_return: ambil nilai tertinggi dari r1h, r2h, ret (approx)
-                candidates = [x for x in [r1h, r2h, ret] if x is not None]
+                hit_15 = 1 if ret >= 15.0 else 0
+                hit_10 = 1 if ret >= 10.0 else 0
+                hit_sl = 1 if (sl_price and cur <= sl_price) else 0
+
+                # max_return: best dari semua window
+                candidates = [x for x in [r1h, r2h, r3h, r6h, ret] if x is not None]
                 max_ret = max(candidates) if candidates else ret
 
                 c.execute("""
                     UPDATE signal_outcomes
-                    SET return_3h=?, hit_15pct=?, hit_10pct=?, hit_sl=?, max_return=?, checked=1
+                    SET return_12h=?, hit_15pct=?, hit_10pct=?, hit_sl=?,
+                        max_return=?, checked=1
                     WHERE id=?
                 """, (ret, hit_15, hit_10, hit_sl, round(max_ret, 2), row_id))
                 updated += 1
@@ -1588,7 +1597,13 @@ def score_funding_trend(clz: ClzData, current_funding: float) -> Tuple[int, dict
     score, sigs = 0, []
 
     # [FIX-C] Guard: funding ekstrem anomali bukan sinyal bullish
-    OUTLIER_THRESHOLD = -0.0015   # -0.15% — di bawah ini = anomali, skip scoring
+    # [SPRINT2-FIX-1] Turunkan dari -0.0015 (-0.15%) ke -0.0010 (-0.10%).
+    # Justifikasi dari 26 sinyal:
+    #   SIRENUSDT fund=-0.132% → r3h=-6.3% (miss)
+    #   ENJUSDT   fund=-0.203% → r3h=-0.8% (miss)
+    #   DASHUSDT  fund=-0.217% → r3h=+0.9% (miss)
+    # Semua sinyal dengan funding < -0.10% underperform. Threshold lama -0.15% terlalu longgar.
+    OUTLIER_THRESHOLD = -0.0010   # -0.10% — di bawah ini = anomali, skip scoring
     if current_funding < OUTLIER_THRESHOLD:
         sigs.append(f"FUNDING_ANOMALY={current_funding*100:.4f}% (terlalu negatif, bukan pre-squeeze)")
         return 0, {"current": round(current_funding * 100, 5), "signals": sigs,
@@ -1740,6 +1755,68 @@ def score_btc_decoupling(candles_coin: List[dict],
 
 
 # ── CAT-D: Microstructure / Context ───────────────────────────────────────────
+def detect_sudden_volume_spike(candles: List[dict]) -> Tuple[bool, dict]:
+    """
+    [SPRINT2-FIX-4] Deteksi volume spike mendadak dalam 1-2 candle terakhir.
+
+    Tujuan: Filter sinyal 'no_momentum' — kondisi pre-pump valid tapi tidak ada
+    trigger yang memulai gerakan. Dari 26 sinyal, 8 kasus max_return < 2%
+    (tidak ada momentum sama sekali). Volume spike adalah proxy paling reliable
+    untuk konfirmasi bahwa aksi harga sedang dimulai.
+
+    Return: (is_spike, detail_dict)
+    is_spike=True → ada volume spike, sinyal lebih valid
+    is_spike=False → tidak ada spike (bukan rejection, hanya informasi)
+
+    Dipanggil di final_score_coin untuk log dan scoring, BUKAN sebagai hard gate.
+    Hard gate akan dipertimbangkan setelah 50+ sinyal dengan window baru terkumpul.
+    NO-LOOKAHEAD: hanya pakai candles[-2] dan candles[-3].
+    """
+    if len(candles) < 20:
+        return False, {"pattern": "INSUFFICIENT_DATA"}
+
+    # Rata-rata volume 20 candle sebelum 2 candle terakhir (baseline)
+    baseline = [c.get("volume_usd", 0) for c in candles[-22:-2] if c.get("volume_usd", 0) > 0]
+    if not baseline:
+        return False, {"pattern": "NO_BASELINE"}
+
+    avg_baseline = _mean(baseline)
+    if avg_baseline <= 0:
+        return False, {"pattern": "ZERO_BASELINE"}
+
+    # Cek candle terakhir yang closed (candles[-2])
+    vol_last   = candles[-2].get("volume_usd", 0)
+    vol_prev   = candles[-3].get("volume_usd", 0) if len(candles) >= 3 else 0
+
+    ratio_last = vol_last / avg_baseline if avg_baseline > 0 else 0
+    ratio_prev = vol_prev / avg_baseline if avg_baseline > 0 else 0
+
+    # Spike jika candle terakhir atau sebelumnya >= 3x baseline
+    # 3x dipilih karena lebih konservatif dari 2x — hindari false positive
+    # saat market jam ramai (TOD effect sudah di-handle di detect_volume_dryup)
+    spike_ratio = max(ratio_last, ratio_prev)
+
+    if spike_ratio >= 5.0:
+        pattern = "MASSIVE_SPIKE"
+        is_spike = True
+    elif spike_ratio >= 3.0:
+        pattern = "STRONG_SPIKE"
+        is_spike = True
+    elif spike_ratio >= 2.0:
+        pattern = "MODERATE_SPIKE"
+        is_spike = True
+    else:
+        pattern = "NO_SPIKE"
+        is_spike = False
+
+    return is_spike, {
+        "pattern":     pattern,
+        "ratio":       round(spike_ratio, 2),
+        "vol_last":    round(vol_last),
+        "avg_baseline": round(avg_baseline),
+    }
+
+
 def detect_bbw_squeeze(candles: List[dict]) -> Tuple[int, dict]:
     if len(candles) < 22:
         return 0, {}
@@ -1930,7 +2007,17 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     decel_sc, _ = detect_momentum_decel(data.candles)
     supp_sc,  _ = detect_dist_to_support(data.candles, data.price)
 
-    tier3 = bbw_sc + dry_sc + accum_sc + vret_sc + rs_sc + wick_sc + decel_sc + supp_sc
+    # [SPRINT2-FIX-4] Volume spike detector — informational + bonus score
+    # Bukan hard gate (butuh lebih banyak data untuk justifikasi rejection).
+    # Kontribusi ke tier3: +5 jika spike moderate, +8 jika strong, +12 jika massive.
+    # Ini mendorong sinyal dengan momentum nyata ke atas threshold.
+    vol_spike, spike_d = detect_sudden_volume_spike(data.candles)
+    spike_sc = 0
+    if spike_d.get("pattern") == "MASSIVE_SPIKE": spike_sc = 12
+    elif spike_d.get("pattern") == "STRONG_SPIKE":   spike_sc = 8
+    elif spike_d.get("pattern") == "MODERATE_SPIKE": spike_sc = 5
+
+    tier3 = bbw_sc + dry_sc + accum_sc + vret_sc + rs_sc + wick_sc + decel_sc + supp_sc + spike_sc
 
     # ── [FIX-1] CHECK CONFLUENCE — wajib sebelum threshold check ─────────────
     cf = check_confluence({
@@ -1997,7 +2084,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         f"confluence={cf.reason} | "
         f"ls={ls_sc} bv={bv_sc} fund={fund_sc} pred={pred_sc} oi={oi_sc} liq={liq_sc} | "
         f"bbw={bbw_sc} dry={dry_sc} acc={accum_sc} vret={vret_sc} rs={rs_sc} "
-        f"wick={wick_sc} decel={decel_sc} supp={supp_sc} | BTC={btc_regime}"
+        f"wick={wick_sc} decel={decel_sc} supp={supp_sc} spike={spike_sc}({spike_d.get('pattern','?')}) | BTC={btc_regime}"
     )
 
     if total < threshold:
@@ -2059,7 +2146,6 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         vol_24h=data.vol_24h,
         chg_24h=data.chg_24h,
         chg_1h=data.chg_1h,
-        chg_4h=data.chg_4h,        # [FIX] chg_4h untuk outcome DB
         funding=data.funding,
         urgency="",
         confluence=cf,
