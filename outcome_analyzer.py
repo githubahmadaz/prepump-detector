@@ -221,10 +221,17 @@ def migrate_db(conn):
         "max_return":     "REAL DEFAULT NULL",
         "hit_10pct":      "INTEGER DEFAULT NULL",
         "hit_sl":         "INTEGER DEFAULT NULL",
+        "data_version":   "TEXT DEFAULT NULL",
     }
     for col, typedef in new_cols.items():
         if col not in existing:
             c.execute(f"ALTER TABLE signal_outcomes ADD COLUMN {col} {typedef}")
+
+    # Tag data lama sebagai v1_3h
+    c.execute("""
+        UPDATE signal_outcomes SET data_version='v1_3h'
+        WHERE checked=1 AND data_version IS NULL
+    """)
     conn.commit()
 
 
@@ -286,20 +293,32 @@ def print_report(conn):
     print("  📊 OUTCOME ANALYZER — PRECISION REPORT")
     print("═" * 65)
 
-    # ── Overall ──────────────────────────────────────────────────
+    # ── Overall — pisah v1 (3h window) dan v2 (12h window) ──────
+    # v1_3h: data lama, checked=1 berdasarkan 3h window
+    # v2_12h: data baru, checked=1 berdasarkan 12h window
+    # NULL data_version = sinyal baru yang belum selesai
+
+    c.execute("SELECT COUNT(*) FROM signal_outcomes WHERE data_version='v1_3h'")
+    n_v1 = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM signal_outcomes WHERE data_version='v2_12h'")
+    n_v2 = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM signal_outcomes WHERE checked=0")
+    n_pending = c.fetchone()[0]
+
+    print(f"\n  DATA: {n_v1} sinyal v1(3h) | {n_v2} sinyal v2(12h) | {n_pending} pending")
+
+    # Precision dari data v2 (12h) — lebih akurat
     c.execute("""
         SELECT COUNT(*), SUM(hit_15pct), SUM(hit_10pct), SUM(hit_sl),
                AVG(return_3h), AVG(return_6h), AVG(return_12h),
                AVG(max_return), AVG(return_1h)
-        FROM signal_outcomes WHERE checked=1
+        FROM signal_outcomes WHERE data_version='v2_12h'
     """)
     row = c.fetchone()
-    if not row or not row[0]:
-        print("  Belum ada sinyal yang selesai (checked=1).")
-    else:
+    if row and row[0]:
         n, h15, h10, hsl, avg3, avg6, avg12, avgmax, avg1 = row
         h15 = h15 or 0; h10 = h10 or 0; hsl = hsl or 0
-        print(f"\n  OVERALL ({n} sinyal selesai, window 12h)")
+        print(f"\n  OVERALL v2 — window 12h ({n} sinyal)")
         print(f"    Precision @15%  : {h15}/{n} = {h15/n*100:.1f}%")
         print(f"    Precision @10%  : {h10}/{n} = {h10/n*100:.1f}%")
         print(f"    Hit SL rate     : {hsl}/{n} = {hsl/n*100:.1f}%")
@@ -307,6 +326,24 @@ def print_report(conn):
         print(f"    Avg return_3h   : {avg3:+.2f}%" if avg3 else "    Avg return_3h   : N/A")
         print(f"    Avg return_6h   : {avg6:+.2f}%" if avg6 else "    Avg return_6h   : N/A")
         print(f"    Avg return_12h  : {avg12:+.2f}%" if avg12 else "    Avg return_12h  : N/A")
+        print(f"    Avg max_return  : {avgmax:+.2f}%" if avgmax else "    Avg max_return  : N/A")
+    else:
+        print(f"\n  OVERALL v2 — belum ada sinyal v2 selesai (window 12h)")
+
+    # Precision dari data v1 (3h) — referensi historis
+    c.execute("""
+        SELECT COUNT(*), SUM(hit_15pct), SUM(hit_10pct), SUM(hit_sl),
+               AVG(return_3h), AVG(max_return), AVG(return_1h)
+        FROM signal_outcomes WHERE data_version='v1_3h'
+    """)
+    row = c.fetchone()
+    if row and row[0]:
+        n, h15, h10, hsl, avg3, avgmax, avg1 = row
+        h15 = h15 or 0; h10 = h10 or 0; hsl = hsl or 0
+        print(f"\n  REFERENSI v1 — window 3h ({n} sinyal lama, sebelum Sprint 2)")
+        print(f"    Precision @15%  : {h15}/{n} = {h15/n*100:.1f}%")
+        print(f"    Precision @10%  : {h10}/{n} = {h10/n*100:.1f}%")
+        print(f"    Avg return_3h   : {avg3:+.2f}%" if avg3 else "    Avg return_3h   : N/A")
         print(f"    Avg max_return  : {avgmax:+.2f}%" if avgmax else "    Avg max_return  : N/A")
 
     # ── Per Phase ─────────────────────────────────────────────────
