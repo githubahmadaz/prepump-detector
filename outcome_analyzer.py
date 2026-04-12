@@ -131,13 +131,13 @@ def evaluate_signal(row: dict) -> Optional[dict]:
         return None
 
     now = int(time.time())
-    window_end = alerted_at + 3 * 3600
+    window_end = alerted_at + 12 * 3600  # [SPRINT2-FIX-3] diperlebar ke 12h
 
     # Jika sinyal baru saja masuk dan belum 1 jam
     if now < alerted_at + 3600:
         return None
 
-    # Fetch candles 5m dari alerted_at sampai window_end (atau sekarang jika belum 3h)
+    # Fetch candles 5m dari alerted_at sampai window_end (atau sekarang jika belum 12h)
     fetch_end = min(window_end, now)
     candles = fetch_candles_range(symbol, alerted_at, fetch_end, granularity="5m")
 
@@ -152,10 +152,14 @@ def evaluate_signal(row: dict) -> Optional[dict]:
     p1h  = get_price_at(candles, alerted_at + 1 * 3600)
     p2h  = get_price_at(candles, alerted_at + 2 * 3600)
     p3h  = get_price_at(candles, alerted_at + 3 * 3600)
+    p6h  = get_price_at(candles, alerted_at + 6 * 3600)
+    p12h = get_price_at(candles, alerted_at + 12 * 3600)
 
-    ret_1h = round((p1h  - entry_price) / entry_price * 100, 2) if p1h  else None
-    ret_2h = round((p2h  - entry_price) / entry_price * 100, 2) if p2h  else None
-    ret_3h = round((p3h  - entry_price) / entry_price * 100, 2) if p3h  else None
+    ret_1h  = round((p1h  - entry_price) / entry_price * 100, 2) if p1h  else None
+    ret_2h  = round((p2h  - entry_price) / entry_price * 100, 2) if p2h  else None
+    ret_3h  = round((p3h  - entry_price) / entry_price * 100, 2) if p3h  else None
+    ret_6h  = round((p6h  - entry_price) / entry_price * 100, 2) if p6h  else None
+    ret_12h = round((p12h - entry_price) / entry_price * 100, 2) if p12h else None
 
     # Max price dalam window (untuk max_return)
     max_price = get_max_price_in_range(candles, alerted_at, fetch_end)
@@ -169,7 +173,7 @@ def evaluate_signal(row: dict) -> Optional[dict]:
     hit_10 = 1 if max_ret is not None and max_ret >= 10.0 else 0
     hit_sl = 1 if (sl_price and min_price and min_price <= sl_price) else 0
 
-    # Hanya di-close jika window 3h sudah lewat
+    # Selesai setelah 12h window
     is_done = (now >= window_end)
 
     return {
@@ -177,7 +181,9 @@ def evaluate_signal(row: dict) -> Optional[dict]:
         "symbol":     symbol,
         "return_1h":  ret_1h,
         "return_2h":  ret_2h,
-        "return_3h":  ret_3h  if is_done else None,
+        "return_3h":  ret_3h  if p3h  else None,
+        "return_6h":  ret_6h  if p6h  else None,
+        "return_12h": ret_12h if is_done else None,
         "max_return": max_ret,
         "hit_15pct":  hit_15  if is_done else None,
         "hit_10pct":  hit_10  if is_done else None,
@@ -210,6 +216,8 @@ def migrate_db(conn):
         "tier1":          "INTEGER DEFAULT NULL",
         "tier2":          "INTEGER DEFAULT NULL",
         "tier3":          "INTEGER DEFAULT NULL",
+        "return_6h":      "REAL DEFAULT NULL",
+        "return_12h":     "REAL DEFAULT NULL",
         "max_return":     "REAL DEFAULT NULL",
         "hit_10pct":      "INTEGER DEFAULT NULL",
         "hit_sl":         "INTEGER DEFAULT NULL",
@@ -252,8 +260,8 @@ def save_result(conn, result: dict):
     updates = []
     params  = []
 
-    for field in ["return_1h", "return_2h", "return_3h", "max_return",
-                  "hit_15pct", "hit_10pct", "hit_sl", "checked"]:
+    for field in ["return_1h", "return_2h", "return_3h", "return_6h", "return_12h",
+                  "max_return", "hit_15pct", "hit_10pct", "hit_sl", "checked"]:
         if result.get(field) is not None:
             updates.append(f"{field}=?")
             params.append(result[field])
@@ -281,21 +289,24 @@ def print_report(conn):
     # ── Overall ──────────────────────────────────────────────────
     c.execute("""
         SELECT COUNT(*), SUM(hit_15pct), SUM(hit_10pct), SUM(hit_sl),
-               AVG(return_3h), AVG(max_return), AVG(return_1h)
+               AVG(return_3h), AVG(return_6h), AVG(return_12h),
+               AVG(max_return), AVG(return_1h)
         FROM signal_outcomes WHERE checked=1
     """)
     row = c.fetchone()
     if not row or not row[0]:
         print("  Belum ada sinyal yang selesai (checked=1).")
     else:
-        n, h15, h10, hsl, avg3, avgmax, avg1 = row
+        n, h15, h10, hsl, avg3, avg6, avg12, avgmax, avg1 = row
         h15 = h15 or 0; h10 = h10 or 0; hsl = hsl or 0
-        print(f"\n  OVERALL ({n} sinyal selesai)")
+        print(f"\n  OVERALL ({n} sinyal selesai, window 12h)")
         print(f"    Precision @15%  : {h15}/{n} = {h15/n*100:.1f}%")
         print(f"    Precision @10%  : {h10}/{n} = {h10/n*100:.1f}%")
         print(f"    Hit SL rate     : {hsl}/{n} = {hsl/n*100:.1f}%")
         print(f"    Avg return_1h   : {avg1:+.2f}%" if avg1 else "    Avg return_1h   : N/A")
         print(f"    Avg return_3h   : {avg3:+.2f}%" if avg3 else "    Avg return_3h   : N/A")
+        print(f"    Avg return_6h   : {avg6:+.2f}%" if avg6 else "    Avg return_6h   : N/A")
+        print(f"    Avg return_12h  : {avg12:+.2f}%" if avg12 else "    Avg return_12h  : N/A")
         print(f"    Avg max_return  : {avgmax:+.2f}%" if avgmax else "    Avg max_return  : N/A")
 
     # ── Per Phase ─────────────────────────────────────────────────
@@ -376,7 +387,7 @@ def print_signal_detail(conn, hours_back: int = 24):
         SELECT symbol, alerted_at, score, phase,
                cat_a_score, cat_b_score, cat_c_score, cat_d_score,
                entry_price, sl_price, tp1_price,
-               return_1h, return_2h, return_3h, max_return,
+               return_1h, return_2h, return_3h, return_6h, return_12h, max_return,
                hit_15pct, hit_10pct, hit_sl, checked,
                chg_1h_signal, chg_4h_signal, funding_signal, btc_regime
         FROM signal_outcomes
@@ -393,7 +404,7 @@ def print_signal_detail(conn, hours_back: int = 24):
         (sym, alerted_at, score, phase,
          a, b, cc, d,
          entry, sl, tp1,
-         r1, r2, r3, maxr,
+         r1, r2, r3, r6, r12, maxr,
          h15, h10, hsl, checked,
          c1h, c4h, fund, regime) = row
 
@@ -416,8 +427,10 @@ def print_signal_detail(conn, hours_back: int = 24):
         r1_str   = f"{r1:+.1f}%"   if r1   is not None else "..."
         r2_str   = f"{r2:+.1f}%"   if r2   is not None else "..."
         r3_str   = f"{r3:+.1f}%"   if r3   is not None else "..."
+        r6_str   = f"{r6:+.1f}%"   if r6   is not None else "..."
+        r12_str  = f"{r12:+.1f}%"  if r12  is not None else "..."
         maxr_str = f"{maxr:+.1f}%" if maxr  is not None else "..."
-        print(f"    Return: 1h={r1_str}  2h={r2_str}  3h={r3_str}  max={maxr_str}")
+        print(f"    Return: 1h={r1_str}  2h={r2_str}  3h={r3_str}  6h={r6_str}  12h={r12_str}  max={maxr_str}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -483,11 +496,13 @@ def main():
 
         # Print ringkas hasil
         parts = []
-        if result["return_1h"] is not None: parts.append(f"r1h={result['return_1h']:+.1f}%")
-        if result["return_2h"] is not None: parts.append(f"r2h={result['return_2h']:+.1f}%")
-        if result["return_3h"] is not None: parts.append(f"r3h={result['return_3h']:+.1f}%")
+        if result["return_1h"]  is not None: parts.append(f"r1h={result['return_1h']:+.1f}%")
+        if result["return_2h"]  is not None: parts.append(f"r2h={result['return_2h']:+.1f}%")
+        if result["return_3h"]  is not None: parts.append(f"r3h={result['return_3h']:+.1f}%")
+        if result["return_6h"]  is not None: parts.append(f"r6h={result['return_6h']:+.1f}%")
+        if result["return_12h"] is not None: parts.append(f"r12h={result['return_12h']:+.1f}%")
         if result["max_return"] is not None: parts.append(f"max={result['max_return']:+.1f}%")
-        if result["hit_sl"]:   parts.append("🔴 HIT_SL")
+        if result["hit_sl"]:    parts.append("🔴 HIT_SL")
         if result["hit_15pct"]: parts.append("✅ HIT15%")
         elif result["hit_10pct"]: parts.append("🟡 HIT10%")
         status = "DONE" if result["is_done"] else "partial"
