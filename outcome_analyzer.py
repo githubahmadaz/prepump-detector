@@ -185,6 +185,7 @@ def evaluate_signal(row: dict) -> Optional[dict]:
         "return_6h":  ret_6h  if p6h  else None,
         "return_12h": ret_12h if is_done else None,
         "max_return": max_ret,
+        # [FIX] hit berbasis max_return (high tertinggi), bukan return di titik waktu tertentu
         "hit_15pct":  hit_15  if is_done else None,
         "hit_10pct":  hit_10  if is_done else None,
         "hit_sl":     hit_sl,
