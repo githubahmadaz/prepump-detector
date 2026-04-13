@@ -589,26 +589,34 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("UPDATE signal_outcomes SET return_6h=? WHERE id=?", (ret, row_id))
                 r6h = ret
 
-            # Window 12h: close sinyal, hitung semua hit flags
+            # [FIX] Update max_return di SETIAP scan — bukan hanya saat close.
+            # Ini menangkap high tertinggi yang terjadi kapanpun dalam window 12h.
+            # hit_15pct dan hit_10pct dihitung dari max_return, bukan ret@12h.
+            c.execute("SELECT max_return FROM signal_outcomes WHERE id=?", (row_id,))
+            cur_max = c.fetchone()[0]
+            new_max = max(x for x in [cur_max, ret] if x is not None)
+            if cur_max is None or new_max > (cur_max or -999):
+                c.execute("UPDATE signal_outcomes SET max_return=? WHERE id=?",
+                          (round(new_max, 2), row_id))
+
+            # Window 12h: close sinyal
             if elapsed >= 12 * 3600 and r12h is None:
-                c.execute("SELECT sl_price FROM signal_outcomes WHERE id=?", (row_id,))
+                c.execute("SELECT sl_price, max_return FROM signal_outcomes WHERE id=?", (row_id,))
                 sl_row = c.fetchone()
-                sl_price = sl_row[0] if sl_row else None
+                sl_price  = sl_row[0] if sl_row else None
+                final_max = sl_row[1] if sl_row and sl_row[1] is not None else ret
 
-                hit_15 = 1 if ret >= 15.0 else 0
-                hit_10 = 1 if ret >= 10.0 else 0
+                # [FIX] Hit berbasis max_return dalam 12h, bukan harga di jam ke-12
+                hit_15 = 1 if final_max >= 15.0 else 0
+                hit_10 = 1 if final_max >= 10.0 else 0
                 hit_sl = 1 if (sl_price and cur <= sl_price) else 0
-
-                # max_return: best dari semua window
-                candidates = [x for x in [r1h, r2h, r3h, r6h, ret] if x is not None]
-                max_ret = max(candidates) if candidates else ret
 
                 c.execute("""
                     UPDATE signal_outcomes
                     SET return_12h=?, hit_15pct=?, hit_10pct=?, hit_sl=?,
-                        max_return=?, checked=1, data_version='v2_12h'
+                        checked=1, data_version='v2_12h'
                     WHERE id=?
-                """, (ret, hit_15, hit_10, hit_sl, round(max_ret, 2), row_id))
+                """, (ret, hit_15, hit_10, hit_sl, row_id))
                 updated += 1
 
         if updated > 0:
