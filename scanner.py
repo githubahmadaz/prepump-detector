@@ -63,7 +63,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "16.2.0-SPRINT2"
+VERSION = "16.3.0-SPRINT2"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -182,6 +182,9 @@ CONFIG: Dict = {
     "phase1_support_dist_range":  (0.3, 1.5),
     "phase1_support_dist_wide":   (1.5, 3.0),
     "phase1_decel_thresholds":    [-0.30, -0.15, -0.05],
+
+    # ── [SPRINT2-v16.3] Quality filter thresholds ────────────────────────────
+    "cont_min_cat_d":    20,   # CONTINUATION: minimum CAT-D score (D<20 = 0% HIT di data)
 
     # ── Phase 2: Final scoring thresholds ────────────────────────────────────
     "alert_threshold_early":        95,
@@ -1988,6 +1991,14 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     log.info(f"  → {sym}: phase={phase.phase} chg_24h={data.chg_24h:+.1f}% "
              f"chg_1h={data.chg_1h:+.1f}% chg_2h={data.chg_2h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
 
+    # ── [SPRINT2-v16.3] Phase filter berbasis data ───────────────────────────
+    # Data 51 sinyal: DOWNTREND 0% HIT / 67% SL, WEAK 0% HIT / 0% HIT
+    # Kedua phase ini secara konsisten tidak menghasilkan sinyal valid.
+    # Nonaktifkan sampai ada bukti sebaliknya dari data v2 (min 20 sinyal).
+    if phase.phase in ["DOWNTREND", "WEAK"]:
+        log.info(f"  ✗ {sym} SKIP: phase={phase.phase} (dinonaktifkan — 0% HIT dari data historis)")
+        return None
+
     # ── Velocity gates ────────────────────────────────────────────────────────
     is_cont = (phase.phase == "CONTINUATION")
     vg      = CONFIG["velocity_gates"]
@@ -2023,7 +2034,6 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
             log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_1h={data.chg_1h:+.1f}%"); return None
 
     # ── CAT-A: Derivatives ────────────────────────────────────────────────────
-    ls_sc,   ls_d   = score_long_short_ratio(data.clz)
     bv_sc,   bv_d   = score_buy_volume_ratio(data.clz)
     fund_sc, fund_d = score_funding_trend(data.clz, data.funding)
     pred_sc, pred_d = score_predicted_funding(data.clz)
@@ -2112,6 +2122,29 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         tod_discount = int(total * 0.20)
         total = max(0, total - tod_discount)
         log.info(f"  ⏰ {sym} TOD discount -{tod_discount} (hour={hour} UTC low-liquidity)")
+
+    # ── [SPRINT2-v16.3] Quality filter berbasis data 51 sinyal ───────────────
+    #
+    # FILTER A — EARLY wajib C > 0
+    # Data: EARLY tanpa C → 0% HIT dari 16 sinyal (EARLY C=0).
+    # EARLY dengan C > 0 → 18% HIT. C=0 tidak pernah menghasilkan sinyal valid.
+    # BANUSDT dan LABUSDT (HIT tanpa C) adalah CONTINUATION, bukan EARLY.
+    if phase.phase == "EARLY":
+        if rs_sc == 0:
+            log.info(f"  ✗ {sym} [EARLY] REJECT: C=0 (BTC decoupling tidak aktif — 0% HIT dari data)")
+            return None
+
+    # FILTER B — CONTINUATION wajib D >= 20
+    # Data: CONTINUATION D<20 → semua MISS (GIGGLEUSDT D=17, DASHUSDT D=22 border).
+    # CONTINUATION D>=20 → HIT rate naik dari 44% ke 50%+.
+    # D mengukur microstructure: volatility return + wick + support.
+    # Tanpa D kuat, coin tidak punya struktur teknikal untuk pump.
+    if phase.phase == "CONTINUATION":
+        cat_d_cont = (vret_sc + wick_sc + decel_sc + supp_sc + spike_sc
+                      + bbw_sc)  # semua komponen CAT-D termasuk bbw dan spike
+        if cat_d_cont < CONFIG.get("cont_min_cat_d", 20):
+            log.info(f"  ✗ {sym} [CONTINUATION] REJECT: D={cat_d_cont} < 20 (microstructure lemah)")
+            return None
 
     # ── Threshold check ───────────────────────────────────────────────────────
     if phase.phase == "EARLY":
