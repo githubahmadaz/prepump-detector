@@ -2,7 +2,7 @@ name: Pre-Pump Scanner
 
 on:
   schedule:
-    - cron: '0 * * * *'   # setiap jam UTC
+  - cron: '*/30 * * * *'   # setiap jam UTC
   workflow_dispatch:       # bisa dijalankan manual dari tab Actions
 
 permissions:
