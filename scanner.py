@@ -2040,6 +2040,17 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     pred_sc, pred_d = score_predicted_funding(data.clz)
     oi_sc,   oi_d   = score_oi_buildup(data.clz)
     liq_sc,  liq_d  = score_liquidations(data.clz)
+
+    # [SPRINT2-v16.3 FIX] Hard reject jika funding anomali
+    # BUG LAMA: score_funding_trend() hanya return 0 saat anomali — coin tetap lolos
+    # karena komponen lain (pred_sc, oi_sc, dll) masih memberi score.
+    # FIX: cek warning dari fund_d, jika OUTLIER_SKIPPED → reject langsung.
+    # Data: 5 sinyal funding anomali → 0% HIT, 40% SL. Tidak ada nilai meloloskan ini.
+    if fund_d.get("warning") == "OUTLIER_SKIPPED":
+        log.info(f"  ✗ {sym} REJECT: funding={data.funding*100:.4f}% anomali "
+                 f"(< -0.10%) — hard reject, bukan hanya skip scoring")
+        return None
+
     tier1 = ls_sc + bv_sc + fund_sc + pred_sc
     tier2 = oi_sc + liq_sc
 
