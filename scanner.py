@@ -2034,6 +2034,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
             log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_1h={data.chg_1h:+.1f}%"); return None
 
     # ── CAT-A: Derivatives ────────────────────────────────────────────────────
+    ls_sc,   ls_d   = score_long_short_ratio(data.clz)
     bv_sc,   bv_d   = score_buy_volume_ratio(data.clz)
     fund_sc, fund_d = score_funding_trend(data.clz, data.funding)
     pred_sc, pred_d = score_predicted_funding(data.clz)
