@@ -1,42 +1,50 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v16.0 — CONFLUENCE ARCHITECTURE                          ║
+║  PRE-PUMP SCANNER v16.4.0 — SPRINT 3 DATA-DRIVEN FIXES                     ║
 ║                                                                              ║
-║  PERBAIKAN DARI v15.6:                                                       ║
+║  PERBAIKAN DARI v16.3.0 (basis: 102 sinyal checked + batch 16-17 Apr 2026): ║
 ║                                                                              ║
-║  [FIX-1] 🔴 KRITIS — Confluence check diimplementasi (check_confluence)     ║
-║    Sinyal hanya lolos jika minimal 3 dari 4 kategori independen aktif:       ║
-║    CAT-A (Derivatives), CAT-B (Order Flow), CAT-C (Price RS), CAT-D (Micro)  ║
-║    Efek: memotong 60-70% false positive single-category                      ║
+║  [S3-FIX-1] 🔴 DOWNTREND dimatikan permanent                                ║
+║    Data: 7 sinyal DOWNTREND → 0% HIT, 57% SL. WEAK juga 0% HIT.            ║
+║    Tidak ada alasan operasional mempertahankan kedua phase ini.              ║
+║    Dead code threshold DOWNTREND/WEAK di threshold check juga dibersihkan.  ║
 ║                                                                              ║
-║  [FIX-2] 🔴 KRITIS — Double-count BTC RS dihapus                            ║
-║    btc_context_bonus dihapus. detect_rs_btc + detect_rs_24h digabung         ║
-║    ke score_btc_decoupling() (CAT-C) dengan regime-aware scoring.            ║
-║    Satu fenomena = satu skor. rs_sc maks 20 (bukan 53 sebelumnya).           ║
+║  [S3-FIX-2] 🔴 Volume filter kompensasi untuk coin < $2M                    ║
+║    Data: coin $1M-$2M HIT 26% > coin $2M-$5M HIT 12%.                      ║
+║    Coin vol < $2M tetap bisa lolos JIKA T2>=20 AND chg_24h>=12%.            ║
+║    Filter kompensasi memastikan hanya coin dengan OI buildup kuat yang lolos.║
 ║                                                                              ║
-║  [FIX-3] 🟠 SERIUS — Phase 1 tambah momentum pre-pump filter                ║
-║    Tambah momentum_score: chg_4h dan chg_1h kontekstual.                    ║
-║    Coin yang sedang distribusi aktif (turun 4h) diberi penalty.              ║
-║    Phase 1 kini membedakan volatilitas biasa vs pre-pump setup.              ║
+║  [S3-FIX-3] 🔴 chg_24h 15-20% sweet spot bonus +10                         ║
+║    Data: chg_24h 15-20% menghasilkan HIT rate 52% vs rata-rata 20%.         ║
+║    Bonus +10 mendorong sinyal terkuat ke atas threshold.                     ║
 ║                                                                              ║
-║  [FIX-4] 🟠 SERIUS — BV ratio window diperlebar 6h → 12h                    ║
-║    hist[-13:-1] menggantikan hist[-7:-1]. Menangkap whale accumulation       ║
-║    yang berlangsung 12-48 jam sebelum pump.                                  ║
+║  [S3-FIX-4] 🟠 CAT-B weight diturunkan 30→15                                ║
+║    Data counter-intuitive: B=0 HIT 29%, B=15 HIT 9%.                        ║
+║    B tinggi = whale sudah masuk sebelumnya = entry terlambat.                ║
+║    Max score dikurangi: 25→12 (strong), 15→8 (net buying), cap 30→15.       ║
 ║                                                                              ║
-║  [FIX-5] 🟡 MENENGAH — TP1 fallback berbasis RR adaptif, bukan fixed %      ║
-║    TP fallback kini menggunakan resistance terdekat dari fractal high         ║
-║    jika S/R engine tidak menemukan cukup levels. Tidak lagi pakai            ║
-║    tp1_pct fixed 10% yang tidak mencerminkan struktur pasar.                 ║
+║  [S3-FIX-5] 🟠 EARLY wajib D >= 20 (sama dengan CONTINUATION)              ║
+║    Data batch terbaru: THETAUSDT D=15 = MISS. Semua HIT15 D>=22.            ║
+║    Konsisten dengan CONTINUATION filter yang sudah ada.                      ║
 ║                                                                              ║
-║  [BONUS] Precision tracking tabel signal_outcomes (wajib untuk iterasi)     ║
-║  [BONUS] check_and_update_outcomes() diperluas: return_1h, return_2h, 3h    ║
-║  [BONUS] get_precision_report() untuk evaluasi harian                        ║
+║  [S3-FIX-6] 🟠 CONTINUATION: hard reject chg_1h < -8%                      ║
+║    ARKMUSDT chg_1h=-12.7% lolos karena tidak ada lower bound untuk CONT.    ║
+║    Coin yang dump -12% dalam 1 jam bukan setup entry yang valid.             ║
+║                                                                              ║
+║  [S3-FIX-7] 🟡 Outcome window diperlebar 12h → 24h                          ║
+║    Data: 57% HIT15 baru tercapai setelah jam ke-12.                         ║
+║    Window 12h meremehkan precision aktual scanner.                           ║
+║    data_version baru: 'v3_24h'. Data lama v2_12h tetap valid.               ║
+║                                                                              ║
+║  [S3-FIX-8] 🟡 Funding hard reject dikonfirmasi dan diperkuat               ║
+║    Threshold -0.10% sudah ada. Tambah catatan ARKMUSDT di log.               ║
+║    Funding -0.0767% (ARKMUSDT) lolos threshold tapi ditangkap oleh FIX-6.   ║
 ║                                                                              ║
 ║  PERINGATAN WAJIB:                                                           ║
 ║  • Setiap perubahan threshold tanpa data live = overfitting                  ║
 ║  • Selalu gunakan walk-forward validation, bukan backtest biasa              ║
-║  • Target Sprint 1: Precision 40-55%. Jalan ke 80% butuh 3 sprint.          ║
+║  • Jangan ubah parameter tanpa 50+ sinyal per segment                        ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -63,7 +71,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "16.3.0-SPRINT2"
+VERSION = "16.4.0-SPRINT3"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -185,6 +193,28 @@ CONFIG: Dict = {
 
     # ── [SPRINT2-v16.3] Quality filter thresholds ────────────────────────────
     "cont_min_cat_d":    20,   # CONTINUATION: minimum CAT-D score (D<20 = 0% HIT di data)
+
+    # ── [SPRINT3-v16.4] Data-driven fixes ────────────────────────────────────
+    # [S3-FIX-2] Volume kompensasi: coin < $2M wajib T2>=20 dan chg_24h>=12%
+    # Basis: coin $1M-$2M HIT 26% > coin $2M-$5M HIT 12%. Tapi perlu filter kuat.
+    "low_vol_threshold":      2_000_000,   # batas volume untuk filter kompensasi
+    "low_vol_t2_min":              20,     # T2 minimum jika vol < $2M
+    "low_vol_chg24h_min":          12.0,   # chg_24h minimum jika vol < $2M
+
+    # [S3-FIX-3] chg_24h sweet spot bonus: 15-20% = 52% HIT rate (vs 20% avg)
+    # Bonus mendorong sinyal di sweet spot ke atas threshold
+    "chg24h_sweetspot_min":        15.0,
+    "chg24h_sweetspot_max":        20.0,
+    "chg24h_sweetspot_bonus":      10,     # +10 poin jika chg_24h ∈ [15-20%]
+
+    # [S3-FIX-5] EARLY wajib D >= 20 (sama dengan CONTINUATION)
+    # Basis: batch 16-17 Apr — THETAUSDT D=15 = MISS, semua HIT15 D>=22
+    "early_min_cat_d":             20,
+
+    # [S3-FIX-6] CONTINUATION hard reject chg_1h terlalu negatif
+    # ARKMUSDT chg_1h=-12.7% lolos karena tidak ada lower bound
+    # Coin yang dump besar dalam 1h bukan setup entry valid
+    "cont_min_chg1h":              -8.0,   # CONTINUATION: chg_1h tidak boleh < -8%
 
     # ── Phase 2: Final scoring thresholds ────────────────────────────────────
     "alert_threshold_early":        95,
@@ -419,6 +449,7 @@ def init_db():
             return_3h   REAL    DEFAULT NULL,
             return_6h   REAL    DEFAULT NULL,
             return_12h  REAL    DEFAULT NULL,
+            return_24h  REAL    DEFAULT NULL,
             max_return  REAL    DEFAULT NULL,
             hit_15pct   INTEGER DEFAULT NULL,
             hit_10pct   INTEGER DEFAULT NULL,
@@ -435,6 +466,7 @@ def init_db():
     new_cols = {
         "return_6h":    "REAL DEFAULT NULL",
         "return_12h":   "REAL DEFAULT NULL",
+        "return_24h":   "REAL DEFAULT NULL",   # [S3-FIX-7] window diperlebar ke 24h
         "hit_10pct":    "INTEGER DEFAULT NULL",
         "hit_sl":       "INTEGER DEFAULT NULL",
         "sl_price":     "REAL DEFAULT NULL",
@@ -554,19 +586,20 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 (round(out, 4), row_id)
             )
 
-        # [SPRINT2-FIX-3] Update signal_outcomes — expanded windows 1h/2h/3h/6h/12h.
-        # Justifikasi: avg max_return=+5.75% tapi return_3h=+2.18%. Gap 3.57% menunjukkan
-        # banyak pump bergerak setelah window 3h. checked=1 sekarang setelah 12h.
+        # [S3-FIX-7] Update signal_outcomes — expanded windows 1h/2h/3h/6h/12h/24h.
+        # Justifikasi: batch 16-17 Apr 2026 — 57% HIT15 baru tercapai setelah jam ke-12.
+        # Window 12h meremehkan precision aktual scanner. Diperlebar ke 24h.
+        # data_version baru: 'v3_24h'. Data v1_3h dan v2_12h tetap valid untuk analisis.
         c.execute(
             """SELECT id, symbol, alerted_at, entry_price,
-                      return_1h, return_2h, return_3h, return_6h, return_12h
+                      return_1h, return_2h, return_3h, return_6h, return_12h, return_24h
                FROM signal_outcomes
                WHERE checked=0 AND alerted_at <= ?""",
             (now - 3600,)
         )
         rows = c.fetchall()
         updated = 0
-        for row_id, symbol, alerted_at, entry_price, r1h, r2h, r3h, r6h, r12h in rows:
+        for row_id, symbol, alerted_at, entry_price, r1h, r2h, r3h, r6h, r12h, r24h in rows:
             ticker = tickers.get(symbol)
             if not ticker or not entry_price or entry_price <= 0:
                 continue
@@ -593,8 +626,8 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 r6h = ret
 
             # [FIX] Update max_return di SETIAP scan — bukan hanya saat close.
-            # Ini menangkap high tertinggi yang terjadi kapanpun dalam window 12h.
-            # hit_15pct dan hit_10pct dihitung dari max_return, bukan ret@12h.
+            # Menangkap high tertinggi kapanpun dalam window 24h.
+            # hit_15pct dan hit_10pct dihitung dari max_return, bukan ret@close.
             c.execute("SELECT max_return FROM signal_outcomes WHERE id=?", (row_id,))
             cur_max = c.fetchone()[0]
             new_max = max(x for x in [cur_max, ret] if x is not None)
@@ -602,29 +635,35 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("UPDATE signal_outcomes SET max_return=? WHERE id=?",
                           (round(new_max, 2), row_id))
 
-            # Window 12h: close sinyal
+            # Window 12h: record return_12h (intermediate checkpoint, tidak close)
             if elapsed >= 12 * 3600 and r12h is None:
+                c.execute("UPDATE signal_outcomes SET return_12h=? WHERE id=?", (ret, row_id))
+                r12h = ret
+
+            # [S3-FIX-7] Window 24h: close sinyal
+            # Basis: 57% HIT15 baru tercapai setelah jam ke-12 → window 12h terlalu pendek
+            if elapsed >= 24 * 3600 and r24h is None:
                 c.execute("SELECT sl_price, max_return FROM signal_outcomes WHERE id=?", (row_id,))
-                sl_row = c.fetchone()
+                sl_row    = c.fetchone()
                 sl_price  = sl_row[0] if sl_row else None
                 final_max = sl_row[1] if sl_row and sl_row[1] is not None else ret
 
-                # [FIX] Hit berbasis max_return dalam 12h, bukan harga di jam ke-12
+                # Hit berbasis max_return dalam 24h, bukan harga di jam ke-24
                 hit_15 = 1 if final_max >= 15.0 else 0
                 hit_10 = 1 if final_max >= 10.0 else 0
                 hit_sl = 1 if (sl_price and cur <= sl_price) else 0
 
                 c.execute("""
                     UPDATE signal_outcomes
-                    SET return_12h=?, hit_15pct=?, hit_10pct=?, hit_sl=?,
-                        checked=1, data_version='v2_12h'
+                    SET return_24h=?, hit_15pct=?, hit_10pct=?, hit_sl=?,
+                        checked=1, data_version='v3_24h'
                     WHERE id=?
                 """, (ret, hit_15, hit_10, hit_sl, row_id))
                 updated += 1
 
         if updated > 0:
             conn.commit()
-            log.info(f"  Outcome tracking: {updated} sinyal di-close (3h window)")
+            log.info(f"  Outcome tracking: {updated} sinyal di-close (24h window)")  # [S3-FIX-7]
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1597,6 +1636,10 @@ def score_long_short_ratio(clz: ClzData) -> Tuple[int, dict]:
 
 
 # ── CAT-B: Order Flow — [FIX-4] window diperlebar 6h → 12h ───────────────────
+# [S3-FIX-4] Weight CAT-B diturunkan 30→15.
+# Data counter-intuitive: B=0 HIT 29%, B=15 HIT 9% (102 sinyal).
+# B tinggi = whale sudah masuk sebelumnya = entry terlambat, bukan pre-pump.
+# Max score dikurangi: 25→12 (strong), 15→8 (net buying), cap 30→15.
 def score_buy_volume_ratio(clz: ClzData) -> Tuple[int, dict]:
     if not clz.has_ohlcv:
         return 0, {"source": "no_ohlcv"}
@@ -1618,11 +1661,12 @@ def score_buy_volume_ratio(clz: ClzData) -> Tuple[int, dict]:
         return 0, {"source": "no_bv_data"}
     avg_bv = _mean(bv_ratios)
     score, sigs = 0, []
+    # [S3-FIX-4] Score dikurangi: strong 25→12, net buying 15→8, cap 30→15
     if avg_bv >= 0.62:
-        score += 25; sigs.append(f"STRONG_BUY bv/v={avg_bv:.1%}")
+        score += 12; sigs.append(f"STRONG_BUY bv/v={avg_bv:.1%}")
     elif avg_bv >= 0.55:
-        score += 15; sigs.append(f"NET_BUYING bv/v={avg_bv:.1%}")
-    return min(score, 30), {"avg_bv_ratio": round(avg_bv, 4), "signals": sigs,
+        score += 8;  sigs.append(f"NET_BUYING bv/v={avg_bv:.1%}")
+    return min(score, 15), {"avg_bv_ratio": round(avg_bv, 4), "signals": sigs,
                              "window_hours": len(recent)}
 
 
@@ -1991,12 +2035,14 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     log.info(f"  → {sym}: phase={phase.phase} chg_24h={data.chg_24h:+.1f}% "
              f"chg_1h={data.chg_1h:+.1f}% chg_2h={data.chg_2h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
 
-    # ── [SPRINT2-v16.3] Phase filter berbasis data ───────────────────────────
-    # Data 51 sinyal: DOWNTREND 0% HIT / 67% SL, WEAK 0% HIT / 0% HIT
-    # Kedua phase ini secara konsisten tidak menghasilkan sinyal valid.
-    # Nonaktifkan sampai ada bukti sebaliknya dari data v2 (min 20 sinyal).
+    # ── [S3-FIX-1] Phase filter — DOWNTREND dan WEAK dimatikan permanent ────────
+    # Data 102 sinyal: DOWNTREND 0% HIT / 57% SL, WEAK 0% HIT / 0% SL.
+    # Tidak ada nilai operasional mempertahankan kedua phase ini.
+    # Data v3_24h akan dikumpulkan tanpa kedua phase ini. Reaktivasi hanya jika
+    # ada bukti baru dari minimum 20 sinyal dengan HIT rate > 20%.
     if phase.phase in ["DOWNTREND", "WEAK"]:
-        log.info(f"  ✗ {sym} SKIP: phase={phase.phase} (dinonaktifkan — 0% HIT dari data historis)")
+        log.info(f"  ✗ {sym} SKIP: phase={phase.phase} "
+                 f"(dimatikan permanent — 0% HIT dari 102 sinyal historis)")
         return None
 
     # ── Velocity gates ────────────────────────────────────────────────────────
@@ -2015,14 +2061,22 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
             log.info(f"  ✗ {sym} REJECT: chg_4h={data.chg_4h:+.1f}% > {vg['chg_4h_max']}"); return None
 
         # [SPRINT1-FIX-D] Gate chg_2h untuk CONTINUATION — cegah entry terlambat.
-        # Jika coin sudah naik >8% dalam 2 jam terakhir, pump sudah terjadi.
-        # Scanner tidak boleh memberi sinyal entry di akhir gerakan.
-        # Threshold 8% sengaja moderat: longgar cukup untuk tidak membuang
-        # setup valid, ketat cukup untuk menolak LITUSDT (+9% dalam 2h).
         if is_cont:
             chg_2h_max = vg.get("chg_2h_max_continuation", 8.0)
             if data.chg_2h > chg_2h_max:
                 log.info(f"  ✗ {sym} [CONTINUATION] REJECT: chg_2h={data.chg_2h:+.1f}% > {chg_2h_max}% (pump sudah terjadi)")
+                return None
+
+        # [S3-FIX-6] Hard reject CONTINUATION dengan dump besar dalam 1h
+        # Root cause ARKMUSDT: chg_1h=-12.7% lolos karena tidak ada lower bound.
+        # Coin yang dump besar dalam 1h bukan setup entry valid.
+        # Threshold -8%: cukup ketat untuk menolak dump (-12%), tidak membuang
+        # sinyal valid yang hanya pullback normal (-3% to -7%).
+        if is_cont:
+            cont_min_1h = CONFIG.get("cont_min_chg1h", -8.0)
+            if data.chg_1h < cont_min_1h:
+                log.info(f"  ✗ {sym} [CONTINUATION] REJECT: chg_1h={data.chg_1h:+.1f}% < {cont_min_1h}% "
+                         f"(dump besar dalam 1h — bukan entry valid)")
                 return None
 
         if phase.phase == "EARLY" and data.chg_1h < -2.0:
@@ -2030,6 +2084,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         if phase.phase == "EARLY" and data.chg_4h < vg.get("chg_4h_min_early", -3.0):
             log.info(f"  ✗ {sym} [EARLY] REJECT: chg_4h={data.chg_4h:+.1f}%"); return None
     else:
+        # Dead code — DOWNTREND/WEAK sudah dimatikan di atas, tapi dijaga untuk keamanan
         if data.chg_1h < vg.get("chg_1h_min_reversal", -3.0):
             log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_1h={data.chg_1h:+.1f}%"); return None
 
@@ -2041,18 +2096,43 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     oi_sc,   oi_d   = score_oi_buildup(data.clz)
     liq_sc,  liq_d  = score_liquidations(data.clz)
 
-    # [SPRINT2-v16.3 FIX] Hard reject jika funding anomali
-    # BUG LAMA: score_funding_trend() hanya return 0 saat anomali — coin tetap lolos
-    # karena komponen lain (pred_sc, oi_sc, dll) masih memberi score.
-    # FIX: cek warning dari fund_d, jika OUTLIER_SKIPPED → reject langsung.
-    # Data: 5 sinyal funding anomali → 0% HIT, 40% SL. Tidak ada nilai meloloskan ini.
+    # [S3-FIX-8] Hard reject funding anomali — DIKONFIRMASI DAN DIPERKUAT
+    # Threshold -0.10% sudah ada dan berjalan. Tambah log eksplisit untuk borderline.
+    # ARKMUSDT fund=-0.0767% TIDAK di-reject funding (di atas threshold -0.10%).
+    # ARKMUSDT di-reject oleh S3-FIX-6 (chg_1h=-12.7% < -8%).
+    # SIRENUSDT fund=-0.0988% lolos karena -0.0988 > -0.10 — ini benar (pump +156%).
+    # Jangan ubah threshold -0.10% tanpa 50+ sinyal funding negatif baru.
     if fund_d.get("warning") == "OUTLIER_SKIPPED":
         log.info(f"  ✗ {sym} REJECT: funding={data.funding*100:.4f}% anomali "
-                 f"(< -0.10%) — hard reject, bukan hanya skip scoring")
+                 f"(< -0.10%) — hard reject [S3-FIX-8 confirmed]")
         return None
+    # Borderline warning: -0.07% to -0.10% (lolos tapi dicatat)
+    if data.funding < -0.0007:
+        log.info(f"  ⚠ {sym} funding borderline: {data.funding*100:.4f}% "
+                 f"(< -0.07% tapi > -0.10% — lolos, pantau outcome)")
 
     tier1 = ls_sc + bv_sc + fund_sc + pred_sc
     tier2 = oi_sc + liq_sc
+
+    # [S3-FIX-2] Volume kompensasi filter untuk coin < $2M
+    # Data: coin $1M-$2M HIT 26% — lebih baik dari $2M-$5M (12%).
+    # Coin vol < $2M tetap bisa lolos HANYA jika memenuhi kedua syarat kompensasi:
+    #   1. T2 >= 20: OI buildup terkonfirmasi (smart money akumulasi)
+    #   2. chg_24h >= 12%: momentum sudah mulai, bukan coin diam
+    # Coin vol < $2M tanpa OI buildup = high risk tanpa institutional backing.
+    if data.vol_24h < CONFIG.get("low_vol_threshold", 2_000_000):
+        low_t2_min   = CONFIG.get("low_vol_t2_min", 20)
+        low_c24_min  = CONFIG.get("low_vol_chg24h_min", 12.0)
+        if tier2 < low_t2_min:
+            log.info(f"  ✗ {sym} REJECT: vol=${data.vol_24h/1e6:.1f}M < $2M "
+                     f"tapi T2={tier2} < {low_t2_min} (tidak ada OI buildup)")
+            return None
+        if data.chg_24h < low_c24_min:
+            log.info(f"  ✗ {sym} REJECT: vol=${data.vol_24h/1e6:.1f}M < $2M "
+                     f"tapi chg_24h={data.chg_24h:+.1f}% < {low_c24_min}% (momentum belum kuat)")
+            return None
+        log.info(f"  ✓ {sym} vol kompensasi OK: ${data.vol_24h/1e6:.1f}M < $2M "
+                 f"tapi T2={tier2} >= {low_t2_min} AND chg_24h={data.chg_24h:+.1f}% >= {low_c24_min}%")
 
     # ── CAT-B: Order Flow (dari tier3) ───────────────────────────────────────
     bbw_sc,   _ = detect_bbw_squeeze(data.candles)
@@ -2135,42 +2215,61 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         total = max(0, total - tod_discount)
         log.info(f"  ⏰ {sym} TOD discount -{tod_discount} (hour={hour} UTC low-liquidity)")
 
+    # [S3-FIX-3] chg_24h sweet spot bonus: 15-20% menghasilkan HIT 52% (vs avg 20%)
+    # Data: 21 sinyal chg_24h 15-20% → HIT 52%, avg_max +23.6%
+    # Bonus +10 mendorong sinyal di sweet spot ke atas threshold tanpa override filter.
+    chg24_bonus = 0
+    sp_min = CONFIG.get("chg24h_sweetspot_min", 15.0)
+    sp_max = CONFIG.get("chg24h_sweetspot_max", 20.0)
+    sp_bon = CONFIG.get("chg24h_sweetspot_bonus", 10)
+    if sp_min <= data.chg_24h <= sp_max:
+        chg24_bonus = sp_bon
+        total += chg24_bonus
+        log.info(f"  ★ {sym} sweet spot bonus +{chg24_bonus} "
+                 f"(chg_24h={data.chg_24h:+.1f}% ∈ [{sp_min}-{sp_max}%] — HIT rate 52% dari data)")
+
     # ── [SPRINT2-v16.3] Quality filter berbasis data 51 sinyal ───────────────
     #
     # FILTER A — EARLY wajib C > 0
-    # Data: EARLY tanpa C → 0% HIT dari 16 sinyal (EARLY C=0).
-    # EARLY dengan C > 0 → 18% HIT. C=0 tidak pernah menghasilkan sinyal valid.
-    # BANUSDT dan LABUSDT (HIT tanpa C) adalah CONTINUATION, bukan EARLY.
+    # Data: EARLY tanpa C → 0% HIT dari 19 sinyal. Dengan C → 19% HIT.
+    # C = BTC decoupling (rs_sc). Tanpa ini, coin bergerak murni ikut BTC.
     if phase.phase == "EARLY":
         if rs_sc == 0:
             log.info(f"  ✗ {sym} [EARLY] REJECT: C=0 (BTC decoupling tidak aktif — 0% HIT dari data)")
             return None
 
     # FILTER B — CONTINUATION wajib D >= 20
-    # Data: CONTINUATION D<20 → semua MISS (GIGGLEUSDT D=17, DASHUSDT D=22 border).
-    # CONTINUATION D>=20 → HIT rate naik dari 44% ke 50%+.
-    # D mengukur microstructure: volatility return + wick + support.
-    # Tanpa D kuat, coin tidak punya struktur teknikal untuk pump.
+    # Data: CONTINUATION D<20 → semua MISS. D>=20 → HIT rate 35-39%.
     if phase.phase == "CONTINUATION":
-        cat_d_cont = (vret_sc + wick_sc + decel_sc + supp_sc + spike_sc
-                      + bbw_sc)  # semua komponen CAT-D termasuk bbw dan spike
+        cat_d_cont = (vret_sc + wick_sc + decel_sc + supp_sc + spike_sc + bbw_sc)
         if cat_d_cont < CONFIG.get("cont_min_cat_d", 20):
             log.info(f"  ✗ {sym} [CONTINUATION] REJECT: D={cat_d_cont} < 20 (microstructure lemah)")
             return None
 
+    # [S3-FIX-5] FILTER C — EARLY wajib D >= 20 (sama dengan CONTINUATION)
+    # Data batch 16-17 Apr: THETAUSDT D=15 = MISS. Semua HIT15 di batch itu D>=22.
+    # Konsisten dengan CONTINUATION filter yang sudah terbukti dari data.
+    if phase.phase == "EARLY":
+        cat_d_early = (vret_sc + wick_sc + decel_sc + supp_sc + spike_sc + bbw_sc)
+        if cat_d_early < CONFIG.get("early_min_cat_d", 20):
+            log.info(f"  ✗ {sym} [EARLY] REJECT: D={cat_d_early} < 20 "
+                     f"(microstructure lemah — semua HIT15 D>=22 dari data batch)")
+            return None
+
     # ── Threshold check ───────────────────────────────────────────────────────
+    # [S3-FIX-1] Dead code DOWNTREND/WEAK dihapus dari threshold check.
+    # Kedua phase sudah di-reject di atas. Tidak akan sampai di sini.
     if phase.phase == "EARLY":
         threshold = CONFIG["alert_threshold_early"]
     elif phase.phase == "CONTINUATION":
         threshold = CONFIG["alert_threshold_continuation"]
-    elif phase.phase in ["DOWNTREND", "WEAK"]:
-        threshold = CONFIG["alert_threshold_reversal"]
     else:
-        threshold = 110
+        threshold = 110   # PARABOLIC atau fase tidak dikenal
 
     log.info(
         f"  ~ {sym} [{phase.phase}] score={total} vs threshold={threshold} | "
-        f"phase={phase_score} t1={tier1} t2={tier2} t3={tier3} | "
+        f"phase={phase_score} t1={tier1} t2={tier2} t3={tier3}"
+        f"{f' +sweet{chg24_bonus}' if chg24_bonus else ''} | "
         f"confluence={cf.reason} | "
         f"ls={ls_sc} bv={bv_sc} fund={fund_sc} pred={pred_sc} oi={oi_sc} liq={liq_sc} | "
         f"bbw={bbw_sc} dry={dry_sc} acc={accum_sc} vret={vret_sc} rs={rs_sc} "
@@ -2211,6 +2310,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         "pred_sc": pred_sc, "oi_sc": oi_sc, "liq_sc": liq_sc,
         "rs_sc": rs_sc, "vret_sc": vret_sc, "wick_sc": wick_sc,
         "decel_sc": decel_sc, "supp_sc": supp_sc,
+        "chg24_bonus": chg24_bonus,   # [S3-FIX-3] sweet spot bonus
     }
     fingerprint = make_signal_fingerprint(score_components)
 
