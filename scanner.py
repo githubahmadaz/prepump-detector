@@ -1,50 +1,45 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  PRE-PUMP SCANNER v16.4.0 — SPRINT 3 DATA-DRIVEN FIXES                     ║
+║  PRE-PUMP SCANNER v16.5.0 — WINRATE-3 PATTERN GATE                         ║
 ║                                                                              ║
-║  PERBAIKAN DARI v16.3.0 (basis: 102 sinyal checked + batch 16-17 Apr 2026): ║
+║  PERBAIKAN DARI v16.4.0 (basis: 142 sinyal 11-18 Apr 2026):                 ║
 ║                                                                              ║
-║  [S3-FIX-1] 🔴 DOWNTREND dimatikan permanent                                ║
-║    Data: 7 sinyal DOWNTREND → 0% HIT, 57% SL. WEAK juga 0% HIT.            ║
-║    Tidak ada alasan operasional mempertahankan kedua phase ini.              ║
-║    Dead code threshold DOWNTREND/WEAK di threshold check juga dibersihkan.  ║
+║  [S4-FIX-1] 🔴 Telegram gate: HANYA kirim sinyal yang cocok 3 pola winrate  ║
+║    Scanner tetap scan & scoring semua sinyal seperti biasa.                  ║
+║    Tapi HANYA sinyal yang cocok minimal 1 dari 3 pola ini yang dikirim      ║
+║    ke Telegram dan masuk cooldown:                                           ║
 ║                                                                              ║
-║  [S3-FIX-2] 🔴 Volume filter kompensasi untuk coin < $2M                    ║
-║    Data: coin $1M-$2M HIT 26% > coin $2M-$5M HIT 12%.                      ║
-║    Coin vol < $2M tetap bisa lolos JIKA T2>=20 AND chg_24h>=12%.            ║
-║    Filter kompensasi memastikan hanya coin dengan OI buildup kuat yang lolos.║
+║    POLA 1: CONT + T2>=40 + c1h>=3% + D>=25                                  ║
+║    POLA 2: CONT + T2>=40 + vol>=$5M                                         ║
+║    POLA 3: CONT + T2>=40 + D>=30                                            ║
 ║                                                                              ║
-║  [S3-FIX-3] 🔴 chg_24h 15-20% sweet spot bonus +10                         ║
-║    Data: chg_24h 15-20% menghasilkan HIT rate 52% vs rata-rata 20%.         ║
-║    Bonus +10 mendorong sinyal terkuat ke atas threshold.                     ║
+║    Basis data 142 sinyal (11-18 Apr):                                        ║
+║      Baseline (semua): 142 sinyal, HIT 19%, SL 21%                          ║
+║      3 pola (>=1)    :  21 sinyal, HIT 38%, SL 10% ← 2x lipat edge         ║
+║      Per hari        : ~2.6 sinyal (sustainable untuk manual exec)          ║
 ║                                                                              ║
-║  [S3-FIX-4] 🟠 CAT-B weight diturunkan 30→15                                ║
-║    Data counter-intuitive: B=0 HIT 29%, B=15 HIT 9%.                        ║
-║    B tinggi = whale sudah masuk sebelumnya = entry terlambat.                ║
-║    Max score dikurangi: 25→12 (strong), 15→8 (net buying), cap 30→15.       ║
+║    Sinyal lain tetap di-log dan disimpan ke DB untuk continuous learning,   ║
+║    tapi tidak menimbulkan alert telegram maupun cooldown.                    ║
 ║                                                                              ║
-║  [S3-FIX-5] 🟠 EARLY wajib D >= 20 (sama dengan CONTINUATION)              ║
-║    Data batch terbaru: THETAUSDT D=15 = MISS. Semua HIT15 D>=22.            ║
-║    Konsisten dengan CONTINUATION filter yang sudah ada.                      ║
+║  [S4-FIX-2] 🟡 Alert format: tambah tag pola yang match                     ║
+║    Setiap alert mencantumkan pola mana yang cocok (P1/P2/P3/multi).         ║
+║    Multi-pola = sinyal lebih kuat (HIT 56% utk >=2 pola, 60% utk >=3).      ║
 ║                                                                              ║
-║  [S3-FIX-6] 🟠 CONTINUATION: hard reject chg_1h < -8%                      ║
-║    ARKMUSDT chg_1h=-12.7% lolos karena tidak ada lower bound untuk CONT.    ║
-║    Coin yang dump -12% dalam 1 jam bukan setup entry yang valid.             ║
+║  [WARISAN v16.4.0 - tetap aktif]                                            ║
+║    S3-FIX-1 : DOWNTREND/WEAK dimatikan permanent                             ║
+║    S3-FIX-2 : Vol < $2M wajib T2>=20 AND chg_24h>=12%                       ║
+║    S3-FIX-3 : chg_24h 15-20% sweet spot bonus +10                           ║
+║    S3-FIX-4 : CAT-B cap 30→15                                                ║
+║    S3-FIX-5 : EARLY wajib D>=20                                              ║
+║    S3-FIX-6 : CONTINUATION reject chg_1h < -8%                              ║
+║    S3-FIX-7 : Outcome window 12h → 24h                                      ║
+║    S3-FIX-8 : Funding hard reject -0.10%                                    ║
 ║                                                                              ║
-║  [S3-FIX-7] 🟡 Outcome window diperlebar 12h → 24h                          ║
-║    Data: 57% HIT15 baru tercapai setelah jam ke-12.                         ║
-║    Window 12h meremehkan precision aktual scanner.                           ║
-║    data_version baru: 'v3_24h'. Data lama v2_12h tetap valid.               ║
-║                                                                              ║
-║  [S3-FIX-8] 🟡 Funding hard reject dikonfirmasi dan diperkuat               ║
-║    Threshold -0.10% sudah ada. Tambah catatan ARKMUSDT di log.               ║
-║    Funding -0.0767% (ARKMUSDT) lolos threshold tapi ditangkap oleh FIX-6.   ║
-║                                                                              ║
-║  PERINGATAN WAJIB:                                                           ║
-║  • Setiap perubahan threshold tanpa data live = overfitting                  ║
-║  • Selalu gunakan walk-forward validation, bukan backtest biasa              ║
-║  • Jangan ubah parameter tanpa 50+ sinyal per segment                        ║
+║  PERINGATAN:                                                                 ║
+║  • Sample size 3 pola masih marginal (21 sinyal). Monitor 50+ sinyal baru   ║
+║    sebelum assumption HIT rate 38% dianggap solid.                           ║
+║  • Jika dalam 2 minggu HIT rate turun di bawah 30%, evaluasi ulang pola.    ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -71,7 +66,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "16.4.0-SPRINT3"
+VERSION = "16.5.0-WINRATE3"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -215,6 +210,29 @@ CONFIG: Dict = {
     # ARKMUSDT chg_1h=-12.7% lolos karena tidak ada lower bound
     # Coin yang dump besar dalam 1h bukan setup entry valid
     "cont_min_chg1h":              -8.0,   # CONTINUATION: chg_1h tidak boleh < -8%
+
+    # ── [SPRINT4-v16.5] Telegram gate: 3 pola winrate tinggi ─────────────────
+    # Filter KHUSUS untuk pengiriman Telegram. Sinyal lain tetap discan & disimpan
+    # ke DB untuk continuous learning, tapi tidak menimbulkan alert.
+    #
+    # Basis data 142 sinyal (11-18 Apr 2026):
+    #   P1: CONT + T2>=40 + c1h>=3% + D>=25  → 12 sinyal, HIT 50%, SL 17%
+    #   P2: CONT + T2>=40 + vol>=$5M         →  9 sinyal, HIT 44%, SL  0%
+    #   P3: CONT + T2>=40 + D>=30            → 14 sinyal, HIT 43%, SL  7%
+    #   Gabungan (match >=1): 21 sinyal, HIT 38%, SL 10% (baseline: HIT 19%)
+    #   Per hari: ~2.6 sinyal (sustainable untuk eksekusi manual)
+    "winrate_gate_enabled":        True,   # master switch (False = kirim semua)
+    "winrate_gate_min_patterns":   1,      # minimal berapa pola harus match
+    # Pola 1: momentum + microstructure
+    "winrate_p1_min_t2":           40,
+    "winrate_p1_min_c1h":          3.0,
+    "winrate_p1_min_d":            25,
+    # Pola 2: likuiditas tinggi
+    "winrate_p2_min_t2":           40,
+    "winrate_p2_min_vol":          5_000_000,
+    # Pola 3: struktur teknikal kuat
+    "winrate_p3_min_t2":           40,
+    "winrate_p3_min_d":            30,
 
     # ── Phase 2: Final scoring thresholds ────────────────────────────────────
     "alert_threshold_early":        95,
@@ -2347,6 +2365,79 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  🎯  [SPRINT4-v16.5] WINRATE GATE — 3 POLA FILTER UNTUK TELEGRAM
+# ══════════════════════════════════════════════════════════════════════════════
+def evaluate_winrate_patterns(result: "ScoreResult") -> Tuple[List[str], str]:
+    """
+    Evaluasi ScoreResult terhadap 3 pola winrate tinggi dari riset 142 sinyal.
+    Return: (list_pola_cocok, label_kombinasi)
+
+    Basis data (11-18 Apr 2026):
+      P1: CONT + T2>=40 + c1h>=3% + D>=25  →  HIT 50%
+      P2: CONT + T2>=40 + vol>=$5M         →  HIT 44%
+      P3: CONT + T2>=40 + D>=30            →  HIT 43%
+      Gabungan: HIT 38% SL 10% (baseline: HIT 19% SL 21%)
+    """
+    matched: List[str] = []
+
+    # Prerequisite semua pola: CONTINUATION + T2 minimum
+    if result.phase != "CONTINUATION":
+        return matched, "NOT_CONTINUATION"
+
+    # Ambil nilai T2 dan D dari result.components
+    t2 = int(result.components.get("tier2_clz", 0) or 0)
+    cf = result.confluence
+    cat_d = int(cf.cat_d or 0)
+    c1h = float(result.chg_1h or 0)
+    vol = float(result.vol_24h or 0)
+
+    # Pola 1: momentum + microstructure
+    if (t2 >= CONFIG["winrate_p1_min_t2"]
+            and c1h >= CONFIG["winrate_p1_min_c1h"]
+            and cat_d >= CONFIG["winrate_p1_min_d"]):
+        matched.append("P1")
+
+    # Pola 2: likuiditas tinggi
+    if (t2 >= CONFIG["winrate_p2_min_t2"]
+            and vol >= CONFIG["winrate_p2_min_vol"]):
+        matched.append("P2")
+
+    # Pola 3: struktur teknikal kuat
+    if (t2 >= CONFIG["winrate_p3_min_t2"]
+            and cat_d >= CONFIG["winrate_p3_min_d"]):
+        matched.append("P3")
+
+    # Label kombinasi berdasarkan jumlah pola yang cocok
+    n = len(matched)
+    if n == 0:
+        label = "NO_PATTERN"
+    elif n == 1:
+        label = matched[0]
+    elif n == 2:
+        label = "+".join(matched) + " (STRONG)"
+    else:  # n == 3
+        label = "P1+P2+P3 (ELITE)"
+
+    return matched, label
+
+
+def passes_winrate_gate(result: "ScoreResult") -> Tuple[bool, List[str], str]:
+    """
+    Return: (lolos_gate, list_pola_match, label).
+    Jika gate disabled, selalu return True dengan label info.
+    """
+    matched, label = evaluate_winrate_patterns(result)
+
+    # Master switch: kalau disabled, semua sinyal lolos (untuk debug/override)
+    if not CONFIG.get("winrate_gate_enabled", True):
+        return True, matched, f"GATE_DISABLED|{label}"
+
+    min_patterns = CONFIG.get("winrate_gate_min_patterns", 1)
+    ok = len(matched) >= min_patterns
+    return ok, matched, label
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  📤  TELEGRAM & ALERT FORMATTER
 # ══════════════════════════════════════════════════════════════════════════════
 def send_telegram(message: str) -> bool:
@@ -2382,10 +2473,15 @@ def build_alert(r: ScoreResult, rank: int) -> str:
     btc_reg  = r.components.get("btc_regime", "?")
     rs_pat   = r.components.get("rs_pattern", "")
 
+    # [S4-FIX-2] Tag pola winrate yang match — bantu user menilai kekuatan sinyal
+    _, wp_matched, wp_label = passes_winrate_gate(r)
+    wp_tag = f"⭐ Pattern: {wp_label}" if wp_matched else "⚠️ Pattern: NO_MATCH"
+
     lines = [
         f"{'─'*58}",
         f"#{rank}  {r.symbol}  {emoji}  Score: {r.score}  [{r.phase}]",
         f"   {bar}",
+        f"   {wp_tag}",
         f"   Confluence: {cf.reason}",
         f"   {cat_bar}",
         f"   Type: {pump_str}",
@@ -2602,22 +2698,91 @@ def main():
     final_results.sort(key=lambda x: x.score, reverse=True)
     max_alerts = CONFIG["max_alerts_per_scan"]
 
+    # [S4-FIX-1] Winrate gate: pisah sinyal yang layak Telegram vs hanya observasi
+    # Sinyal yang lolos gate → Telegram + cooldown + simpan DB full metadata
+    # Sinyal yang TIDAK lolos → tetap simpan DB (untuk learning), tapi TANPA Telegram & cooldown
+    gated_pass:  List[Tuple[ScoreResult, List[str], str]] = []
+    gated_fail:  List[Tuple[ScoreResult, List[str], str]] = []
+    for res in final_results:
+        ok, matched, label = passes_winrate_gate(res)
+        if ok:
+            gated_pass.append((res, matched, label))
+        else:
+            gated_fail.append((res, matched, label))
+
     log.info(f"\n{'═'*70}")
-    log.info(f"  DONE: {len(final_results)} final signals | top {min(max_alerts, len(final_results))}")
+    log.info(f"  DONE: {len(final_results)} final signals")
+    log.info(f"    ⭐ Lolos winrate gate: {len(gated_pass)} → akan dikirim ke Telegram")
+    log.info(f"    ⚪ Di bawah gate     : {len(gated_fail)} → hanya disimpan untuk observasi")
     log.info(f"{'═'*70}\n")
 
+    # ── Kirim sinyal yang LOLOS gate ke Telegram ──────────────────────────────
     sent = 0
-    for rank, res in enumerate(final_results[:10], 1):
+    for rank, (res, matched, label) in enumerate(gated_pass[:10], 1):
         msg = build_alert(res, rank)
         print(msg)
+        log.info(f"  ⭐ {res.symbol} pattern match: {label} ({len(matched)} pola)")
         if sent < max_alerts:
             if send_telegram(msg):
                 sent += 1
+            # Simpan ke DB + trigger cooldown (hanya untuk sinyal yang lolos gate)
             entry_price = res.entry["entry"] if res.entry else res.price
             set_alert(res.symbol, res.score, res.phase, entry_price, result=res)
 
+    # ── Log sinyal yang TIDAK lolos (observasi only, tanpa kirim & cooldown) ─
+    # Tetap simpan ke signal_outcomes supaya bisa dipakai untuk analisis future
+    # (kalau suatu saat pola baru ditemukan, data ini sudah tersedia).
+    # TIDAK masuk tabel 'alerts' jadi tidak trigger cooldown.
+    if gated_fail:
+        log.info(f"\n{'─'*70}")
+        log.info(f"  📊 SINYAL OBSERVASI (tidak dikirim, tidak kena cooldown):")
+        for rank, (res, matched, label) in enumerate(gated_fail[:10], 1):
+            t2_val = res.components.get("tier2_clz", 0)
+            log.info(f"    [{rank}] {res.symbol} score={res.score} phase={res.phase} "
+                     f"T2={t2_val} D={res.confluence.cat_d} c1h={res.chg_1h:+.1f}% "
+                     f"vol=${res.vol_24h/1e6:.1f}M | reason: {label}")
+            # Simpan ke DB untuk outcome tracking (tanpa alerts.id → tanpa cooldown)
+            try:
+                conn = sqlite3.connect(CONFIG["history_db"])
+                c = conn.cursor()
+                cf = res.confluence
+                btc_regime = res.components.get("btc_regime", "UNKNOWN")
+                pump_str = "|".join(pt.type_code for pt in res.pump_types)
+                e = res.entry or {}
+                entry_price = e.get("entry", res.price)
+                c.execute("""
+                    INSERT INTO signal_outcomes
+                    (symbol, alerted_at, score, phase, pump_types,
+                     cat_a_score, cat_b_score, cat_c_score, cat_d_score,
+                     btc_regime, fingerprint, entry_price,
+                     sl_price, tp1_price, tp2_price, sl_pct, tp1_pct,
+                     chg_1h_signal, chg_4h_signal, chg_24h_signal,
+                     funding_signal, vol_24h_signal,
+                     tier1, tier2, tier3, data_version)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    res.symbol, int(time.time()), res.score, res.phase, pump_str,
+                    cf.cat_a, cf.cat_b, cf.cat_c, cf.cat_d,
+                    btc_regime, res.signal_fingerprint, entry_price,
+                    e.get("sl"),   e.get("tp1"),  e.get("tp2"),
+                    e.get("sl_pct"), e.get("tp1_pct"),
+                    res.chg_1h, getattr(res, "chg_4h", None), res.chg_24h,
+                    res.funding, res.vol_24h,
+                    res.components.get("tier1_clz"),
+                    res.components.get("tier2_clz"),
+                    res.components.get("tier3_technical"),
+                    "v3_24h_observed",   # ← tag khusus: sinyal observasi, bukan alert
+                ))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                log.warning(f"  observation insert failed for {res.symbol}: {e}")
+        log.info(f"{'─'*70}\n")
+
     if not final_results:
         log.info("No final signals this cycle.")
+    elif not gated_pass:
+        log.info("No signals passed winrate gate. Monitoring only.")
 
     BitgetClient.clear_cache()
     return 0
