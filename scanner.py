@@ -2143,7 +2143,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     # [v17-GC#6] Skip REJECTED_EARLY phase
     if phase.phase == "REJECTED_EARLY":
         log.info(f"[v17-GC#6] {sym} REJECTED: EARLY phase (HIT 9%)")
-        continue
+        return None  # fixed: continue → return None
 
     log.info(f"  → {sym}: phase={phase.phase} chg_24h={data.chg_24h:+.1f}% "
              f"chg_1h={data.chg_1h:+.1f}% chg_2h={data.chg_2h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
@@ -2998,22 +2998,20 @@ def main():
                 funding=funding,
                 candles=candles,
                 btc_chg_1h=btc_chg_1h,
-                btc_chg_4h=btc_chg_4h,    # [FIX-2]
+                btc_chg_4h=btc_chg_4h,
                 btc_chg_24h=btc_chg_24h,
-                chg_2h=chg_2h,             # [SPRINT1-FIX-D]
+                chg_2h=chg_2h,
                 clz=clz_data.get(sym, ClzData()),
             )
 
-
-        # ══════════════════════════════════════════════════════════════════════
-        # [v17-GC#2] CHG_1H LATE ENTRY GATE
-        # Optimal: 3-6% (HIT 37%), Reject: >=8% (late entry, HIT 33%)
-        # ══════════════════════════════════════════════════════════════════════
-        pass_gc2, reason_gc2 = v17_filter_gc2_chg1h(coin_data.chg_1h, sym)
-        if not pass_gc2:
-            log.info(f"[v17-GC#2] {sym} REJECTED: {reason_gc2}")
-            continue
-
+            # ══════════════════════════════════════════════════════════════════
+            # [v17-GC#2] CHG_1H LATE ENTRY GATE
+            # Optimal: 3-6% (HIT 37%), Reject: >=8% (late entry, HIT 33%)
+            # ══════════════════════════════════════════════════════════════════
+            pass_gc2, reason_gc2 = v17_filter_gc2_chg1h(coin_data.chg_1h, sym)
+            if not pass_gc2:
+                log.info(f"[v17-GC#2] {sym} REJECTED: {reason_gc2}")
+                continue
 
             result = final_score_coin(coin_data, p1_score)
             if result:
