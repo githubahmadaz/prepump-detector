@@ -66,7 +66,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "16.5.0-WINRATE3"
+VERSION = "17.0.0-FORENSIC-PRODUCTION"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -233,6 +233,47 @@ CONFIG: Dict = {
     # Pola 3: struktur teknikal kuat
     "winrate_p3_min_t2":           40,
     "winrate_p3_min_d":            30,
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # [v17] 7 GAME CHANGERS — FORENSIC AUDIT EDITION
+    # ══════════════════════════════════════════════════════════════════════════
+    "v17_gc1_enabled": True,
+    "v17_chg24h_min": 12.0,
+    "v17_chg24h_max": 22.0,
+    "v17_chg24h_sweet_min": 15.0,
+    "v17_chg24h_sweet_max": 20.0,
+    
+    "v17_gc2_enabled": True,
+    "v17_chg1h_min": 3.0,
+    "v17_chg1h_optimal_max": 6.0,
+    "v17_chg1h_reject": 8.0,
+    
+    "v17_gc3_enabled": True,
+    "v17_funding_bonus": 20,
+    "v17_funding_penalty_thresh": 0.03,
+    "v17_funding_penalty": -30,
+    "v17_funding_reject": 0.05,
+    
+    "v17_gc4_enabled": True,
+    "v17_catd_min": 30,
+    "v17_catd_max": 42,
+    "v17_catd_trap_min": 20,
+    "v17_catd_trap_max": 30,
+    
+    "v17_gc5_enabled": True,
+    "v17_velocity_accel": 3.0,
+    "v17_velocity_decel": -3.0,
+    
+    "v17_gc6_enabled": True,
+    
+    "v17_gc7_enabled": True,
+    "v17_confluence_max": 3,
+    
+    "v17_tier2_min": 42,
+    "v17_tier2_reject_middle": True,
+    "v17_tier2_middle_min": 20,
+    "v17_tier2_middle_max": 39,
+
 
     # ── Phase 2: Final scoring thresholds ────────────────────────────────────
     "alert_threshold_early":        95,
@@ -635,6 +676,36 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("UPDATE signal_outcomes SET return_2h=? WHERE id=?", (ret, row_id))
                 r2h = ret
 
+                # ══════════════════════════════════════════════════════════════
+                # [v17-GC#5] MOMENTUM VELOCITY CHECK (JAM 2)
+                # Decision tree: velocity = r2h - r1h
+                # Impact: Prevents 41% SL with real-time decisions!
+                # ══════════════════════════════════════════════════════════════
+                if r1h is not None and CONFIG.get("v17_gc5_enabled", False):
+                    decision_gc5 = v17_velocity_decision(r1h, r2h, symbol)
+                    velocity_gc5 = r2h - r1h
+                    
+                    # Store velocity decision
+                    c.execute("""
+                        UPDATE signal_outcomes
+                        SET velocity_1h_to_2h = ?, velocity_decision = ?
+                        WHERE id = ?
+                    """, (velocity_gc5, decision_gc5, row_id))
+                    
+                    # Send Telegram alert for CUT decisions
+                    if decision_gc5 in ["CUT_30", "CUT_70"]:
+                        cut_pct = 30 if decision_gc5 == "CUT_30" else 70
+                        alert_msg = (
+                            f"🔔 VELOCITY ALERT: {symbol}\n"
+                            f"r1h: {r1h:+.2f}% → r2h: {r2h:+.2f}%\n"
+                            f"Velocity: {velocity_gc5:+.2f}%/h\n"
+                            f"Decision: {decision_gc5}\n"
+                            f"⚠️ ACTION: CUT {cut_pct}% POSITION NOW!"
+                        )
+                        send_telegram(alert_msg)
+                        log.warning(f"[v17-GC#5] {symbol} VELOCITY ALERT: {decision_gc5}")
+
+
             if elapsed >= 3 * 3600 and r3h is None:
                 c.execute("UPDATE signal_outcomes SET return_3h=? WHERE id=?", (ret, row_id))
                 r3h = ret
@@ -926,6 +997,24 @@ def check_confluence(scores: Dict[str, int]) -> ConfluenceResult:
     d_ok = cat_d >= CONFIG["confluence_cat_d_min"]
 
     active_count = sum([a_ok, b_ok, c_ok, d_ok])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # [v17-GC#7] ANTI-PERFECT CONFLUENCE CHECK
+    # Data: 4/4 confluence = 8 signals, 0 HIT, 100% MISS!
+    # Too perfect = already front-run. Optimal: 2-3 active categories
+    # ══════════════════════════════════════════════════════════════════════════
+    if CONFIG.get("v17_gc7_enabled", False):
+        pass_gc7, reason_gc7 = v17_check_gc7_confluence(active_count, f"A{cat_a}_B{cat_b}_C{cat_c}_D{cat_d}")
+        if not pass_gc7:
+            return ConfluenceResult(
+                ok=False,
+                reason=reason_gc7,
+                active_cats=active_count,
+                cat_a=cat_a,
+                cat_b=cat_b,
+                cat_c=cat_c,
+                cat_d=cat_d
+            )
 
     if active_count >= CONFIG["confluence_min_cats"]:
         ok = True
@@ -2050,6 +2139,12 @@ def classify_phase(chg_24h: float) -> PhaseInfo:
 def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]:
     sym   = data.symbol
     phase = classify_phase(data.chg_24h)
+
+    # [v17-GC#6] Skip REJECTED_EARLY phase
+    if phase.phase == "REJECTED_EARLY":
+        log.info(f"[v17-GC#6] {sym} REJECTED: EARLY phase (HIT 9%)")
+        continue
+
     log.info(f"  → {sym}: phase={phase.phase} chg_24h={data.chg_24h:+.1f}% "
              f"chg_1h={data.chg_1h:+.1f}% chg_2h={data.chg_2h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
 
@@ -2132,6 +2227,22 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     tier1 = ls_sc + bv_sc + fund_sc + pred_sc
     tier2 = oi_sc + liq_sc
 
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # [v17-GC#3] FUNDING REGIME ADJUSTMENT
+    # Contrarian <0% bonus +20, Crowded >3% penalty -30, Extreme >=5% reject
+    # Data: funding <0% HIT 38%, >=5% disaster day
+    # ══════════════════════════════════════════════════════════════════════════
+    # Apply BEFORE calculating scores but after tier calculations
+    funding_adjusted_tier1 = tier1
+    if CONFIG.get("v17_gc3_enabled", False):
+        funding_adjusted, pass_gc3, reason_gc3 = v17_apply_gc3_funding(data.funding, tier1, data.symbol)
+        if not pass_gc3:
+            log.info(f"[v17-GC#3] {data.symbol} REJECTED: {reason_gc3}")
+            return None
+        tier1 = funding_adjusted
+
+
     # [S3-FIX-2] Volume kompensasi filter untuk coin < $2M
     # Data: coin $1M-$2M HIT 26% — lebih baik dari $2M-$5M (12%).
     # Coin vol < $2M tetap bisa lolos HANYA jika memenuhi kedua syarat kompensasi:
@@ -2204,6 +2315,26 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         log.info(f"  ✗ {sym} BLOCKED: {cf.reason} "
                  f"(A={cf.cat_a} B={cf.cat_b} C={cf.cat_c} D={cf.cat_d})")
         return None
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # [v17-GC#4] CAT-D PRECISION ZONE FILTER
+    # Optimal: 30-42, CRITICAL REJECT: trap zone 20-30 (SL 50%!)
+    # ══════════════════════════════════════════════════════════════════════════
+    if CONFIG.get("v17_gc4_enabled", False):
+        pass_gc4, reason_gc4 = v17_filter_gc4_catd(cf.cat_d, sym)
+        if not pass_gc4:
+            log.info(f"[v17-GC#4] {sym} REJECTED: {reason_gc4} (CAT-D={cf.cat_d})")
+            return None
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # [v17] T2 THRESHOLD & MIDDLE ZONE REJECTION
+    # Data: T2 20-39 HIT 14% (trap!), T2 >=42 optimal
+    # ══════════════════════════════════════════════════════════════════════════
+    if CONFIG.get("v17_tier2_reject_middle", False):
+        pass_t2, reason_t2 = v17_filter_tier2(tier2, sym)
+        if not pass_t2:
+            log.info(f"[v17-T2] {sym} REJECTED: {reason_t2} (T2={tier2})")
+            return None
 
     # ── Coinalyze availability checks ─────────────────────────────────────────
     has_any_clz = (data.clz.has_ohlcv or data.clz.has_oi or data.clz.has_liq
@@ -2523,6 +2654,174 @@ def build_alert(r: ScoreResult, rank: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  🚀  MAIN SCANNER LOOP
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  [v17] GAME CHANGER FILTER FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def v17_filter_gc1_chg24h(chg_24h, sym):
+    """
+    GC#1: CHG_24H SWEET SPOT (12-22%, optimal 15-20%)
+    Returns: (pass, reason)
+    """
+    if not CONFIG.get("v17_gc1_enabled", False):
+        return True, None
+    
+    min_val, max_val = CONFIG["v17_chg24h_min"], CONFIG["v17_chg24h_max"]
+    if chg_24h < min_val:
+        return False, f"v17_gc1_low:{chg_24h:.1f}%<{min_val}"
+    if chg_24h > max_val:
+        return False, f"v17_gc1_exhaust:{chg_24h:.1f}%>{max_val}"
+    
+    # Sweet spot logging
+    if CONFIG["v17_chg24h_sweet_min"] <= chg_24h <= CONFIG["v17_chg24h_sweet_max"]:
+        log.info(f"✅ {sym} chg_24h {chg_24h:.1f}% IN SWEET SPOT (15-20%)")
+    return True, None
+
+
+def v17_filter_gc2_chg1h(chg_1h, sym):
+    """
+    GC#2: CHG_1H LATE ENTRY GATE (3-6%, reject >=8%)
+    Returns: (pass, reason)
+    """
+    if not CONFIG.get("v17_gc2_enabled", False):
+        return True, None
+    
+    min_val = CONFIG["v17_chg1h_min"]
+    reject_val = CONFIG["v17_chg1h_reject"]
+    
+    if chg_1h >= reject_val:
+        return False, f"v17_gc2_late:{chg_1h:.1f}%>={reject_val}"
+    if chg_1h < min_val:
+        return False, f"v17_gc2_weak:{chg_1h:.1f}%<{min_val}"
+    
+    if min_val <= chg_1h <= CONFIG["v17_chg1h_optimal_max"]:
+        log.info(f"✅ {sym} chg_1h {chg_1h:.1f}% OPTIMAL (3-6%)")
+    return True, None
+
+
+def v17_apply_gc3_funding(funding, base_score, sym):
+    """
+    GC#3: FUNDING REGIME (bonus <0%, reject >=5%)
+    Returns: (adjusted_score, pass, reason)
+    """
+    if not CONFIG.get("v17_gc3_enabled", False):
+        return base_score, True, None
+    
+    score = base_score
+    
+    # Reject extreme
+    if funding >= CONFIG["v17_funding_reject"]:
+        return score, False, f"v17_gc3_extreme:{funding*100:.3f}%"
+    
+    # Contrarian bonus
+    if funding < 0:
+        bonus = CONFIG["v17_funding_bonus"]
+        score += bonus
+        log.info(f"✅ {sym} FUNDING CONTRARIAN {funding*100:.4f}% → +{bonus}")
+    # Crowded penalty
+    elif funding > CONFIG["v17_funding_penalty_thresh"]:
+        penalty = CONFIG["v17_funding_penalty"]
+        score += penalty
+        log.warning(f"⚠️ {sym} FUNDING CROWDED {funding*100:.4f}% → {penalty}")
+    
+    return score, True, None
+
+
+def v17_filter_gc4_catd(cat_d, sym):
+    """
+    GC#4: CAT-D PRECISION ZONE (30-42, reject 20-30 trap!)
+    Returns: (pass, reason)
+    """
+    if not CONFIG.get("v17_gc4_enabled", False):
+        return True, None
+    
+    trap_min, trap_max = CONFIG["v17_catd_trap_min"], CONFIG["v17_catd_trap_max"]
+    min_val, max_val = CONFIG["v17_catd_min"], CONFIG["v17_catd_max"]
+    
+    # TRAP ZONE rejection (CRITICAL!)
+    if trap_min <= cat_d < trap_max:
+        return False, f"v17_gc4_trap:{cat_d}∈[{trap_min},{trap_max})"
+    
+    if cat_d < min_val:
+        return False, f"v17_gc4_low:{cat_d}<{min_val}"
+    
+    if min_val <= cat_d <= max_val:
+        log.info(f"✅ {sym} CAT-D {cat_d} PRECISION ZONE (30-42)")
+    return True, None
+
+
+def v17_check_gc7_confluence(active_count, sym):
+    """
+    GC#7: ANTI-PERFECT CONFLUENCE (reject 4/4)
+    Returns: (pass, reason)
+    """
+    if not CONFIG.get("v17_gc7_enabled", False):
+        return True, None
+    
+    max_cats = CONFIG["v17_confluence_max"]
+    
+    if active_count == 4:
+        return False, "v17_gc7_perfect_4/4"
+    if active_count > max_cats:
+        return False, f"v17_gc7_exceed:{active_count}>{max_cats}"
+    
+    if active_count == max_cats:
+        log.info(f"✅ {sym} CONFLUENCE OPTIMAL: {active_count}/4")
+    return True, None
+
+
+def v17_filter_tier2(tier2, sym):
+    """
+    v17 ADDITIONAL FIX: T2 threshold & middle zone
+    Returns: (pass, reason)
+    """
+    if not CONFIG.get("v17_tier2_reject_middle", False):
+        return True, None
+    
+    mid_min, mid_max = CONFIG["v17_tier2_middle_min"], CONFIG["v17_tier2_middle_max"]
+    min_threshold = CONFIG["v17_tier2_min"]
+    
+    # Middle zone trap
+    if mid_min <= tier2 < mid_max:
+        return False, f"v17_t2_middle:{tier2}∈[{mid_min},{mid_max})"
+    
+    if tier2 >= mid_min and tier2 < min_threshold:
+        return False, f"v17_t2_low:{tier2}<{min_threshold}"
+    
+    return True, None
+
+
+def v17_velocity_decision(r1h, r2h, sym):
+    """
+    GC#5: MOMENTUM VELOCITY CHECK (decision tree jam 2)
+    Returns: decision_code
+    """
+    if not CONFIG.get("v17_gc5_enabled", False):
+        return "DISABLED"
+    
+    velocity = r2h - r1h
+    log.info(f"📊 {sym} VELOCITY: r1h={r1h:+.2f}% r2h={r2h:+.2f}% vel={velocity:+.2f}%/h")
+    
+    accel = CONFIG["v17_velocity_accel"]
+    decel = CONFIG["v17_velocity_decel"]
+    
+    if velocity >= accel:
+        log.info(f"✅ {sym} ACCEL → HOLD+MOVE_SL_BE")
+        return "HOLD_MOVE_SL_BE"
+    elif velocity >= 1.0:
+        return "HOLD_FULL"
+    elif velocity >= -1.0:
+        return "WAIT_JAM3"
+    elif velocity >= decel:
+        log.warning(f"⚠️ {sym} DECEL → CUT_30")
+        return "CUT_30"
+    else:
+        log.error(f"❌ {sym} STRONG_DECEL → CUT_70")
+        return "CUT_70"
+
+
+
+
 def main():
     log.info("═" * 70)
     log.info(f"  PRE-PUMP SCANNER v{VERSION}")
@@ -2639,6 +2938,26 @@ def main():
 
     log.info(f"  Phase1 passed: {len(candidates_phase1)} candidates")
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # [v17-GC#1] CHG_24H SWEET SPOT FILTER
+    # Filter BEFORE Coinalyze to save API calls
+    # Data: 15-20% HIT 35%, <12% or >22% rejected
+    # ══════════════════════════════════════════════════════════════════════════
+    if CONFIG.get("v17_gc1_enabled", False):
+        log.info(f"[v17-GC#1] Applying CHG_24H sweet spot filter...")
+        filtered_gc1 = []
+        for sym_gc1, p1sc, cndls, tckr in candidates_phase1:
+            chg24_gc1 = float(tckr.get("change24h", 0)) * 100
+            pass_gc1, reason_gc1 = v17_filter_gc1_chg24h(chg24_gc1, sym_gc1)
+            if not pass_gc1:
+                log.info(f"[v17-GC#1] {sym_gc1} REJECTED: {reason_gc1}")
+                continue
+            filtered_gc1.append((sym_gc1, p1sc, cndls, tckr))
+        
+        rejected_count = len(candidates_phase1) - len(filtered_gc1)
+        candidates_phase1 = filtered_gc1
+        log.info(f"[v17-GC#1] After filter: {len(candidates_phase1)} candidates (rejected {rejected_count})")
+
     if not candidates_phase1:
         log.info("No candidates passed phase1 filter.")
         return 0
@@ -2684,6 +3003,17 @@ def main():
                 chg_2h=chg_2h,             # [SPRINT1-FIX-D]
                 clz=clz_data.get(sym, ClzData()),
             )
+
+
+        # ══════════════════════════════════════════════════════════════════════
+        # [v17-GC#2] CHG_1H LATE ENTRY GATE
+        # Optimal: 3-6% (HIT 37%), Reject: >=8% (late entry, HIT 33%)
+        # ══════════════════════════════════════════════════════════════════════
+        pass_gc2, reason_gc2 = v17_filter_gc2_chg1h(coin_data.chg_1h, sym)
+        if not pass_gc2:
+            log.info(f"[v17-GC#2] {sym} REJECTED: {reason_gc2}")
+            continue
+
 
             result = final_score_coin(coin_data, p1_score)
             if result:
