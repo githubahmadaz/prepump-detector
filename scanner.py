@@ -204,47 +204,26 @@ CONFIG: Dict = {
     "cont_min_cat_d":    20,   # CONTINUATION: minimum CAT-D score (D<20 = 0% HIT di data)
 
     # ── [SPRINT3-v16.4] Data-driven fixes ────────────────────────────────────
-    # [S3-FIX-2] Volume kompensasi: coin < $2M wajib T2>=20 dan chg_24h>=12%
-    # Basis: coin $1M-$2M HIT 26% > coin $2M-$5M HIT 12%. Tapi perlu filter kuat.
     "low_vol_threshold":      2_000_000,   # batas volume untuk filter kompensasi
     "low_vol_t2_min":              20,     # T2 minimum jika vol < $2M
     "low_vol_chg24h_min":          12.0,   # chg_24h minimum jika vol < $2M
 
-    # [S3-FIX-3] chg_24h sweet spot bonus: 15-20% = 52% HIT rate (vs 20% avg)
-    # Bonus mendorong sinyal di sweet spot ke atas threshold
     "chg24h_sweetspot_min":        15.0,
     "chg24h_sweetspot_max":        20.0,
     "chg24h_sweetspot_bonus":      10,     # +10 poin jika chg_24h ∈ [15-20%]
 
-    # [S3-FIX-5] EARLY wajib D >= 20 (sama dengan CONTINUATION)
-    # Basis: batch 16-17 Apr — THETAUSDT D=15 = MISS, semua HIT15 D>=22
     "early_min_cat_d":             20,
 
-    # [S3-FIX-6] CONTINUATION hard reject chg_1h terlalu negatif
-    # ARKMUSDT chg_1h=-12.7% lolos karena tidak ada lower bound
-    # Coin yang dump besar dalam 1h bukan setup entry valid
     "cont_min_chg1h":              -8.0,   # CONTINUATION: chg_1h tidak boleh < -8%
 
-    # ── [SPRINT4-v16.5] Telegram gate: 3 pola winrate tinggi ─────────────────
-    # Filter KHUSUS untuk pengiriman Telegram. Sinyal lain tetap discan & disimpan
-    # ke DB untuk continuous learning, tapi tidak menimbulkan alert.
-    #
-    # Basis data 142 sinyal (11-18 Apr 2026):
-    #   P1: CONT + T2>=40 + c1h>=3% + D>=25  → 12 sinyal, HIT 50%, SL 17%
-    #   P2: CONT + T2>=40 + vol>=$5M         →  9 sinyal, HIT 44%, SL  0%
-    #   P3: CONT + T2>=40 + D>=30            → 14 sinyal, HIT 43%, SL  7%
-    #   Gabungan (match >=1): 21 sinyal, HIT 38%, SL 10% (baseline: HIT 19%)
-    #   Per hari: ~2.6 sinyal (sustainable untuk eksekusi manual)
-    "winrate_gate_enabled":        True,   # master switch (False = kirim semua)
-    "winrate_gate_min_patterns":   1,      # minimal berapa pola harus match
-    # Pola 1: momentum + microstructure
+    # ── [SPRINT4-v16.5] Telegram gate ─────────────────────────────────────────
+    "winrate_gate_enabled":        True,
+    "winrate_gate_min_patterns":   1,
     "winrate_p1_min_t2":           40,
     "winrate_p1_min_c1h":          3.0,
     "winrate_p1_min_d":            25,
-    # Pola 2: likuiditas tinggi
     "winrate_p2_min_t2":           40,
     "winrate_p2_min_vol":          5_000_000,
-    # Pola 3: struktur teknikal kuat
     "winrate_p3_min_t2":           40,
     "winrate_p3_min_d":            30,
     
@@ -252,24 +231,14 @@ CONFIG: Dict = {
     # [v17.1-VALIDATED] CORRECTIONS Based on 293,974 Data Points
     # ══════════════════════════════════════════════════════════════════════════
     
-    # ── [CORRECTION #1] CHG_1H MOMENTUM BONUS (Reversed from v17)
-    # Validation: chg_1h >=8% HIT 50.6% vs 3-6% HIT 23.5% (Delta -27.1%)
-    # Conclusion: Late entry with strong momentum is BETTER
-    # Action: BONUS for 8-15%, reject only >20%
     "v17_1_chg1h_momentum_bonus_enabled": True,
-    "v17_1_chg1h_momentum_min": 8.0,      # Bonus starts
-    "v17_1_chg1h_momentum_max": 15.0,     # Bonus ends
-    "v17_1_chg1h_momentum_bonus": 25,     # Score bonus
-    "v17_1_chg1h_reject_threshold": 20.0, # Reject only if too late
+    "v17_1_chg1h_momentum_min": 8.0,
+    "v17_1_chg1h_momentum_max": 15.0,
+    "v17_1_chg1h_momentum_bonus": 25,
+    "v17_1_chg1h_reject_threshold": 20.0,
     
-    # ── [CORRECTION #2] FUNDING FILTER REMOVED (Reversed from v17)
-    # Validation: funding >=5% HIT 49.1% vs <0% HIT 15.5% (Delta -33.7%)
-    # Conclusion: High funding = trending market, not trap
-    # Action: NO funding-based filters (keep for logging only)
-    "v17_1_funding_filter_enabled": False,  # Disabled based on validation
+    "v17_1_funding_filter_enabled": False,
     
-    # ── [CONFIRMED] CHG_24H SWEET SPOT (Keep from v17)
-    # Validation: 15-20% HIT 29.7% vs outside HIT 4.7% (Delta +25.0%)
     "v17_1_chg24h_filter_enabled": True,
     "v17_1_chg24h_min": 12.0,
     "v17_1_chg24h_max": 22.0,
@@ -277,56 +246,40 @@ CONFIG: Dict = {
     "v17_1_chg24h_sweet_max": 20.0,
     "v17_1_chg24h_sweet_bonus": 15,
     
-    # ── [CONFIRMED] EARLY PHASE REJECTION (Keep from v17)
-    # Validation: EARLY 4.2% vs CONT 28.3% (Delta +24.1%)
     "v17_1_early_phase_reject": True,
     
-    # ── [CONFIRMED] CAT-D TRAP ZONE (Keep from v17)
-    # Validation: Trap 20-30 HIT 0.5%, SL 9.7% vs Optimal 30-42 HIT 2.0%
     "v17_1_catd_trap_reject": True,
     "v17_1_catd_trap_min": 20,
     "v17_1_catd_trap_max": 30,
     
-    # ── [CONFIRMED] VELOCITY DISCRIMINATOR (Keep from v17)
-    # Validation: Delta r2h +2.64% (matches audit +2.62% perfectly!)
-    # Threshold: >=+3%/h HIT 45.5%, <=-3%/h SL 84.8%
     "v17_1_velocity_check_enabled": True,
     "v17_1_velocity_accel_threshold": 3.0,
     "v17_1_velocity_decel_threshold": -3.0,
     
-    # ── [CONFIRMED] TIER 2 THRESHOLD (Keep from v17)
     "v17_1_tier2_min": 42,
     "v17_1_tier2_reject_middle": True,
     "v17_1_tier2_middle_min": 20,
     "v17_1_tier2_middle_max": 39,
-
-
 
     # ── Phase 2: Final scoring thresholds ────────────────────────────────────
     "alert_threshold_early":        95,
     "alert_threshold_continuation": 100,
     "alert_threshold_reversal":     80,
 
-    # ── [FIX-1] Confluence thresholds (4 kategori independen) ────────────────
-    "confluence_cat_a_min":  20,   # Derivatives: ls+fund+pred+oi
-    "confluence_cat_b_min":  1,   # Order Flow:  bv+accum
-    "confluence_cat_c_min":   8,   # Price RS:    rs_sc (score_btc_decoupling)
-    "confluence_cat_d_min":   8,   # Microstructure: vret+wick+decel
-    "confluence_min_cats":    3,   # minimal 3 dari 4 kategori harus aktif
-    # Exception: 2 kategori boleh lolos HANYA jika cat_a sangat kuat
+    "confluence_cat_a_min":  20,
+    "confluence_cat_b_min":  1,
+    "confluence_cat_c_min":   8,
+    "confluence_cat_d_min":   8,
+    "confluence_min_cats":    3,
     "confluence_strong2cat_a_min":  50,
     "confluence_strong2cat_b_min":  25,
 
-    # ── [FIX-2] BTC Decoupling weights (gantikan btc_context_bonus) ──────────
-    "rs_btc_weight":   20,   # maks rs_sc dari score_btc_decoupling (CAT-C)
+    "rs_btc_weight":   20,
 
-    # ── Velocity gates ────────────────────────────────────────────────────────
     "velocity_gates": {
-        "chg_1h_max_early":        4.0,   # [SPRINT2-FIX-2] turun dari 5.0% → 4.0%
-                                           # MAGMAUSDT c1h=+9.6%, LABUSDT c1h=+6.9% keduanya miss
-                                           # c1h tinggi = momentum sudah exhausted saat entry
+        "chg_1h_max_early":        4.0,
         "chg_1h_max_continuation": 12.0,
-        "chg_2h_max_continuation": 8.0,   # [SPRINT1-FIX-D]
+        "chg_2h_max_continuation": 8.0,
         "chg_4h_max":              15.0,
         "chg_24h_max_early":       15.0,
         "chg_24h_max_continuation":30.0,
@@ -335,14 +288,9 @@ CONFIG: Dict = {
         "chg_4h_min_early":        -3.0,
     },
 
-    # ── [SPRINT1-FIX-B] Phase 1 pre-filter chg_24h ───────────────────────────
-    # Field 'change24h' dari Bitget USDT-Futures ticker adalah decimal multiplier.
-    # Contoh: DASHUSDT change24h=0.34513 → +34.5%, RAVEUSDT=2.13526 → +213.5%
-    # Terverifikasi 10 April 2026 dari API response langsung.
-    "phase1_prefilter_chg24h_max":  35.0,   # >35% → pasti PARABOLIC, skip Coinalyze
-    "phase1_prefilter_chg24h_min": -20.0,   # <-20% → distribusi berat, skip
+    "phase1_prefilter_chg24h_max":  35.0,
+    "phase1_prefilter_chg24h_min": -20.0,
 
-    # ── Cooldown & limits ─────────────────────────────────────────────────────
     "cooldown_hours":        18,
     "max_alerts_per_scan":    5,
     "candle_limit_bitget":  100,
@@ -352,27 +300,23 @@ CONFIG: Dict = {
     "coinalyze_rate_limit_wait": 1.2,
     "btc_dump_threshold":    -3.0,
 
-    # ── Database ──────────────────────────────────────────────────────────────
    "history_db": os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner_history.db"),
 
-    # ── Entry / SL / TP ───────────────────────────────────────────────────────
     "sl_mult_volatile":  3.0,
     "sl_mult_normal":    2.0,
     "sl_mult_quiet":     1.5,
-    "sl_min_pct":        4.0,    # SL minimum 4% dari entry (noise protection)
-    "sl_max_pct":       12.0,    # SL maksimum 12% dari entry
-    "tp1_rr_min":        1.8,    # TP1 minimal R/R 1.8x
-    "tp2_rr_min":        3.0,    # TP2 minimal R/R 3.0x
-    "tp3_rr_min":        5.0,    # TP3 minimal R/R 5.0x
+    "sl_min_pct":        4.0,
+    "sl_max_pct":       12.0,
+    "tp1_rr_min":        1.8,
+    "tp2_rr_min":        3.0,
+    "tp3_rr_min":        5.0,
     "min_rr_ratio":      1.8,
 
-    # ── Position sizing ───────────────────────────────────────────────────────
     "account_balance":     10_000.0,
     "risk_per_trade_pct":      1.0,
     "max_position_pct":        5.0,
     "max_leverage":           10,
 
-    # ── Blacklists ────────────────────────────────────────────────────────────
     "stock_token_blacklist": [
         "HOODUSDT","COINUSDT","MSTRUSDT","NVDAUSDT","AAPLUSDT",
         "GOOGLUSDT","AMZNUSDT","METAUSDT","QQQUSDT","BZUSDT",
@@ -424,9 +368,9 @@ class CoinData:
     funding:     float
     candles:     List[dict]
     btc_chg_1h:  float = 0.0
-    btc_chg_4h:  float = 0.0    # [FIX-2] tambah 4h BTC untuk regime detection
+    btc_chg_4h:  float = 0.0
     btc_chg_24h: float = 0.0
-    chg_2h:      float = 0.0    # [SPRINT1-FIX-D] untuk deteksi pump yang sudah terjadi
+    chg_2h:      float = 0.0
     clz:         ClzData = field(default_factory=ClzData)
 
 
@@ -486,7 +430,6 @@ class ScoreResult:
 def init_db():
     conn = sqlite3.connect(CONFIG["history_db"])
     c = conn.cursor()
-    # Tabel alerts (cooldown)
     c.execute("""
         CREATE TABLE IF NOT EXISTS alerts (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -501,7 +444,6 @@ def init_db():
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_alert_sym ON alerts(symbol, alerted_at DESC)")
 
-    # [SPRINT1] Tabel signal_outcomes — precision tracking + outcome analysis
     c.execute("""
         CREATE TABLE IF NOT EXISTS signal_outcomes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -546,13 +488,11 @@ def init_db():
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_so_sym ON signal_outcomes(symbol, alerted_at DESC)")
 
-    # ── [SPRINT2] Migration: tambah kolom baru jika DB lama belum punya ─────────
-    # Aman dijalankan berulang — ALTER TABLE hanya jalan jika kolom belum ada
     existing_cols = {row[1] for row in c.execute("PRAGMA table_info(signal_outcomes)")}
     new_cols = {
         "return_6h":    "REAL DEFAULT NULL",
         "return_12h":   "REAL DEFAULT NULL",
-        "return_24h":   "REAL DEFAULT NULL",   # [S3-FIX-7] window diperlebar ke 24h
+        "return_24h":   "REAL DEFAULT NULL",
         "hit_10pct":    "INTEGER DEFAULT NULL",
         "hit_sl":       "INTEGER DEFAULT NULL",
         "sl_price":     "REAL DEFAULT NULL",
@@ -572,10 +512,6 @@ def init_db():
             c.execute(f"ALTER TABLE signal_outcomes ADD COLUMN {col} {typedef}")
             log.info(f"  DB migration: tambah kolom {col}")
 
-    # ── [SPRINT2] Tag data lama sebagai v1 (window 3h) ───────────────────────────
-    # Data lama checked=1 menggunakan window 3h. Tag dengan data_version='v1_3h'
-    # agar bisa dipisah dari data baru (v2_12h) dalam analisis precision.
-    # TIDAK dihapus — tetap valid untuk analisis return_3h.
     c.execute("""
         UPDATE signal_outcomes
         SET data_version='v1_3h'
@@ -609,7 +545,6 @@ def set_alert(symbol: str, score: int, phase: str, entry_price: float,
             "INSERT INTO alerts (symbol, alerted_at, score, phase, entry_price) VALUES (?,?,?,?,?)",
             (symbol, int(time.time()), score, phase, entry_price)
         )
-        # [SPRINT1] Simpan ke signal_outcomes dengan semua field untuk outcome_analyzer
         if result is not None:
             cf  = result.confluence
             btc = result.components.get("btc_regime", "UNKNOWN")
@@ -644,17 +579,11 @@ def set_alert(symbol: str, score: int, phase: str, entry_price: float,
 
 
 def check_and_update_outcomes(tickers: Dict[str, dict]):
-    """
-    [BONUS] Feedback loop: cek sinyal yang sudah >1 jam.
-    Update return_1h, return_2h, return_3h, hit_15pct.
-    Dipanggil setiap scan untuk membangun data precision empiris.
-    """
     try:
         conn = sqlite3.connect(CONFIG["history_db"])
         c = conn.cursor()
         now = int(time.time())
 
-        # Update tabel alerts (untuk cooldown tracking)
         c.execute(
             "SELECT id, symbol, entry_price FROM alerts WHERE outcome_checked=0 AND alerted_at <= ?",
             (now - 3600,)
@@ -672,10 +601,6 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 (round(out, 4), row_id)
             )
 
-        # [S3-FIX-7] Update signal_outcomes — expanded windows 1h/2h/3h/6h/12h/24h.
-        # Justifikasi: batch 16-17 Apr 2026 — 57% HIT15 baru tercapai setelah jam ke-12.
-        # Window 12h meremehkan precision aktual scanner. Diperlebar ke 24h.
-        # data_version baru: 'v3_24h'. Data v1_3h dan v2_12h tetap valid untuk analisis.
         c.execute(
             """SELECT id, symbol, alerted_at, entry_price,
                       return_1h, return_2h, return_3h, return_6h, return_12h, return_24h
@@ -703,23 +628,16 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("UPDATE signal_outcomes SET return_2h=? WHERE id=?", (ret, row_id))
                 r2h = ret
 
-                # ══════════════════════════════════════════════════════════════
-                # [v17-GC#5] MOMENTUM VELOCITY CHECK (JAM 2)
-                # Decision tree: velocity = r2h - r1h
-                # Impact: Prevents 41% SL with real-time decisions!
-                # ══════════════════════════════════════════════════════════════
                 if r1h is not None and CONFIG.get("v17_gc5_enabled", False):
                     decision_gc5 = v17_velocity_decision(r1h, r2h, symbol)
                     velocity_gc5 = r2h - r1h
                     
-                    # Store velocity decision
                     c.execute("""
                         UPDATE signal_outcomes
                         SET velocity_1h_to_2h = ?, velocity_decision = ?
                         WHERE id = ?
                     """, (velocity_gc5, decision_gc5, row_id))
                     
-                    # Send Telegram alert for CUT decisions
                     if decision_gc5 in ["CUT_30", "CUT_70"]:
                         cut_pct = 30 if decision_gc5 == "CUT_30" else 70
                         alert_msg = (
@@ -732,7 +650,6 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                         send_telegram(alert_msg)
                         log.warning(f"[v17-GC#5] {symbol} VELOCITY ALERT: {decision_gc5}")
 
-
             if elapsed >= 3 * 3600 and r3h is None:
                 c.execute("UPDATE signal_outcomes SET return_3h=? WHERE id=?", (ret, row_id))
                 r3h = ret
@@ -741,9 +658,6 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("UPDATE signal_outcomes SET return_6h=? WHERE id=?", (ret, row_id))
                 r6h = ret
 
-            # [FIX] Update max_return di SETIAP scan — bukan hanya saat close.
-            # Menangkap high tertinggi kapanpun dalam window 24h.
-            # hit_15pct dan hit_10pct dihitung dari max_return, bukan ret@close.
             c.execute("SELECT max_return FROM signal_outcomes WHERE id=?", (row_id,))
             cur_max = c.fetchone()[0]
             new_max = max(x for x in [cur_max, ret] if x is not None)
@@ -751,20 +665,16 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
                 c.execute("UPDATE signal_outcomes SET max_return=? WHERE id=?",
                           (round(new_max, 2), row_id))
 
-            # Window 12h: record return_12h (intermediate checkpoint, tidak close)
             if elapsed >= 12 * 3600 and r12h is None:
                 c.execute("UPDATE signal_outcomes SET return_12h=? WHERE id=?", (ret, row_id))
                 r12h = ret
 
-            # [S3-FIX-7] Window 24h: close sinyal
-            # Basis: 57% HIT15 baru tercapai setelah jam ke-12 → window 12h terlalu pendek
             if elapsed >= 24 * 3600 and r24h is None:
                 c.execute("SELECT sl_price, max_return FROM signal_outcomes WHERE id=?", (row_id,))
                 sl_row    = c.fetchone()
                 sl_price  = sl_row[0] if sl_row else None
                 final_max = sl_row[1] if sl_row and sl_row[1] is not None else ret
 
-                # Hit berbasis max_return dalam 24h, bukan harga di jam ke-24
                 hit_15 = 1 if final_max >= 15.0 else 0
                 hit_10 = 1 if final_max >= 10.0 else 0
                 hit_sl = 1 if (sl_price and cur <= sl_price) else 0
@@ -779,7 +689,7 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
 
         if updated > 0:
             conn.commit()
-            log.info(f"  Outcome tracking: {updated} sinyal di-close (24h window)")  # [S3-FIX-7]
+            log.info(f"  Outcome tracking: {updated} sinyal di-close (24h window)")
         conn.commit()
         conn.close()
     except Exception as e:
@@ -787,7 +697,6 @@ def check_and_update_outcomes(tickers: Dict[str, dict]):
 
 
 def get_precision_report() -> Dict[str, Any]:
-    """[BONUS] Laporan precision harian per phase dan BTC regime."""
     try:
         conn = sqlite3.connect(CONFIG["history_db"])
         c = conn.cursor()
@@ -805,7 +714,6 @@ def get_precision_report() -> Dict[str, Any]:
                     "total": total,
                     "hits": hits or 0,
                 }
-        # Overall
         c.execute("SELECT COUNT(*), SUM(hit_15pct) FROM signal_outcomes WHERE checked=1")
         row = c.fetchone()
         if row and row[0]:
@@ -829,10 +737,6 @@ def _mean(vals: List[float]) -> float:
 
 
 def get_chg_from_candles(candles: List[dict], n_hours: int) -> float:
-    """
-    NO-LOOKAHEAD: menggunakan candles[-2] (last closed) sebagai 'now'.
-    candles[-1] adalah candle yang masih berjalan (live), tidak digunakan.
-    """
     if len(candles) < n_hours + 2:
         return 0.0
     now_price = candles[-2]["close"]
@@ -866,7 +770,6 @@ def is_valid_symbol(symbol: str) -> bool:
 
 
 def make_signal_fingerprint(components: dict) -> str:
-    """Hash top-3 catalyst untuk identifikasi duplikat."""
     keys = ["ls_sc", "bv_sc", "fund_sc", "rs_sc", "oi_sc", "liq_sc"]
     top = sorted([(k, components.get(k, 0)) for k in keys], key=lambda x: -x[1])[:3]
     raw = "|".join(f"{k}={v}" for k, v in top)
@@ -877,7 +780,6 @@ def make_signal_fingerprint(components: dict) -> str:
 #  📐  ATR & TECHNICAL INDICATORS
 # ══════════════════════════════════════════════════════════════════════════════
 def calc_atr(candles: List[dict], n: int = 14) -> float:
-    """ATR sebagai persentase harga (decimal, bukan persen)."""
     trs = []
     for i in range(2, min(n + 2, len(candles))):
         c  = candles[-i]
@@ -975,10 +877,6 @@ def calc_momentum_decel(candles: List[dict]) -> float:
 
 
 def get_volatility_regime(candles: List[dict]) -> str:
-    """
-    NO-LOOKAHEAD: hanya data t-n. Latensi ~0.5ms.
-    Bandingkan ATR 24h vs ATR 7d untuk deteksi regime volatilitas.
-    """
     if len(candles) < 30:
         return "NORMAL"
     atr_24h = calc_atr(candles[-26:], 14)
@@ -997,19 +895,6 @@ def get_volatility_regime(candles: List[dict]) -> str:
 #  [FIX-1] ✅ CHECK CONFLUENCE — DOKTRIN KONVERGENSI
 # ══════════════════════════════════════════════════════════════════════════════
 def check_confluence(scores: Dict[str, int]) -> ConfluenceResult:
-    """
-    NO-LOOKAHEAD: hanya menggunakan skor yang sudah dihitung dari data t-n.
-    Latensi: ~0.01ms.
-
-    4 Kategori Independen:
-    CAT-A: Derivatives Positioning  → ls_sc + fund_sc + pred_sc + oi_sc
-    CAT-B: Order Flow / Tape        → bv_sc + accum_sc
-    CAT-C: Price Relative Strength  → rs_sc (dari score_btc_decoupling)
-    CAT-D: Microstructure           → vret_sc + wick_sc + decel_sc
-
-    Note: liq_sc SENGAJA dimasukkan CAT-A bukan kategori sendiri karena
-    liquidation adalah turunan dari derivatives positioning (r > 0.75).
-    """
     cat_a = (scores.get("ls_sc", 0) + scores.get("fund_sc", 0)
              + scores.get("pred_sc", 0) + scores.get("oi_sc", 0)
              + scores.get("liq_sc", 0))
@@ -1025,11 +910,6 @@ def check_confluence(scores: Dict[str, int]) -> ConfluenceResult:
 
     active_count = sum([a_ok, b_ok, c_ok, d_ok])
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # [v17-GC#7] ANTI-PERFECT CONFLUENCE CHECK
-    # Data: 4/4 confluence = 8 signals, 0 HIT, 100% MISS!
-    # Too perfect = already front-run. Optimal: 2-3 active categories
-    # ══════════════════════════════════════════════════════════════════════════
     if CONFIG.get("v17_gc7_enabled", False):
         pass_gc7, reason_gc7 = v17_check_gc7_confluence(active_count, f"A{cat_a}_B{cat_b}_C{cat_c}_D{cat_d}")
         if not pass_gc7:
@@ -1069,11 +949,6 @@ def check_confluence(scores: Dict[str, int]) -> ConfluenceResult:
 # ══════════════════════════════════════════════════════════════════════════════
 def phase1_bitget_filter(candles: List[dict], vol_24h: float,
                           chg_1h: float = 0.0, chg_4h: float = 0.0) -> Tuple[int, Dict[str, Any]]:
-    """
-    [FIX-3] Tambah parameter chg_1h dan chg_4h untuk momentum_score.
-    Coin yang sedang distribusi aktif (chg_4h sangat negatif) mendapat penalty.
-    Ini membedakan volatilitas umum dari pre-pump setup.
-    """
     if len(candles) < 30:
         return 0, {"error": "insufficient_candles"}
     if vol_24h < CONFIG["phase1_min_volume_usd"]:
@@ -1083,7 +958,6 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
     details = {}
     score = 0
 
-    # 1. ATR
     atr = calc_atr(candles[-22:], 14) * 100
     thr = CONFIG["phase1_atr_thresholds"]
     if atr >= thr[0]:
@@ -1096,7 +970,6 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
         details["atr_score"] = 0
     details["atr_pct"] = round(atr, 2)
 
-    # 2. Range
     range_pct = calc_range_pct(candles)
     thr_r = CONFIG["phase1_range_thresholds"]
     if range_pct >= thr_r[0]:
@@ -1109,7 +982,6 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
         details["range_score"] = 0
     details["range_pct"] = round(range_pct, 2)
 
-    # 3. BBW
     bbw = calc_bbw(candles)
     thr_b = CONFIG["phase1_bbw_thresholds"]
     if bbw >= thr_b[0]:
@@ -1122,7 +994,6 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
         details["bbw_score"] = 0
     details["bbw"] = round(bbw, 4)
 
-    # 4. Lower wick
     wick = calc_lower_wick_pct(candles)
     thr_w = CONFIG["phase1_wick_thresholds"]
     if wick >= thr_w[0]:
@@ -1135,7 +1006,6 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
         details["wick_score"] = 0
     details["wick_pct"] = round(wick, 2)
 
-    # 5. Support & compression
     price = candles[-2]["close"]
     dist, inside = calc_dist_to_support(candles, price)
     details["dist_to_support"]   = round(dist, 2)
@@ -1152,7 +1022,6 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
     else:
         details["support_score"] = 0
 
-    # 6. Momentum deceleration
     decel = calc_momentum_decel(candles)
     thr_d = CONFIG["phase1_decel_thresholds"]
     if decel <= thr_d[0]:
@@ -1165,22 +1034,14 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
         details["decel_score"] = 0
     details["decel"] = round(decel, 3)
 
-    # [FIX-3] 7. Momentum pre-pump context
-    # Logika: pre-pump setup valid hanya jika momentum tidak sedang aktif distribusi.
-    # chg_4h positif atau flat ringan = setup valid
-    # chg_4h sangat negatif = distribusi aktif = penalty
     momentum_score = 0
     if chg_4h >= 1.0 and chg_1h >= 0:
-        # 4h positif, 1h positif/flat = momentum naik terkontrol (ideal pre-pump)
         momentum_score = cfg["momentum"]
     elif chg_4h >= -1.0 and chg_1h >= -1.0:
-        # Flat/sideways = akumulasi potensial
         momentum_score = int(cfg["momentum"] * 0.6)
     elif chg_4h >= -3.0:
-        # Sedikit negatif = masih bisa recovery
         momentum_score = int(cfg["momentum"] * 0.2)
     else:
-        # chg_4h < -3% = distribusi aktif, beri penalty
         momentum_score = -10
     score += momentum_score
     details["momentum_score"] = momentum_score
@@ -1190,7 +1051,6 @@ def phase1_bitget_filter(candles: List[dict], vol_24h: float,
     score = max(0, score)
     details["total_score"] = score
 
-    # Compound check: penalty jika wick & decel keduanya absen
     if details.get("wick_score", 0) == 0 and details.get("decel_score", 0) == 0:
         score = max(0, score - 15)
         details["compound_penalty"] = -15
@@ -1485,18 +1345,13 @@ class CoinalyzeClient:
 #  📐  S/R LEVEL ENGINE (1H candles)
 # ══════════════════════════════════════════════════════════════════════════════
 def find_sr_levels(candles: List[dict], price: float) -> Dict[str, Any]:
-    """
-    Deteksi swing high/low + cluster scoring.
-    swing_radius dikurangi ke 1 (dari 2) agar lebih sensitif di altcoin yang
-    sering punya swing asimetris. Masih butuh konfirmasi kiri+kanan.
-    """
     window = min(96, len(candles) - 1)
     if window < 10 or price <= 0:
         return {"supports": [], "resistances": []}
 
-    candles_w   = candles[-window - 1: -1]   # closed candles only
+    candles_w   = candles[-window - 1: -1]
     n_candles   = len(candles_w)
-    swing_radius = 1    # [FIX-5] turun dari 2→1: lebih sensitif untuk altcoin
+    swing_radius = 1
     tol          = 0.015
 
     swing_lows:  List[Tuple[float, int]] = []
@@ -1561,8 +1416,6 @@ def find_sr_levels(candles: List[dict], price: float) -> Dict[str, Any]:
 
     supports    = [s for s in all_sup if s["price"] < price * 0.997 and s["price"] > price * 0.80]
     resistances = [r for r in all_res if r["price"] > price * 1.003 and r["price"] < price * 1.50]
-
-    # Selalu sort resistances by price ascending agar TP1 < TP2 < TP3
     resistances = sorted(resistances, key=lambda x: x["price"])
 
     return {
@@ -1574,25 +1427,12 @@ def find_sr_levels(candles: List[dict], price: float) -> Dict[str, Any]:
 
 
 def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
-    """
-    [FIX-5] SL/TP berbasis S/R 1H terkuat dengan fallback adaptif.
-
-    Perubahan dari v15.6:
-    - swing_radius dikurangi 2→1 di find_sr_levels → lebih banyak levels ditemukan
-    - TP fallback: bukan lagi fixed %, tapi RR adaptif berdasarkan ATR dan vol regime
-      TP1_fallback = price + risk * tp1_rr_min (1.8x)
-      TP2_fallback = price + risk * tp2_rr_min (3.0x)
-      TP3_fallback = price + risk * tp3_rr_min (5.0x)
-    - SL minimum 4%, maksimum 12% dari entry
-    - Adaptive ATR multiplier berdasarkan volatility regime
-    """
     if len(candles) < 16:
         return None
 
     atr    = calc_atr(candles, 14)
     regime = get_volatility_regime(candles)
 
-    # Adaptive SL multiplier berdasarkan regime
     _regime_offset = {"HIGH": 0.5, "NORMAL": 0.0, "LOW": -0.3}
     sl_mult = CONFIG["sl_mult_normal"] + _regime_offset.get(regime, 0.0)
     sl_mult = max(CONFIG["sl_mult_quiet"], sl_mult)
@@ -1603,7 +1443,6 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
 
     method = "sr"
 
-    # ── SL: support terkuat terdekat + buffer ─────────────────────────────────
     sl = None
     sl_source = "none"
     for sup in sorted(supports, key=lambda x: price - x["price"]):
@@ -1614,7 +1453,6 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
             sl_source = f"S@{sup['price']:.6g}(t{sup['touches']})"
             break
 
-    # SL minimum 4% (noise protection)
     if sl is not None:
         sl_pct_check = (price - sl) / price * 100
         if sl_pct_check < CONFIG["sl_min_pct"]:
@@ -1627,12 +1465,10 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
                 sl        = price * (1 - CONFIG["sl_min_pct"] / 100)
                 sl_source = f"FLOOR_{CONFIG['sl_min_pct']}%"
 
-    # Fallback: tidak ada support ditemukan
     if sl is None or sl <= 0 or sl >= price:
         sl        = price * (1 - atr * sl_mult)
         sl_source = f"ATR×{sl_mult:.1f}({regime})"
         method    = "atr_fallback"
-        # Pastikan minimum
         if (price - sl) / price * 100 < CONFIG["sl_min_pct"]:
             sl = price * (1 - CONFIG["sl_min_pct"] / 100)
             sl_source = f"FLOOR_{CONFIG['sl_min_pct']}%"
@@ -1642,11 +1478,7 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
     if risk <= 0:
         return None
 
-    # ── TP: S/R-based + fallback RR adaptif (bukan fixed %) ──────────────────
-    # [FIX-5] Fallback tidak lagi pakai tp1_pct/tp2_pct fixed.
-    # Sekarang pakai RR multiplier dari CONFIG sehingga proporsional terhadap risk.
     tp_source = []
-
     if resis:
         tp1 = resis[0]["price"]
         tp_source.append(f"R1@{resis[0]['price']:.6g}(t{resis[0]['touches']})")
@@ -1671,23 +1503,18 @@ def calc_entry_targets(candles: List[dict], price: float) -> Optional[dict]:
         tp3 = max(tp3, tp2 * 1.03)
         tp_source.append(f"RR{CONFIG['tp3_rr_min']}x_fallback")
 
-    # Pastikan TP1 >= RR minimum floor
     tp1_floor = price + risk * CONFIG["min_rr_ratio"]
     if tp1 < tp1_floor:
         tp1 = tp1_floor
 
-    # Pastikan ascending: TP1 < TP2 < TP3
     if tp2 <= tp1: tp2 = tp1 * 1.05
     if tp3 <= tp2: tp3 = tp2 * 1.05
 
-    # Cap: tidak lebih dari 2x harga entry
     tp2 = min(tp2, price * 2.0)
     tp3 = min(tp3, price * 2.0)
 
-    # RR check
     rr1 = (tp1 - price) / risk
     if rr1 < CONFIG["min_rr_ratio"] - 1e-9:
-        log.debug(f"  calc_entry_targets: RR1={rr1:.2f} < {CONFIG['min_rr_ratio']} — skip")
         return None
 
     tp1_pct = (tp1 / price - 1) * 100
@@ -1745,7 +1572,6 @@ def calc_position_size(entry: float, sl: float, atr: float) -> dict:
 #  🏆  PHASE 2: SCORING FUNCTIONS (Coinalyze)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── CAT-A: Derivatives Positioning ────────────────────────────────────────────
 def score_long_short_ratio(clz: ClzData) -> Tuple[int, dict]:
     if not clz.has_ls or len(clz.ls_ratio) < 4:
         return 0, {"source": "no_ls_data"}
@@ -1769,19 +1595,10 @@ def score_long_short_ratio(clz: ClzData) -> Tuple[int, dict]:
     return min(score, 35), {"long_ratio": round(current_long, 4), "signals": sigs}
 
 
-# ── CAT-B: Order Flow — [FIX-4] window diperlebar 6h → 12h ───────────────────
-# [S3-FIX-4] Weight CAT-B diturunkan 30→15.
-# Data counter-intuitive: B=0 HIT 29%, B=15 HIT 9% (102 sinyal).
-# B tinggi = whale sudah masuk sebelumnya = entry terlambat, bukan pre-pump.
-# Max score dikurangi: 25→12 (strong), 15→8 (net buying), cap 30→15.
 def score_buy_volume_ratio(clz: ClzData) -> Tuple[int, dict]:
     if not clz.has_ohlcv:
         return 0, {"source": "no_ohlcv"}
     hist = clz.ohlcv
-    # [FIX-4] hist[-13:-1] = 12 jam terakhir (dari hist[-7:-1] = 6 jam)
-    # Whale accumulation biasanya berlangsung 12-48 jam sebelum pump.
-    # 6 jam terlalu pendek untuk menangkap pola ini.
-    # NO-LOOKAHEAD: hist[-1] adalah candle live, tidak dipakai.
     recent = [c for c in hist[-13:-1] if float(c.get("v", 0) or 0) > 0]
     if len(recent) < 3:
         return 0, {"source": "insufficient_ohlcv"}
@@ -1795,7 +1612,6 @@ def score_buy_volume_ratio(clz: ClzData) -> Tuple[int, dict]:
         return 0, {"source": "no_bv_data"}
     avg_bv = _mean(bv_ratios)
     score, sigs = 0, []
-    # [S3-FIX-4] Score dikurangi: strong 25→12, net buying 15→8, cap 30→15
     if avg_bv >= 0.62:
         score += 12; sigs.append(f"STRONG_BUY bv/v={avg_bv:.1%}")
     elif avg_bv >= 0.55:
@@ -1805,37 +1621,13 @@ def score_buy_volume_ratio(clz: ClzData) -> Tuple[int, dict]:
 
 
 def score_funding_trend(clz: ClzData, current_funding: float) -> Tuple[int, dict]:
-    """
-    [SPRINT1-FIX-C] Funding scoring dengan outlier guard.
-
-    LOGIKA DASAR: funding negatif = short lebih banyak bayar ke long = bullish bias.
-    Tapi ada batas: funding < -0.15% adalah ANOMALI (bukan pre-squeeze normal).
-    Contoh: SIRENUSDT funding=-0.3036% mendapat score 40 (max) di v16.0 → false positive.
-
-    Di level -0.15% ke bawah, lebih mungkin terjadi:
-    - Distribusi aktif oleh market maker
-    - Token bermasalah (delisting risk)
-    - Extreme manipulation — bukan setup pump yang sehat
-
-    FIX: Tambah outlier threshold. Funding < -0.15% → score 0 + flag ANOMALY.
-    Range valid untuk bullish signal: -0.001 s/d -0.0015 (normal short squeeze setup).
-    """
     score, sigs = 0, []
-
-    # [FIX-C] Guard: funding ekstrem anomali bukan sinyal bullish
-    # [SPRINT2-FIX-1] Turunkan dari -0.0015 (-0.15%) ke -0.0010 (-0.10%).
-    # Justifikasi dari 26 sinyal:
-    #   SIRENUSDT fund=-0.132% → r3h=-6.3% (miss)
-    #   ENJUSDT   fund=-0.203% → r3h=-0.8% (miss)
-    #   DASHUSDT  fund=-0.217% → r3h=+0.9% (miss)
-    # Semua sinyal dengan funding < -0.10% underperform. Threshold lama -0.15% terlalu longgar.
-    OUTLIER_THRESHOLD = -0.0010   # -0.10% — di bawah ini = anomali, skip scoring
+    OUTLIER_THRESHOLD = -0.0010
     if current_funding < OUTLIER_THRESHOLD:
         sigs.append(f"FUNDING_ANOMALY={current_funding*100:.4f}% (terlalu negatif, bukan pre-squeeze)")
         return 0, {"current": round(current_funding * 100, 5), "signals": sigs,
                    "warning": "OUTLIER_SKIPPED"}
 
-    # Range normal: scoring bertingkat
     if current_funding < -0.0010:
         score += 15; sigs.append(f"EXTREME_FUNDING={current_funding*100:.4f}%")
     elif current_funding < -0.0005:
@@ -1849,7 +1641,6 @@ def score_funding_trend(clz: ClzData, current_funding: float) -> Tuple[int, dict
             recent = _mean(rates[-3:])
             prev   = _mean(rates[-6:-3])
             drift  = recent - prev
-            # [FIX-C] Guard drift juga: jika funding history rata-rata sangat negatif, skip
             if _mean(rates[-3:]) < OUTLIER_THRESHOLD:
                 sigs.append(f"FUNDING_HIST_ANOMALY avg={_mean(rates[-3:])*100:.4f}%")
             elif drift < -0.0003:
@@ -1916,32 +1707,22 @@ def score_liquidations(clz: ClzData) -> Tuple[int, dict]:
     return min(score, 20), {"short_liq_z": round(z, 2), "signals": sigs}
 
 
-# ── CAT-C: Price Relative Strength — [FIX-2] gantikan double-count ────────────
 def score_btc_decoupling(candles_coin: List[dict],
                           btc_chg_1h: float,
                           btc_chg_4h: float) -> Tuple[int, dict]:
-    """
-    [FIX-2] Menggantikan detect_rs_btc() + btc_context_bonus sekaligus.
-    Satu fungsi = satu fenomena = satu skor. Tidak ada double-count.
-
-    Regime-aware: decoupling saat BTC DUMP jauh lebih bermakna dari saat NEUTRAL.
-    NO-LOOKAHEAD: candles[-2] adalah last closed candle.
-    Latensi: ~0.1ms (hanya arithmetic).
-    """
-    w = CONFIG["rs_btc_weight"]   # maks 20
+    w = CONFIG["rs_btc_weight"]
 
     coin_chg_1h = get_chg_from_candles(candles_coin, 1)
     coin_chg_4h = get_chg_from_candles(candles_coin, 4)
     rs_1h = coin_chg_1h - btc_chg_1h
     rs_4h = coin_chg_4h - btc_chg_4h
 
-    # Klasifikasi regime BTC dari 2 timeframe
     if btc_chg_4h < -3.0 and btc_chg_1h < -1.0:
         btc_regime = "DUMP"
     elif btc_chg_4h < -1.5 or btc_chg_1h < -0.8:
         btc_regime = "BEARISH"
     elif btc_chg_4h > 2.0:
-        btc_regime = "BULLISH"   # decoupling tidak bermakna saat BTC rally
+        btc_regime = "BULLISH"
     else:
         btc_regime = "NEUTRAL"
 
@@ -1968,7 +1749,6 @@ def score_btc_decoupling(candles_coin: List[dict],
         elif rs_1h > 1.5:
             score = int(w * 0.33); pattern = "OUTPERFORMING"
             sigs.append(f"OUTPERFORMING rs1h={rs_1h:+.1f}%")
-    # BULLISH: score = 0, decoupling tidak bermakna
 
     return min(score, w), {
         "rs_1h":       round(rs_1h, 2),
@@ -1980,28 +1760,10 @@ def score_btc_decoupling(candles_coin: List[dict],
     }
 
 
-# ── CAT-D: Microstructure / Context ───────────────────────────────────────────
 def detect_sudden_volume_spike(candles: List[dict]) -> Tuple[bool, dict]:
-    """
-    [SPRINT2-FIX-4] Deteksi volume spike mendadak dalam 1-2 candle terakhir.
-
-    Tujuan: Filter sinyal 'no_momentum' — kondisi pre-pump valid tapi tidak ada
-    trigger yang memulai gerakan. Dari 26 sinyal, 8 kasus max_return < 2%
-    (tidak ada momentum sama sekali). Volume spike adalah proxy paling reliable
-    untuk konfirmasi bahwa aksi harga sedang dimulai.
-
-    Return: (is_spike, detail_dict)
-    is_spike=True → ada volume spike, sinyal lebih valid
-    is_spike=False → tidak ada spike (bukan rejection, hanya informasi)
-
-    Dipanggil di final_score_coin untuk log dan scoring, BUKAN sebagai hard gate.
-    Hard gate akan dipertimbangkan setelah 50+ sinyal dengan window baru terkumpul.
-    NO-LOOKAHEAD: hanya pakai candles[-2] dan candles[-3].
-    """
     if len(candles) < 20:
         return False, {"pattern": "INSUFFICIENT_DATA"}
 
-    # Rata-rata volume 20 candle sebelum 2 candle terakhir (baseline)
     baseline = [c.get("volume_usd", 0) for c in candles[-22:-2] if c.get("volume_usd", 0) > 0]
     if not baseline:
         return False, {"pattern": "NO_BASELINE"}
@@ -2010,16 +1772,12 @@ def detect_sudden_volume_spike(candles: List[dict]) -> Tuple[bool, dict]:
     if avg_baseline <= 0:
         return False, {"pattern": "ZERO_BASELINE"}
 
-    # Cek candle terakhir yang closed (candles[-2])
     vol_last   = candles[-2].get("volume_usd", 0)
     vol_prev   = candles[-3].get("volume_usd", 0) if len(candles) >= 3 else 0
 
     ratio_last = vol_last / avg_baseline if avg_baseline > 0 else 0
     ratio_prev = vol_prev / avg_baseline if avg_baseline > 0 else 0
 
-    # Spike jika candle terakhir atau sebelumnya >= 3x baseline
-    # 3x dipilih karena lebih konservatif dari 2x — hindari false positive
-    # saat market jam ramai (TOD effect sudah di-handle di detect_volume_dryup)
     spike_ratio = max(ratio_last, ratio_prev)
 
     if spike_ratio >= 5.0:
@@ -2144,10 +1902,6 @@ def detect_dist_to_support(candles: List[dict], price: float) -> Tuple[int, dict
 #  🎯  PHASE CLASSIFIER
 # ══════════════════════════════════════════════════════════════════════════════
 def classify_phase(chg_24h: float) -> PhaseInfo:
-    """
-    [v17.1] Phase classification dengan EARLY rejection
-    Validation: EARLY 4.2% vs CONTINUATION 28.3% (Delta +24.1%)
-    """
     if chg_24h < -8.0:
         return PhaseInfo("DOWNTREND",    5, "Deep downtrend",        "HIGH")
     elif chg_24h < -3.0:
@@ -2158,8 +1912,6 @@ def classify_phase(chg_24h: float) -> PhaseInfo:
         base = max(20, 40 - int(chg_24h - 12) * 2)
         return PhaseInfo("CONTINUATION",base,"Momentum continuation","MEDIUM")
     else:
-        # [v17.1-CONFIRMED] EARLY phase rejection
-        # Validation: EARLY HIT 4.2% vs CONT HIT 28.3%
         if CONFIG.get("v17_1_early_phase_reject", False):
             return PhaseInfo("REJECTED_EARLY", 0, "Early phase (rejected)", "REJECTED")
         else:
@@ -2179,22 +1931,16 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     # [v17-GC#6] Skip REJECTED_EARLY phase
     if phase.phase == "REJECTED_EARLY":
         log.info(f"[v17-GC#6] {sym} REJECTED: EARLY phase (HIT 9%)")
-        continue
+        return None
 
     log.info(f"  → {sym}: phase={phase.phase} chg_24h={data.chg_24h:+.1f}% "
              f"chg_1h={data.chg_1h:+.1f}% chg_2h={data.chg_2h:+.1f}% chg_4h={data.chg_4h:+.1f}%")
 
-    # ── [S3-FIX-1] Phase filter — DOWNTREND dan WEAK dimatikan permanent ────────
-    # Data 102 sinyal: DOWNTREND 0% HIT / 57% SL, WEAK 0% HIT / 0% SL.
-    # Tidak ada nilai operasional mempertahankan kedua phase ini.
-    # Data v3_24h akan dikumpulkan tanpa kedua phase ini. Reaktivasi hanya jika
-    # ada bukti baru dari minimum 20 sinyal dengan HIT rate > 20%.
     if phase.phase in ["DOWNTREND", "WEAK"]:
         log.info(f"  ✗ {sym} SKIP: phase={phase.phase} "
                  f"(dimatikan permanent — 0% HIT dari 102 sinyal historis)")
         return None
 
-    # ── Velocity gates ────────────────────────────────────────────────────────
     is_cont = (phase.phase == "CONTINUATION")
     vg      = CONFIG["velocity_gates"]
     if phase.phase not in ["DOWNTREND", "WEAK"]:
@@ -2209,18 +1955,12 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         if data.chg_4h > vg["chg_4h_max"]:
             log.info(f"  ✗ {sym} REJECT: chg_4h={data.chg_4h:+.1f}% > {vg['chg_4h_max']}"); return None
 
-        # [SPRINT1-FIX-D] Gate chg_2h untuk CONTINUATION — cegah entry terlambat.
         if is_cont:
             chg_2h_max = vg.get("chg_2h_max_continuation", 8.0)
             if data.chg_2h > chg_2h_max:
                 log.info(f"  ✗ {sym} [CONTINUATION] REJECT: chg_2h={data.chg_2h:+.1f}% > {chg_2h_max}% (pump sudah terjadi)")
                 return None
 
-        # [S3-FIX-6] Hard reject CONTINUATION dengan dump besar dalam 1h
-        # Root cause ARKMUSDT: chg_1h=-12.7% lolos karena tidak ada lower bound.
-        # Coin yang dump besar dalam 1h bukan setup entry valid.
-        # Threshold -8%: cukup ketat untuk menolak dump (-12%), tidak membuang
-        # sinyal valid yang hanya pullback normal (-3% to -7%).
         if is_cont:
             cont_min_1h = CONFIG.get("cont_min_chg1h", -8.0)
             if data.chg_1h < cont_min_1h:
@@ -2233,33 +1973,24 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         if phase.phase == "EARLY" and data.chg_4h < vg.get("chg_4h_min_early", -3.0):
             log.info(f"  ✗ {sym} [EARLY] REJECT: chg_4h={data.chg_4h:+.1f}%"); return None
     else:
-        # Dead code — DOWNTREND/WEAK sudah dimatikan di atas, tapi dijaga untuk keamanan
         if data.chg_1h < vg.get("chg_1h_min_reversal", -3.0):
             log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_1h={data.chg_1h:+.1f}%"); return None
 
-
     # ══════════════════════════════════════════════════════════════════════════
     # [v17.1 CORRECTION #1] CHG_1H MOMENTUM BONUS
-    # Validation: chg_1h 8-15% HIT 50.6% vs 3-6% HIT 23.5% (Delta -27.1%)
-    # REVERSED! Late entry with strong momentum is BETTER
     # ══════════════════════════════════════════════════════════════════════════
+    chg1h_bonus = 0
     if CONFIG.get("v17_1_chg1h_momentum_bonus_enabled", False):
         chg_1h = data.chg_1h
-        
-        # Strong momentum bonus (8-15%)
         if CONFIG["v17_1_chg1h_momentum_min"] <= chg_1h <= CONFIG["v17_1_chg1h_momentum_max"]:
-            momentum_bonus = CONFIG["v17_1_chg1h_momentum_bonus"]
+            chg1h_bonus = CONFIG["v17_1_chg1h_momentum_bonus"]
             log.info(f"  [v17.1] {sym} CHG_1H MOMENTUM BONUS: "
-                    f"{chg_1h:.1f}% → +{momentum_bonus} points (strong trend continuation)")
-            # Will be added to total_score later
-        
-        # Only reject if too late (>20%)
+                     f"{chg_1h:.1f}% → +{chg1h_bonus} points (strong trend continuation)")
         elif chg_1h > CONFIG["v17_1_chg1h_reject_threshold"]:
             log.info(f"  ✗ {sym} [v17.1] REJECTED: CHG_1H too late "
-                    f"({chg_1h:.1f}% > {CONFIG['v17_1_chg1h_reject_threshold']}%)")
+                     f"({chg_1h:.1f}% > {CONFIG['v17_1_chg1h_reject_threshold']}%)")
             return None
 
-    # ── CAT-A: Derivatives ────────────────────────────────────────────────────
     ls_sc,   ls_d   = score_long_short_ratio(data.clz)
     bv_sc,   bv_d   = score_buy_volume_ratio(data.clz)
     fund_sc, fund_d = score_funding_trend(data.clz, data.funding)
@@ -2267,17 +1998,11 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     oi_sc,   oi_d   = score_oi_buildup(data.clz)
     liq_sc,  liq_d  = score_liquidations(data.clz)
 
-    # [S3-FIX-8] Hard reject funding anomali — DIKONFIRMASI DAN DIPERKUAT
-    # Threshold -0.10% sudah ada dan berjalan. Tambah log eksplisit untuk borderline.
-    # ARKMUSDT fund=-0.0767% TIDAK di-reject funding (di atas threshold -0.10%).
-    # ARKMUSDT di-reject oleh S3-FIX-6 (chg_1h=-12.7% < -8%).
-    # SIRENUSDT fund=-0.0988% lolos karena -0.0988 > -0.10 — ini benar (pump +156%).
-    # Jangan ubah threshold -0.10% tanpa 50+ sinyal funding negatif baru.
     if fund_d.get("warning") == "OUTLIER_SKIPPED":
         log.info(f"  ✗ {sym} REJECT: funding={data.funding*100:.4f}% anomali "
                  f"(< -0.10%) — hard reject [S3-FIX-8 confirmed]")
         return None
-    # Borderline warning: -0.07% to -0.10% (lolos tapi dicatat)
+
     if data.funding < -0.0007:
         log.info(f"  ⚠ {sym} funding borderline: {data.funding*100:.4f}% "
                  f"(< -0.07% tapi > -0.10% — lolos, pantau outcome)")
@@ -2285,24 +2010,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     tier1 = ls_sc + bv_sc + fund_sc + pred_sc
     tier2 = oi_sc + liq_sc
 
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ══════════════════════════════════════════════════════════════════════════
-# [v17.1 CORRECTION #2] FUNDING FILTER REMOVED (Reversed Finding)
-# Validation: funding >=5% HIT 49.1% vs <0% HIT 15.5% (Delta -33.7%)
-# REVERSED! High funding indicates trend, not trap
-# Action: NO funding-based filters (keep for logging only)
-# ══════════════════════════════════════════════════════════════════════════
-# DISABLED - Funding filter was incorrect based on 293k data point validation
-# High funding rate indicates trending market strength, not crowding/trap
-# Keep funding data for logging and analysis, but no score adjustments
-
-# [S3-FIX-2] Volume kompensasi filter untuk coin < $2M
-    # Data: coin $1M-$2M HIT 26% — lebih baik dari $2M-$5M (12%).
-    # Coin vol < $2M tetap bisa lolos HANYA jika memenuhi kedua syarat kompensasi:
-    #   1. T2 >= 20: OI buildup terkonfirmasi (smart money akumulasi)
-    #   2. chg_24h >= 12%: momentum sudah mulai, bukan coin diam
-    # Coin vol < $2M tanpa OI buildup = high risk tanpa institutional backing.
+    # Volume kompensasi
     if data.vol_24h < CONFIG.get("low_vol_threshold", 2_000_000):
         low_t2_min   = CONFIG.get("low_vol_t2_min", 20)
         low_c24_min  = CONFIG.get("low_vol_chg24h_min", 12.0)
@@ -2317,30 +2025,22 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         log.info(f"  ✓ {sym} vol kompensasi OK: ${data.vol_24h/1e6:.1f}M < $2M "
                  f"tapi T2={tier2} >= {low_t2_min} AND chg_24h={data.chg_24h:+.1f}% >= {low_c24_min}%")
 
-    # ── CAT-B: Order Flow (dari tier3) ───────────────────────────────────────
     bbw_sc,   _ = detect_bbw_squeeze(data.candles)
     dry_sc,   _ = detect_volume_dryup(data.candles)
     accum_sc, _ = detect_accumulation(data.candles)
 
-    # Volume mutual exclusivity
     if dry_sc > 0 and accum_sc > 0:
         if accum_sc >= dry_sc: dry_sc = 0
         else:                  accum_sc = 0
 
-    # ── CAT-C: Price RS — [FIX-2] satu fungsi, satu skor ─────────────────────
     rs_sc, rs_d = score_btc_decoupling(data.candles, data.btc_chg_1h, data.btc_chg_4h)
     btc_regime  = rs_d.get("btc_regime", "NEUTRAL")
 
-    # ── CAT-D: Microstructure ─────────────────────────────────────────────────
     vret_sc,  _ = detect_volatility_return(data.candles)
     wick_sc,  _ = detect_lower_wick(data.candles)
     decel_sc, _ = detect_momentum_decel(data.candles)
     supp_sc,  _ = detect_dist_to_support(data.candles, data.price)
 
-    # [SPRINT2-FIX-4] Volume spike detector — informational + bonus score
-    # Bukan hard gate (butuh lebih banyak data untuk justifikasi rejection).
-    # Kontribusi ke tier3: +5 jika spike moderate, +8 jika strong, +12 jika massive.
-    # Ini mendorong sinyal dengan momentum nyata ke atas threshold.
     vol_spike, spike_d = detect_sudden_volume_spike(data.candles)
     spike_sc = 0
     if spike_d.get("pattern") == "MASSIVE_SPIKE": spike_sc = 12
@@ -2349,7 +2049,6 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
 
     tier3 = bbw_sc + dry_sc + accum_sc + vret_sc + rs_sc + wick_sc + decel_sc + supp_sc + spike_sc
 
-    # ── [FIX-1] CHECK CONFLUENCE — wajib sebelum threshold check ─────────────
     cf = check_confluence({
         "ls_sc":    ls_sc,
         "fund_sc":  fund_sc,
@@ -2370,27 +2069,18 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
                  f"(A={cf.cat_a} B={cf.cat_b} C={cf.cat_c} D={cf.cat_d})")
         return None
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # [v17-GC#4] CAT-D PRECISION ZONE FILTER
-    # Optimal: 30-42, CRITICAL REJECT: trap zone 20-30 (SL 50%!)
-    # ══════════════════════════════════════════════════════════════════════════
     if CONFIG.get("v17_gc4_enabled", False):
         pass_gc4, reason_gc4 = v17_filter_gc4_catd(cf.cat_d, sym)
         if not pass_gc4:
             log.info(f"[v17-GC#4] {sym} REJECTED: {reason_gc4} (CAT-D={cf.cat_d})")
             return None
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # [v17] T2 THRESHOLD & MIDDLE ZONE REJECTION
-    # Data: T2 20-39 HIT 14% (trap!), T2 >=42 optimal
-    # ══════════════════════════════════════════════════════════════════════════
     if CONFIG.get("v17_tier2_reject_middle", False):
         pass_t2, reason_t2 = v17_filter_tier2(tier2, sym)
         if not pass_t2:
             log.info(f"[v17-T2] {sym} REJECTED: {reason_t2} (T2={tier2})")
             return None
 
-    # ── Coinalyze availability checks ─────────────────────────────────────────
     has_any_clz = (data.clz.has_ohlcv or data.clz.has_oi or data.clz.has_liq
                    or data.clz.has_ls or data.clz.has_funding_hist)
 
@@ -2405,12 +2095,9 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     if has_any_clz and pred_sc > 0 and tier1_hard == 0 and tier2 < 20:
         log.info(f"  ✗ {sym} REJECT: tier1 hanya dari pred_funding tanpa sinyal keras"); return None
 
-    # ── Total score ───────────────────────────────────────────────────────────
     phase_score = phase.base_score
-    # [FIX-2] btc_context_bonus DIHAPUS. Semua BTC RS sudah masuk rs_sc (CAT-C).
     total = phase_score + tier1 + tier2 + tier3
 
-    # ── Time-of-day discount (01:00-05:00 UTC = low liquidity) ────────────────
     hour = get_hour_utc()
     tod_discount = 0
     if 1 <= hour <= 5:
@@ -2418,9 +2105,6 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         total = max(0, total - tod_discount)
         log.info(f"  ⏰ {sym} TOD discount -{tod_discount} (hour={hour} UTC low-liquidity)")
 
-    # [S3-FIX-3] chg_24h sweet spot bonus: 15-20% menghasilkan HIT 52% (vs avg 20%)
-    # Data: 21 sinyal chg_24h 15-20% → HIT 52%, avg_max +23.6%
-    # Bonus +10 mendorong sinyal di sweet spot ke atas threshold tanpa override filter.
     chg24_bonus = 0
     sp_min = CONFIG.get("chg24h_sweetspot_min", 15.0)
     sp_max = CONFIG.get("chg24h_sweetspot_max", 20.0)
@@ -2430,42 +2114,23 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         total += chg24_bonus
         log.info(f"  ★ {sym} sweet spot bonus +{chg24_bonus} "
                  f"(chg_24h={data.chg_24h:+.1f}% ∈ [{sp_min}-{sp_max}%] — HIT rate 52% dari data)")
-    
-    # ══════════════════════════════════════════════════════════════════════════
-    # [v17.1] CHG_1H MOMENTUM BONUS - Add to total score
-    # Validation: chg_1h 8-15% HIT 50.6% vs 3-6% HIT 23.5%
-    # ══════════════════════════════════════════════════════════════════════════
-    chg1h_bonus = 0
-    if CONFIG.get("v17_1_chg1h_momentum_bonus_enabled", False):
-        chg_1h = data.chg_1h
-        if CONFIG["v17_1_chg1h_momentum_min"] <= chg_1h <= CONFIG["v17_1_chg1h_momentum_max"]:
-            chg1h_bonus = CONFIG["v17_1_chg1h_momentum_bonus"]
-            total += chg1h_bonus
-            log.info(f"  ⚡ {sym} CHG_1H momentum bonus +{chg1h_bonus} "
-                     f"(chg_1h={chg_1h:+.1f}% → strong trend continuation, HIT 50.6% from validation)")
 
+    total += chg1h_bonus
+    if chg1h_bonus:
+        log.info(f"  ⚡ {sym} CHG_1H momentum bonus +{chg1h_bonus} "
+                 f"(chg_1h={data.chg_1h:+.1f}% → strong trend continuation, HIT 50.6% from validation)")
 
-    # ── [SPRINT2-v16.3] Quality filter berbasis data 51 sinyal ───────────────
-    #
-    # FILTER A — EARLY wajib C > 0
-    # Data: EARLY tanpa C → 0% HIT dari 19 sinyal. Dengan C → 19% HIT.
-    # C = BTC decoupling (rs_sc). Tanpa ini, coin bergerak murni ikut BTC.
     if phase.phase == "EARLY":
         if rs_sc == 0:
             log.info(f"  ✗ {sym} [EARLY] REJECT: C=0 (BTC decoupling tidak aktif — 0% HIT dari data)")
             return None
 
-    # FILTER B — CONTINUATION wajib D >= 20
-    # Data: CONTINUATION D<20 → semua MISS. D>=20 → HIT rate 35-39%.
     if phase.phase == "CONTINUATION":
         cat_d_cont = (vret_sc + wick_sc + decel_sc + supp_sc + spike_sc + bbw_sc)
         if cat_d_cont < CONFIG.get("cont_min_cat_d", 20):
             log.info(f"  ✗ {sym} [CONTINUATION] REJECT: D={cat_d_cont} < 20 (microstructure lemah)")
             return None
 
-    # [S3-FIX-5] FILTER C — EARLY wajib D >= 20 (sama dengan CONTINUATION)
-    # Data batch 16-17 Apr: THETAUSDT D=15 = MISS. Semua HIT15 di batch itu D>=22.
-    # Konsisten dengan CONTINUATION filter yang sudah terbukti dari data.
     if phase.phase == "EARLY":
         cat_d_early = (vret_sc + wick_sc + decel_sc + supp_sc + spike_sc + bbw_sc)
         if cat_d_early < CONFIG.get("early_min_cat_d", 20):
@@ -2473,15 +2138,12 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
                      f"(microstructure lemah — semua HIT15 D>=22 dari data batch)")
             return None
 
-    # ── Threshold check ───────────────────────────────────────────────────────
-    # [S3-FIX-1] Dead code DOWNTREND/WEAK dihapus dari threshold check.
-    # Kedua phase sudah di-reject di atas. Tidak akan sampai di sini.
     if phase.phase == "EARLY":
         threshold = CONFIG["alert_threshold_early"]
     elif phase.phase == "CONTINUATION":
         threshold = CONFIG["alert_threshold_continuation"]
     else:
-        threshold = 110   # PARABOLIC atau fase tidak dikenal
+        threshold = 110
 
     log.info(
         f"  ~ {sym} [{phase.phase}] score={total} vs threshold={threshold} | "
@@ -2497,7 +2159,6 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     if total < threshold:
         log.info(f"  ✗ {sym} REJECT: total={total} < threshold={threshold}"); return None
 
-    # ── Pump type classification ───────────────────────────────────────────────
     pump_types = []
     if ls_sc >= 8 and (liq_sc >= 6 or fund_sc >= 7):
         pump_types.append(PumpType("E", "Short Squeeze",
@@ -2515,21 +2176,19 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     if not pump_types:
         pump_types.append(PumpType("T", "Technical Setup", min(total, 100), []))
 
-    # ── Entry / SL / TP ───────────────────────────────────────────────────────
     entry_data = calc_entry_targets(data.candles, data.price)
     if entry_data is None:
         log.info(f"  ✗ {sym} REJECT: calc_entry_targets=None (RR tidak terpenuhi)"); return None
 
     position = calc_position_size(entry_data["entry"], entry_data["sl"], entry_data["atr_decimal"])
 
-    # Komponen skor untuk logging & fingerprint
     score_components = {
         "ls_sc": ls_sc, "bv_sc": bv_sc, "fund_sc": fund_sc,
         "pred_sc": pred_sc, "oi_sc": oi_sc, "liq_sc": liq_sc,
         "rs_sc": rs_sc, "vret_sc": vret_sc, "wick_sc": wick_sc,
         "decel_sc": decel_sc, "supp_sc": supp_sc,
-        "chg24_bonus": chg24_bonus,   # [S3-FIX-3] sweet spot bonus
-        "chg1h_bonus": chg1h_bonus,   # [v17.1] momentum bonus
+        "chg24_bonus": chg24_bonus,
+        "chg1h_bonus": chg1h_bonus,
     }
     fingerprint = make_signal_fingerprint(score_components)
 
@@ -2569,46 +2228,30 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
 #  🎯  [SPRINT4-v16.5] WINRATE GATE — 3 POLA FILTER UNTUK TELEGRAM
 # ══════════════════════════════════════════════════════════════════════════════
 def evaluate_winrate_patterns(result: "ScoreResult") -> Tuple[List[str], str]:
-    """
-    Evaluasi ScoreResult terhadap 3 pola winrate tinggi dari riset 142 sinyal.
-    Return: (list_pola_cocok, label_kombinasi)
-
-    Basis data (11-18 Apr 2026):
-      P1: CONT + T2>=40 + c1h>=3% + D>=25  →  HIT 50%
-      P2: CONT + T2>=40 + vol>=$5M         →  HIT 44%
-      P3: CONT + T2>=40 + D>=30            →  HIT 43%
-      Gabungan: HIT 38% SL 10% (baseline: HIT 19% SL 21%)
-    """
     matched: List[str] = []
 
-    # Prerequisite semua pola: CONTINUATION + T2 minimum
     if result.phase != "CONTINUATION":
         return matched, "NOT_CONTINUATION"
 
-    # Ambil nilai T2 dan D dari result.components
     t2 = int(result.components.get("tier2_clz", 0) or 0)
     cf = result.confluence
     cat_d = int(cf.cat_d or 0)
     c1h = float(result.chg_1h or 0)
     vol = float(result.vol_24h or 0)
 
-    # Pola 1: momentum + microstructure
     if (t2 >= CONFIG["winrate_p1_min_t2"]
             and c1h >= CONFIG["winrate_p1_min_c1h"]
             and cat_d >= CONFIG["winrate_p1_min_d"]):
         matched.append("P1")
 
-    # Pola 2: likuiditas tinggi
     if (t2 >= CONFIG["winrate_p2_min_t2"]
             and vol >= CONFIG["winrate_p2_min_vol"]):
         matched.append("P2")
 
-    # Pola 3: struktur teknikal kuat
     if (t2 >= CONFIG["winrate_p3_min_t2"]
             and cat_d >= CONFIG["winrate_p3_min_d"]):
         matched.append("P3")
 
-    # Label kombinasi berdasarkan jumlah pola yang cocok
     n = len(matched)
     if n == 0:
         label = "NO_PATTERN"
@@ -2616,20 +2259,15 @@ def evaluate_winrate_patterns(result: "ScoreResult") -> Tuple[List[str], str]:
         label = matched[0]
     elif n == 2:
         label = "+".join(matched) + " (STRONG)"
-    else:  # n == 3
+    else:
         label = "P1+P2+P3 (ELITE)"
 
     return matched, label
 
 
 def passes_winrate_gate(result: "ScoreResult") -> Tuple[bool, List[str], str]:
-    """
-    Return: (lolos_gate, list_pola_match, label).
-    Jika gate disabled, selalu return True dengan label info.
-    """
     matched, label = evaluate_winrate_patterns(result)
 
-    # Master switch: kalau disabled, semua sinyal lolos (untuk debug/override)
     if not CONFIG.get("winrate_gate_enabled", True):
         return True, matched, f"GATE_DISABLED|{label}"
 
@@ -2674,7 +2312,6 @@ def build_alert(r: ScoreResult, rank: int) -> str:
     btc_reg  = r.components.get("btc_regime", "?")
     rs_pat   = r.components.get("rs_pattern", "")
 
-    # [S4-FIX-2] Tag pola winrate yang match — bantu user menilai kekuatan sinyal
     _, wp_matched, wp_label = passes_winrate_gate(r)
     wp_tag = f"⭐ Pattern: {wp_label}" if wp_matched else "⚠️ Pattern: NO_MATCH"
 
@@ -2722,17 +2359,10 @@ def build_alert(r: ScoreResult, rank: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  🚀  MAIN SCANNER LOOP
-# ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
 #  [v17] GAME CHANGER FILTER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def v17_filter_gc1_chg24h(chg_24h, sym):
-    """
-    GC#1: CHG_24H SWEET SPOT (12-22%, optimal 15-20%)
-    Returns: (pass, reason)
-    """
     if not CONFIG.get("v17_gc1_enabled", False):
         return True, None
     
@@ -2742,17 +2372,12 @@ def v17_filter_gc1_chg24h(chg_24h, sym):
     if chg_24h > max_val:
         return False, f"v17_gc1_exhaust:{chg_24h:.1f}%>{max_val}"
     
-    # Sweet spot logging
     if CONFIG["v17_chg24h_sweet_min"] <= chg_24h <= CONFIG["v17_chg24h_sweet_max"]:
         log.info(f"✅ {sym} chg_24h {chg_24h:.1f}% IN SWEET SPOT (15-20%)")
     return True, None
 
 
 def v17_filter_gc2_chg1h(chg_1h, sym):
-    """
-    GC#2: CHG_1H LATE ENTRY GATE (3-6%, reject >=8%)
-    Returns: (pass, reason)
-    """
     if not CONFIG.get("v17_gc2_enabled", False):
         return True, None
     
@@ -2770,25 +2395,18 @@ def v17_filter_gc2_chg1h(chg_1h, sym):
 
 
 def v17_apply_gc3_funding(funding, base_score, sym):
-    """
-    GC#3: FUNDING REGIME (bonus <0%, reject >=5%)
-    Returns: (adjusted_score, pass, reason)
-    """
     if not CONFIG.get("v17_gc3_enabled", False):
         return base_score, True, None
     
     score = base_score
     
-    # Reject extreme
     if funding >= CONFIG["v17_funding_reject"]:
         return score, False, f"v17_gc3_extreme:{funding*100:.3f}%"
     
-    # Contrarian bonus
     if funding < 0:
         bonus = CONFIG["v17_funding_bonus"]
         score += bonus
         log.info(f"✅ {sym} FUNDING CONTRARIAN {funding*100:.4f}% → +{bonus}")
-    # Crowded penalty
     elif funding > CONFIG["v17_funding_penalty_thresh"]:
         penalty = CONFIG["v17_funding_penalty"]
         score += penalty
@@ -2798,17 +2416,12 @@ def v17_apply_gc3_funding(funding, base_score, sym):
 
 
 def v17_filter_gc4_catd(cat_d, sym):
-    """
-    GC#4: CAT-D PRECISION ZONE (30-42, reject 20-30 trap!)
-    Returns: (pass, reason)
-    """
     if not CONFIG.get("v17_gc4_enabled", False):
         return True, None
     
     trap_min, trap_max = CONFIG["v17_catd_trap_min"], CONFIG["v17_catd_trap_max"]
     min_val, max_val = CONFIG["v17_catd_min"], CONFIG["v17_catd_max"]
     
-    # TRAP ZONE rejection (CRITICAL!)
     if trap_min <= cat_d < trap_max:
         return False, f"v17_gc4_trap:{cat_d}∈[{trap_min},{trap_max})"
     
@@ -2821,10 +2434,6 @@ def v17_filter_gc4_catd(cat_d, sym):
 
 
 def v17_check_gc7_confluence(active_count, sym):
-    """
-    GC#7: ANTI-PERFECT CONFLUENCE (reject 4/4)
-    Returns: (pass, reason)
-    """
     if not CONFIG.get("v17_gc7_enabled", False):
         return True, None
     
@@ -2841,17 +2450,12 @@ def v17_check_gc7_confluence(active_count, sym):
 
 
 def v17_filter_tier2(tier2, sym):
-    """
-    v17 ADDITIONAL FIX: T2 threshold & middle zone
-    Returns: (pass, reason)
-    """
     if not CONFIG.get("v17_tier2_reject_middle", False):
         return True, None
     
     mid_min, mid_max = CONFIG["v17_tier2_middle_min"], CONFIG["v17_tier2_middle_max"]
     min_threshold = CONFIG["v17_tier2_min"]
     
-    # Middle zone trap
     if mid_min <= tier2 < mid_max:
         return False, f"v17_t2_middle:{tier2}∈[{mid_min},{mid_max})"
     
@@ -2862,10 +2466,6 @@ def v17_filter_tier2(tier2, sym):
 
 
 def v17_velocity_decision(r1h, r2h, sym):
-    """
-    GC#5: MOMENTUM VELOCITY CHECK (decision tree jam 2)
-    Returns: decision_code
-    """
     if not CONFIG.get("v17_gc5_enabled", False):
         return "DISABLED"
     
@@ -2890,8 +2490,9 @@ def v17_velocity_decision(r1h, r2h, sym):
         return "CUT_70"
 
 
-
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  🚀  MAIN SCANNER LOOP
+# ══════════════════════════════════════════════════════════════════════════════
 def main():
     log.info("═" * 70)
     log.info(f"  PRE-PUMP SCANNER v{VERSION}")
@@ -2906,14 +2507,12 @@ def main():
 
     init_db()
 
-    # ── Precision report dari cycle sebelumnya ────────────────────────────────
     pr = get_precision_report()
     if pr:
         log.info("📊 Precision Report (live data):")
         for k, v in sorted(pr.items()):
             log.info(f"   {k}: {v['precision']}% ({v['hits']}/{v['total']})")
 
-    # ── Step 1: Bitget tickers & BTC data ─────────────────────────────────────
     log.info("📊 Fetching Bitget tickers...")
     tickers = BitgetClient.get_tickers()
     if not tickers:
@@ -2926,14 +2525,12 @@ def main():
     btc_candles = BitgetClient.get_candles("BTCUSDT", 30)
     btc_chg_1h = btc_chg_4h = btc_chg_24h = 0.0
 
-    # [FIX-2] BTC realtime: gunakan lastPr ticker vs candles[-2] close
     btc_ticker = tickers.get("BTCUSDT")
     if btc_ticker and len(btc_candles) >= 5:
         btc_current    = float(btc_ticker.get("lastPr", 0) or 0)
         btc_prev_close = btc_candles[-2]["close"]
         if btc_current > 0 and btc_prev_close > 0:
             btc_chg_1h = (btc_current - btc_prev_close) / btc_prev_close * 100
-        # [FIX-2] Tambah btc_chg_4h untuk regime detection di score_btc_decoupling
         btc_4h_close = btc_candles[-5]["close"] if len(btc_candles) >= 5 else btc_prev_close
         if btc_4h_close > 0 and btc_prev_close > 0:
             btc_chg_4h = (btc_prev_close - btc_4h_close) / btc_4h_close * 100
@@ -2945,12 +2542,10 @@ def main():
 
     log.info(f"  BTC 1h: {btc_chg_1h:+.2f}% | BTC 4h: {btc_chg_4h:+.2f}% | BTC 24h: {btc_chg_24h:+.2f}%")
 
-    # BTC circuit breaker
     if btc_chg_1h < CONFIG["btc_dump_threshold"]:
         log.warning(f"⛔ BTC circuit breaker: {btc_chg_1h:+.1f}% — scan paused")
         return 0
 
-    # ── Step 2: Phase 1 — Bitget-only filter ──────────────────────────────────
     log.info("🔍 Phase 1: Bitget-only filtering...")
     candidates_phase1 = []
 
@@ -2973,9 +2568,6 @@ def main():
             if vol_24h < CONFIG["phase1_min_volume_usd"]:
                 continue
 
-            # [SPRINT1-FIX-B] Pre-filter chg_24h dari ticker SEBELUM fetch candles.
-            # 'change24h' = decimal multiplier (0.345 = +34.5%). Terverifikasi dari API.
-            # Fallback eksplisit ke None-check — hindari 'or 0' yang salah tangani 0.0.
             _raw = ticker.get("change24h")
             if _raw is not None:
                 try:
@@ -2986,14 +2578,12 @@ def main():
                         log.debug(f"  {sym}: pre-filter chg_24h={chg_24h_ticker:+.1f}% → skip")
                         continue
                 except (TypeError, ValueError):
-                    pass  # field ada tapi tidak bisa diparse → biarkan lolos, aman
+                    pass
 
-            # Fetch candles SETELAH pre-filter (hemat API call untuk coin yang sudah dibuang)
             candles = BitgetClient.get_candles(sym, CONFIG["candle_limit_bitget"])
             if len(candles) < 30:
                 continue
 
-            # [FIX-3] Hitung chg_1h & chg_4h untuk momentum filter di Phase 1
             chg_1h_p1 = get_chg_from_candles(candles, 1)
             chg_4h_p1 = get_chg_from_candles(candles, 4)
 
@@ -3008,11 +2598,6 @@ def main():
 
     log.info(f"  Phase1 passed: {len(candidates_phase1)} candidates")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # [v17-GC#1] CHG_24H SWEET SPOT FILTER
-    # Filter BEFORE Coinalyze to save API calls
-    # Data: 15-20% HIT 35%, <12% or >22% rejected
-    # ══════════════════════════════════════════════════════════════════════════
     if CONFIG.get("v17_gc1_enabled", False):
         log.info(f"[v17-GC#1] Applying CHG_24H sweet spot filter...")
         filtered_gc1 = []
@@ -3032,19 +2617,16 @@ def main():
         log.info("No candidates passed phase1 filter.")
         return 0
 
-    # ── Step 3: Build Coinalyze maps ──────────────────────────────────────────
     log.info("🗺️  Building Coinalyze maps...")
     clz_client      = CoinalyzeClient(CONFIG["coinalyze_api_key"])
     candidate_symbols = [s for s, _, _, _ in candidates_phase1]
     clz_client.build_symbol_maps(candidate_symbols)
 
-    # ── Step 4: Fetch Coinalyze data ──────────────────────────────────────────
     log.info("📈 Fetching Coinalyze data...")
     now_ts   = int(time.time())
     from_ts  = now_ts - CONFIG["coinalyze_lookback_h"] * 3600
     clz_data = clz_client.fetch_for_symbols(candidate_symbols, from_ts, now_ts)
 
-    # ── Step 5: Phase 2 — Final scoring ───────────────────────────────────────
     log.info("🎯 Phase 2: Final scoring with Confluence check...")
     final_results = []
 
@@ -3055,7 +2637,7 @@ def main():
             chg_24h = get_chg_from_candles(candles, 24)
             chg_1h  = get_chg_from_candles(candles, 1)
             chg_4h  = get_chg_from_candles(candles, 4)
-            chg_2h  = get_chg_from_candles(candles, 2)   # [SPRINT1-FIX-D]
+            chg_2h  = get_chg_from_candles(candles, 2)
             funding = BitgetClient.get_funding(sym)
 
             coin_data = CoinData(
@@ -3068,25 +2650,18 @@ def main():
                 funding=funding,
                 candles=candles,
                 btc_chg_1h=btc_chg_1h,
-                btc_chg_4h=btc_chg_4h,    # [FIX-2]
+                btc_chg_4h=btc_chg_4h,
                 btc_chg_24h=btc_chg_24h,
-                chg_2h=chg_2h,             # [SPRINT1-FIX-D]
+                chg_2h=chg_2h,
                 clz=clz_data.get(sym, ClzData()),
             )
 
-
-        # ══════════════════════════════════════════════════════════════════════
-        # [v17-GC#2] CHG_1H LATE ENTRY GATE
-        # Optimal: 3-6% (HIT 37%), Reject: >=8% (late entry, HIT 33%)
-        # ══════════════════════════════════════════════════════════════════════
-        except Exception as e:
-            log.error(f"Filter validation error: {e}")
-            pass
-        pass_gc2, reason_gc2 = v17_filter_gc2_chg1h(coin_data.chg_1h, sym)
-        if not pass_gc2:
-            log.info(f"[v17-GC#2] {sym} REJECTED: {reason_gc2}")
-            continue
-
+            # [v17-GC#2] CHG_1H LATE ENTRY GATE
+            if CONFIG.get("v17_gc2_enabled", False):
+                pass_gc2, reason_gc2 = v17_filter_gc2_chg1h(coin_data.chg_1h, sym)
+                if not pass_gc2:
+                    log.info(f"[v17-GC#2] {sym} REJECTED: {reason_gc2}")
+                    continue
 
             result = final_score_coin(coin_data, p1_score)
             if result:
@@ -3097,13 +2672,9 @@ def main():
         except Exception as e:
             log.warning(f"  {sym} final scoring error: {e}")
 
-    # ── Step 6: Sort & send alerts ────────────────────────────────────────────
     final_results.sort(key=lambda x: x.score, reverse=True)
     max_alerts = CONFIG["max_alerts_per_scan"]
 
-    # [S4-FIX-1] Winrate gate: pisah sinyal yang layak Telegram vs hanya observasi
-    # Sinyal yang lolos gate → Telegram + cooldown + simpan DB full metadata
-    # Sinyal yang TIDAK lolos → tetap simpan DB (untuk learning), tapi TANPA Telegram & cooldown
     gated_pass:  List[Tuple[ScoreResult, List[str], str]] = []
     gated_fail:  List[Tuple[ScoreResult, List[str], str]] = []
     for res in final_results:
@@ -3119,7 +2690,6 @@ def main():
     log.info(f"    ⚪ Di bawah gate     : {len(gated_fail)} → hanya disimpan untuk observasi")
     log.info(f"{'═'*70}\n")
 
-    # ── Kirim sinyal yang LOLOS gate ke Telegram ──────────────────────────────
     sent = 0
     for rank, (res, matched, label) in enumerate(gated_pass[:10], 1):
         msg = build_alert(res, rank)
@@ -3128,14 +2698,9 @@ def main():
         if sent < max_alerts:
             if send_telegram(msg):
                 sent += 1
-            # Simpan ke DB + trigger cooldown (hanya untuk sinyal yang lolos gate)
             entry_price = res.entry["entry"] if res.entry else res.price
             set_alert(res.symbol, res.score, res.phase, entry_price, result=res)
 
-    # ── Log sinyal yang TIDAK lolos (observasi only, tanpa kirim & cooldown) ─
-    # Tetap simpan ke signal_outcomes supaya bisa dipakai untuk analisis future
-    # (kalau suatu saat pola baru ditemukan, data ini sudah tersedia).
-    # TIDAK masuk tabel 'alerts' jadi tidak trigger cooldown.
     if gated_fail:
         log.info(f"\n{'─'*70}")
         log.info(f"  📊 SINYAL OBSERVASI (tidak dikirim, tidak kena cooldown):")
@@ -3144,7 +2709,6 @@ def main():
             log.info(f"    [{rank}] {res.symbol} score={res.score} phase={res.phase} "
                      f"T2={t2_val} D={res.confluence.cat_d} c1h={res.chg_1h:+.1f}% "
                      f"vol=${res.vol_24h/1e6:.1f}M | reason: {label}")
-            # Simpan ke DB untuk outcome tracking (tanpa alerts.id → tanpa cooldown)
             try:
                 conn = sqlite3.connect(CONFIG["history_db"])
                 c = conn.cursor()
@@ -3174,7 +2738,7 @@ def main():
                     res.components.get("tier1_clz"),
                     res.components.get("tier2_clz"),
                     res.components.get("tier3_technical"),
-                    "v3_24h_observed",   # ← tag khusus: sinyal observasi, bukan alert
+                    "v3_24h_observed",
                 ))
                 conn.commit()
                 conn.close()
