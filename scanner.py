@@ -237,7 +237,7 @@ CONFIG: Dict = {
     "v17_1_chg1h_momentum_bonus": 25,
     "v17_1_chg1h_reject_threshold": 20.0,
     
-    "v17_1_funding_filter_enabled": False,
+    "v17_1_funding_filter_enabled": False,   # DISABLED per validation
     
     "v17_1_chg24h_filter_enabled": True,
     "v17_1_chg24h_min": 12.0,
@@ -1943,6 +1943,27 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
 
     is_cont = (phase.phase == "CONTINUATION")
     vg      = CONFIG["velocity_gates"]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # [v17.1 CORRECTION #1] CHG_1H MOMENTUM BONUS - DIPERIKSA LEBIH AWAL
+    # dan mempengaruhi gate chg_2h untuk CONTINUATION
+    # ══════════════════════════════════════════════════════════════════════════
+    momentum_bonus_active = False
+    chg1h_bonus = 0
+    if CONFIG.get("v17_1_chg1h_momentum_bonus_enabled", False):
+        chg_1h = data.chg_1h
+        if CONFIG["v17_1_chg1h_momentum_min"] <= chg_1h <= CONFIG["v17_1_chg1h_momentum_max"]:
+            chg1h_bonus = CONFIG["v17_1_chg1h_momentum_bonus"]
+            momentum_bonus_active = True
+            log.info(f"  [v17.1] {sym} CHG_1H MOMENTUM BONUS: "
+                     f"{chg_1h:.1f}% → +{chg1h_bonus} points (strong trend continuation)")
+        elif chg_1h > CONFIG["v17_1_chg1h_reject_threshold"]:
+            log.info(f"  ✗ {sym} [v17.1] REJECTED: CHG_1H too late "
+                     f"({chg_1h:.1f}% > {CONFIG['v17_1_chg1h_reject_threshold']}%)")
+            return None
+
+    # ── Velocity gates ────────────────────────────────────────────────────────
+    # Untuk CONTINUATION dengan momentum bonus, kita longgarkan gate chg_2h
     if phase.phase not in ["DOWNTREND", "WEAK"]:
         if data.chg_24h < vg["chg_24h_min"]:
             log.info(f"  ✗ {sym} REJECT: chg_24h={data.chg_24h:+.1f}% < min"); return None
@@ -1957,6 +1978,12 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
 
         if is_cont:
             chg_2h_max = vg.get("chg_2h_max_continuation", 8.0)
+            # Jika momentum bonus aktif, kita naikkan toleransi chg_2h
+            if momentum_bonus_active:
+                # Longgarkan, misal 1.2x dari chg_1h atau minimal 8.0
+                relaxed = max(chg_2h_max, data.chg_1h * 1.2)
+                log.info(f"  [v17.1] {sym} chg_2h gate relaxed to {relaxed:.1f}% due to momentum bonus")
+                chg_2h_max = relaxed
             if data.chg_2h > chg_2h_max:
                 log.info(f"  ✗ {sym} [CONTINUATION] REJECT: chg_2h={data.chg_2h:+.1f}% > {chg_2h_max}% (pump sudah terjadi)")
                 return None
@@ -1976,21 +2003,7 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
         if data.chg_1h < vg.get("chg_1h_min_reversal", -3.0):
             log.info(f"  ✗ {sym} [{phase.phase}] REJECT: chg_1h={data.chg_1h:+.1f}%"); return None
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # [v17.1 CORRECTION #1] CHG_1H MOMENTUM BONUS
-    # ══════════════════════════════════════════════════════════════════════════
-    chg1h_bonus = 0
-    if CONFIG.get("v17_1_chg1h_momentum_bonus_enabled", False):
-        chg_1h = data.chg_1h
-        if CONFIG["v17_1_chg1h_momentum_min"] <= chg_1h <= CONFIG["v17_1_chg1h_momentum_max"]:
-            chg1h_bonus = CONFIG["v17_1_chg1h_momentum_bonus"]
-            log.info(f"  [v17.1] {sym} CHG_1H MOMENTUM BONUS: "
-                     f"{chg_1h:.1f}% → +{chg1h_bonus} points (strong trend continuation)")
-        elif chg_1h > CONFIG["v17_1_chg1h_reject_threshold"]:
-            log.info(f"  ✗ {sym} [v17.1] REJECTED: CHG_1H too late "
-                     f"({chg_1h:.1f}% > {CONFIG['v17_1_chg1h_reject_threshold']}%)")
-            return None
-
+    # ── CAT-A: Derivatives ────────────────────────────────────────────────────
     ls_sc,   ls_d   = score_long_short_ratio(data.clz)
     bv_sc,   bv_d   = score_buy_volume_ratio(data.clz)
     fund_sc, fund_d = score_funding_trend(data.clz, data.funding)
@@ -1998,6 +2011,12 @@ def final_score_coin(data: CoinData, phase1_score: int) -> Optional[ScoreResult]
     oi_sc,   oi_d   = score_oi_buildup(data.clz)
     liq_sc,  liq_d  = score_liquidations(data.clz)
 
+    # [v17.1 CORRECTION #2] Nonaktifkan funding scoring (kecuali outlier rejection)
+    if CONFIG.get("v17_1_funding_filter_enabled", False) is False:
+        # funding tidak memberi kontribusi skor, hanya untuk log dan outlier rejection
+        fund_sc = 0
+        log.debug(f"  [v17.1] {sym} funding score set to 0 (funding filter disabled)")
+    # Outlier funding tetap hard reject (penting)
     if fund_d.get("warning") == "OUTLIER_SKIPPED":
         log.info(f"  ✗ {sym} REJECT: funding={data.funding*100:.4f}% anomali "
                  f"(< -0.10%) — hard reject [S3-FIX-8 confirmed]")
@@ -2656,7 +2675,7 @@ def main():
                 clz=clz_data.get(sym, ClzData()),
             )
 
-            # [v17-GC#2] CHG_1H LATE ENTRY GATE
+            # [v17-GC#2] CHG_1H LATE ENTRY GATE (opsional, bisa dimatikan jika bertentangan dengan momentum bonus)
             if CONFIG.get("v17_gc2_enabled", False):
                 pass_gc2, reason_gc2 = v17_filter_gc2_chg1h(coin_data.chg_1h, sym)
                 if not pass_gc2:
