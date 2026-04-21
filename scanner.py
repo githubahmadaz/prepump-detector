@@ -3079,6 +3079,9 @@ def main():
         # [v17-GC#2] CHG_1H LATE ENTRY GATE
         # Optimal: 3-6% (HIT 37%), Reject: >=8% (late entry, HIT 33%)
         # ══════════════════════════════════════════════════════════════════════
+        except Exception as e:
+            log.error(f"Filter validation error: {e}")
+            pass
         pass_gc2, reason_gc2 = v17_filter_gc2_chg1h(coin_data.chg_1h, sym)
         if not pass_gc2:
             log.info(f"[v17-GC#2] {sym} REJECTED: {reason_gc2}")
